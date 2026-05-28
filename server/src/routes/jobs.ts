@@ -4,6 +4,7 @@ import { generateBatchForJob } from '../services/generation/questionGeneration.j
 import { reviewBatchForJob } from '../services/review/reviewPipeline.js';
 import { auditBatchForJob } from '../services/audit/auditPipeline.js';
 import { processAllImageQuestions } from '../services/images/imageGeneration.js';
+import { reprocessFlaggedForJob } from '../services/review/reprocessFlagged.js';
 
 export const jobsRouter = Router();
 
@@ -96,6 +97,16 @@ jobsRouter.delete('/:id', async (req, res, next) => {
 jobsRouter.post('/:id/retry-images', async (req, res, next) => {
   try {
     const result = await processAllImageQuestions(req.params.id);
+    res.json(result);
+  } catch (e) {
+    next(e);
+  }
+});
+
+// Reprocess flagged questions (fix + re-review + re-audit)
+jobsRouter.post('/:id/reprocess-flagged', async (req, res, next) => {
+  try {
+    const result = await reprocessFlaggedForJob(req.params.id);
     res.json(result);
   } catch (e) {
     next(e);

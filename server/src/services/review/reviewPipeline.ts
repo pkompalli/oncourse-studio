@@ -669,7 +669,7 @@ export async function reviewBatchForJob(jobId: string): Promise<{
 }> {
   const cached = runningReviews.get(jobId);
   if (cached) {
-    if (cached.status === 'complete') runningReviews.delete(jobId);
+    if (cached.status === 'complete' || cached.status === 'failed') runningReviews.delete(jobId);
     return {
       status: cached.status, phase: cached.phase, step: cached.step,
       reviewed: cached.reviewed, fixed: cached.fixed, total: cached.total,

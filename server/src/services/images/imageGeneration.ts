@@ -163,12 +163,27 @@ async function generateAndStoreImage(
     return false;
   }
 
+  // Update image URL and clear stale structural-failure scores if present
+  const updateData: Record<string, unknown> = {
+    image_url: publicUrl,
+    image_source: `AI Generated (${OPENAI_IMAGE_MODEL})`,
+  };
+
+  // If this question was previously scored as structural failure (missing image),
+  // reset scores so it gets properly re-evaluated in audit
+  const prevScore = question.validator_score as number | null;
+  if (prevScore !== null && prevScore <= 3) {
+    updateData.validator_score = null;
+    updateData.adversarial_score = null;
+    updateData.quality_score = null;
+    updateData.combined_score = null;
+    updateData.audit_trail = [];
+    updateData.status = 'reviewed';
+  }
+
   await supabase
     .from('qb_questions')
-    .update({
-      image_url: publicUrl,
-      image_source: `AI Generated (${OPENAI_IMAGE_MODEL})`,
-    })
+    .update(updateData)
     .eq('id', qId);
 
   console.log(`    ✓ Image generated for Q${qNum}`);

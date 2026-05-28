@@ -1,7 +1,7 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useAppStore } from '../../store/appStore';
-import { questions as questionsApi } from '../../services/api';
-import { Download, CheckCircle2, AlertTriangle, ImageIcon, ChevronDown, ChevronUp, Loader2 } from 'lucide-react';
+import { jobs, questions as questionsApi } from '../../services/api';
+import { Download, CheckCircle2, AlertTriangle, ImageIcon, ChevronDown, ChevronUp, Loader2, RefreshCw } from 'lucide-react';
 import { displayStatus } from '../../utils/questionStatus';
 import QuestionImage from '../common/QuestionImage';
 import type { Question } from '../../types';
@@ -10,12 +10,13 @@ export default function Step6Export() {
   const { job, questions, setQuestions } = useAppStore();
   const [expandedQ, setExpandedQ] = useState<string | null>(null);
 
-  // Load questions if not already loaded
+  // Load questions (always refresh on mount to pick up reprocess changes)
   useEffect(() => {
-    if (job && questions.length === 0) {
+    if (job) {
       questionsApi.list(job.id).then((res) => setQuestions((res.questions || []) as Question[])).catch(() => {});
     }
-  }, [job, questions.length, setQuestions]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [job?.id]);
 
   const approvedCount = questions.filter((q) => {
     const ds = displayStatus(q as Record<string, unknown>);
@@ -74,6 +75,70 @@ export default function Step6Export() {
     return items;
   };
 
+  // ── Reprocess flagged state ──
+  const [reprocessing, setReprocessing] = useState(false);
+  const [reprocessStatus, setReprocessStatus] = useState<{
+    status: string; phase: string; step: string;
+    total: number; reApproved: number; stillFlagged: number;
+    events: string[];
+  } | null>(null);
+  const reprocessPollingRef = useRef(false);
+  const reprocessFeedRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (reprocessFeedRef.current) {
+      reprocessFeedRef.current.scrollTop = reprocessFeedRef.current.scrollHeight;
+    }
+  }, [reprocessStatus?.events]);
+
+  const startReprocess = async () => {
+    if (!job) return;
+    setReprocessing(true);
+    setReprocessStatus(null);
+    reprocessPollingRef.current = true;
+    pollReprocess(job.id);
+  };
+
+  const pollReprocess = async (jobId: string) => {
+    if (!reprocessPollingRef.current) return;
+    try {
+      const res = await jobs.reprocessFlagged(jobId);
+      setReprocessStatus({
+        status: res.status,
+        phase: res.phase,
+        step: res.step,
+        total: res.total,
+        reApproved: res.reApproved,
+        stillFlagged: res.stillFlagged,
+        events: res.events,
+      });
+
+      if (res.status === 'complete') {
+        reprocessPollingRef.current = false;
+        setReprocessing(false);
+        // Reload questions to reflect updated statuses
+        const qRes = await questionsApi.list(jobId);
+        setQuestions((qRes.questions || []) as Question[]);
+        return;
+      }
+
+      if (res.status === 'failed') {
+        reprocessPollingRef.current = false;
+        setReprocessing(false);
+        return;
+      }
+
+      setTimeout(() => pollReprocess(jobId), 3000);
+    } catch {
+      setTimeout(() => pollReprocess(jobId), 5000);
+    }
+  };
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => { reprocessPollingRef.current = false; };
+  }, []);
+
   const [exporting, setExporting] = useState(false);
 
   const handleExport = async () => {
@@ -118,6 +183,101 @@ export default function Step6Export() {
           <div className="text-sm text-amber-600">Flagged</div>
         </div>
       </div>
+
+      {/* Reprocess Flagged */}
+      {flaggedCount > 0 && !reprocessing && !reprocessStatus && (
+        <div className="flex items-center justify-between p-4 rounded-xl border border-amber-200 bg-amber-50">
+          <div>
+            <p className="text-sm font-medium text-amber-800">
+              {flaggedCount} questions flagged — fixable issues detected
+            </p>
+            <p className="text-xs text-amber-600 mt-0.5">
+              Automatically fix using audit feedback, retry missing images, then re-validate and re-audit
+            </p>
+          </div>
+          <button
+            onClick={startReprocess}
+            className="flex items-center gap-2 px-4 py-2 bg-amber-600 text-white rounded-lg font-medium hover:bg-amber-700 transition-colors shrink-0"
+          >
+            <RefreshCw className="w-4 h-4" />
+            Reprocess {flaggedCount} Flagged
+          </button>
+        </div>
+      )}
+
+      {/* Reprocess Progress */}
+      {reprocessing && reprocessStatus && (
+        <div className="space-y-3">
+          <div className="p-4 rounded-xl border border-indigo-200 bg-indigo-50">
+            <div className="flex items-center gap-3">
+              <Loader2 className="w-5 h-5 text-indigo-600 animate-spin shrink-0" />
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-medium text-indigo-800">{reprocessStatus.step}</p>
+                <p className="text-xs text-indigo-600 mt-0.5">
+                  Phase: {reprocessStatus.phase} | {reprocessStatus.total} questions
+                  {reprocessStatus.reApproved > 0 && ` | ${reprocessStatus.reApproved} recovered`}
+                </p>
+              </div>
+            </div>
+          </div>
+
+          {reprocessStatus.events.length > 0 && (
+            <div className="rounded-lg border border-slate-200 bg-slate-900 overflow-hidden">
+              <div className="px-3 py-2 bg-slate-800 border-b border-slate-700 flex items-center gap-2">
+                <div className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
+                <span className="text-xs font-medium text-slate-300">Reprocess Feed</span>
+              </div>
+              <div
+                ref={reprocessFeedRef}
+                className="p-3 max-h-40 overflow-y-auto font-mono text-xs text-slate-300 space-y-1"
+              >
+                {reprocessStatus.events.map((event, i) => (
+                  <div key={i} className="flex gap-2">
+                    <span className="text-slate-500 shrink-0">{String(i + 1).padStart(2, '0')}</span>
+                    <span className={
+                      event.includes('ERROR') ? 'text-red-400' :
+                      event.includes('approved') || event.includes('recovered') ? 'text-green-400' :
+                      event.includes('flagged') ? 'text-amber-400' :
+                      event.includes('Fixing') || event.includes('Fixed') ? 'text-purple-400' :
+                      event.includes('Validator') || event.includes('Adversarial') ? 'text-blue-400' :
+                      event.includes('Audit') ? 'text-cyan-400' :
+                      'text-slate-300'
+                    }>
+                      {event}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Reprocess Complete */}
+      {!reprocessing && reprocessStatus && reprocessStatus.status === 'complete' && (
+        <div className="p-4 rounded-xl border border-green-200 bg-green-50">
+          <div className="flex items-center gap-3">
+            <CheckCircle2 className="w-5 h-5 text-green-600 shrink-0" />
+            <div>
+              <p className="text-sm font-medium text-green-800">{reprocessStatus.step}</p>
+              <p className="text-xs text-green-600 mt-0.5">
+                {reprocessStatus.reApproved} questions recovered to approved
+                {reprocessStatus.stillFlagged > 0 && ` · ${reprocessStatus.stillFlagged} still need manual attention`}
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Reprocess Failed */}
+      {!reprocessing && reprocessStatus && reprocessStatus.status === 'failed' && (
+        <div className="p-4 rounded-xl border border-red-200 bg-red-50">
+          <div className="flex items-center gap-3">
+            <AlertTriangle className="w-5 h-5 text-red-600 shrink-0" />
+            <p className="text-sm font-medium text-red-800">{reprocessStatus.step}</p>
+          </div>
+        </div>
+      )}
 
       {/* Question list */}
       <div className="space-y-2">
@@ -263,6 +423,12 @@ export default function Step6Export() {
                             adversarial_fix: 'Adversarial Fix',
                             adversarial_image_fix: 'Adversarial Image Fix',
                             audit: 'Final Audit',
+                            reprocess_fix: 'Reprocess Fix',
+                            reprocess_validator: 'Reprocess Validator',
+                            reprocess_validator_fix: 'Reprocess Validator Fix',
+                            reprocess_adversarial: 'Reprocess Adversarial',
+                            reprocess_adversarial_fix: 'Reprocess Adversarial Fix',
+                            reprocess_audit: 'Reprocess Audit',
                           };
                           const phaseColor: Record<string, string> = {
                             validator: 'text-blue-700 bg-blue-50',
@@ -272,6 +438,12 @@ export default function Step6Export() {
                             adversarial_fix: 'text-purple-700 bg-purple-50',
                             adversarial_image_fix: 'text-pink-700 bg-pink-50',
                             audit: score && score > 7 ? 'text-green-700 bg-green-50' : 'text-amber-700 bg-amber-50',
+                            reprocess_fix: 'text-teal-700 bg-teal-50',
+                            reprocess_validator: 'text-blue-700 bg-blue-50',
+                            reprocess_validator_fix: 'text-purple-700 bg-purple-50',
+                            reprocess_adversarial: 'text-orange-700 bg-orange-50',
+                            reprocess_adversarial_fix: 'text-purple-700 bg-purple-50',
+                            reprocess_audit: score && score > 7 ? 'text-green-700 bg-green-50' : 'text-amber-700 bg-amber-50',
                           };
 
                           return (

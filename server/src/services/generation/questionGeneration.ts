@@ -575,14 +575,10 @@ export async function generateBatchForJob(
   // If already running or complete, return current status
   const cached = runningJobs.get(jobId);
   if (cached) {
-    if (cached.status === 'complete') {
-      runningJobs.delete(jobId); // clean up
-      return cached;
-    }
     return cached;
   }
 
-  // Check if already done in DB
+  // Check DB status
   const { data: job, error: jobErr } = await supabase
     .from('qb_jobs')
     .select('*')
@@ -595,6 +591,16 @@ export async function generateBatchForJob(
     return {
       status: 'complete',
       completed: (progress.total as number) || 0,
+      total: (progress.total as number) || 0,
+    };
+  }
+
+  // Already generating (e.g. server restarted mid-run) — report current progress, don't re-trigger
+  if (job.status === 'generating') {
+    const progress = (job.progress || {}) as Record<string, unknown>;
+    return {
+      status: 'generating',
+      completed: (progress.completed as number) || 0,
       total: (progress.total as number) || 0,
     };
   }

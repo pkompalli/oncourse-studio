@@ -57,6 +57,14 @@ export const jobs = {
 
   retryImages: (id: string) =>
     request<{ totalProcessed: number; totalSuccess: number; totalFailed: number }>(`/jobs/${id}/retry-images`, { method: 'POST' }),
+
+  reprocessFlagged: (id: string) =>
+    request<{
+      status: string; phase: string; step: string;
+      total: number; processed: number; fixed: number;
+      imageRetried: number; reApproved: number; stillFlagged: number;
+      events: string[];
+    }>(`/jobs/${id}/reprocess-flagged`, { method: 'POST' }),
 };
 
 // ── Questions ───────────────────────────────────────────────
