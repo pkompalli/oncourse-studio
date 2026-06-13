@@ -60,6 +60,7 @@ export default function Step2Generate() {
   const [loadingRecents, setLoadingRecents] = useState(false);
   const [expandedSubject, setExpandedSubject] = useState<string | null>(null);
   const [viewStage, setViewStage] = useState<SnapshotStage | null>(null);
+  const [questionsPerTopic, setQuestionsPerTopic] = useState(5);
   const { snapshotQuestions, loading: snapshotLoading, availableStages } = useSnapshots(job?.id, viewStage);
   const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
 
@@ -198,12 +199,14 @@ export default function Step2Generate() {
 
     try {
       const jobType = contentMode === 'lessons' ? 'lessons' : qbankMode;
+      const isTopicWise = contentMode === 'qbank' && (qbankMode === 'topic_wise' || qbankMode === 'topic_qbank');
       const res = await jobs.create({
         course_id: course.id,
         type: jobType,
         config: {
           contentMode,
           qbankMode: contentMode === 'qbank' ? qbankMode : undefined,
+          ...(isTopicWise ? { questions_per_topic: questionsPerTopic } : {}),
         },
       });
       const newJob = res.job as Job;
@@ -283,12 +286,27 @@ export default function Step2Generate() {
           </p>
         </div>
         {overallStatus === 'idle' && !job && (
-          <button
-            onClick={startGeneration}
-            className="flex items-center gap-2 px-6 py-2 bg-indigo-600 text-white rounded-lg font-medium hover:bg-indigo-700 transition-colors"
-          >
-            <Play className="w-4 h-4" /> Start Generation
-          </button>
+          <div className="flex items-center gap-4">
+            {contentMode === 'qbank' && (qbankMode === 'topic_wise' || qbankMode === 'topic_qbank') && (
+              <div className="flex items-center gap-2">
+                <label className="text-sm text-slate-600 whitespace-nowrap">Qs per topic</label>
+                <input
+                  type="number"
+                  min={1}
+                  max={20}
+                  value={questionsPerTopic}
+                  onChange={(e) => setQuestionsPerTopic(Math.max(1, Math.min(20, parseInt(e.target.value) || 5)))}
+                  className="w-16 px-2 py-1.5 border border-slate-300 rounded-lg text-sm text-center focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+                />
+              </div>
+            )}
+            <button
+              onClick={startGeneration}
+              className="flex items-center gap-2 px-6 py-2 bg-indigo-600 text-white rounded-lg font-medium hover:bg-indigo-700 transition-colors"
+            >
+              <Play className="w-4 h-4" /> Start Generation
+            </button>
+          </div>
         )}
         {overallStatus === 'done' && (
           <button

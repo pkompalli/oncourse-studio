@@ -173,7 +173,7 @@ export default function Step1Structure() {
   const [examFormatLoading, setExamFormatLoading] = useState(false);
   const examFormatFileRef = useRef<HTMLInputElement>(null);
 
-  const needsExamFormat = contentMode === 'qbank' && qbankMode === 'mock_exam';
+  const needsExamFormat = contentMode === 'qbank';
 
   // ── Auto-load recent courses on mount ──
   useEffect(() => {
@@ -260,7 +260,7 @@ export default function Step1Structure() {
     setExamFormatLoading(true);
     setError('');
     try {
-      const res = await courses.analyzeExamFormat(course.id);
+      const res = await courses.analyzeExamFormat(course.id, qbankMode);
       const updated = res.course as Course;
       setCourse(updated);
     } catch (e) {

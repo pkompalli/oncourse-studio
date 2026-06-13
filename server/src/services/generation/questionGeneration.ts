@@ -81,6 +81,7 @@ interface SubjectTask {
   hyt_topics: string[];
   exam_params: { style: string; num_options: number; marking: string };
   subject_profile?: Record<string, unknown>;
+  existing_stems_by_topic?: Map<string, string[]>;
   _batch?: string;
 }
 
@@ -205,6 +206,31 @@ function buildProfessorPrompt(subjectTask: SubjectTask, courseName: string): str
     profileSection += '\n';
   }
 
+  // Existing questions exclusion list (grouped by topic)
+  const existingByTopic = subjectTask.existing_stems_by_topic;
+  let exclusionSection = '';
+  if (existingByTopic && existingByTopic.size > 0) {
+    let totalExisting = 0;
+    const topicBlocks: string[] = [];
+    for (const [topic, stems] of existingByTopic) {
+      const label = topic === '_general' ? '(General / untagged)' : topic;
+      // Cap at 50 stems per topic, 80 chars each
+      const capped = stems.slice(0, 50);
+      totalExisting += capped.length;
+      const stemList = capped.map((s, i) => `    ${i + 1}. ${s.slice(0, 80)}`).join('\n');
+      topicBlocks.push(`  ${label}:\n${stemList}`);
+    }
+    exclusionSection = `
+EXISTING QUESTIONS — DO NOT DUPLICATE
+──────────────────────────────────────
+${totalExisting} questions already exist in the question bank for ${subject}, grouped by topic.
+You MUST NOT create questions that test the same clinical fact, scenario, or concept.
+Each of your questions must cover a DIFFERENT clinical fact.
+
+${topicBlocks.join('\n\n')}
+`;
+  }
+
   const batchLabel = subjectTask._batch || '';
   const batchNote = batchLabel ? ` (batch ${batchLabel})` : '';
 
@@ -226,7 +252,7 @@ ${bloomStr}
 HIGH-YIELD TOPICS FROM THIS YEAR'S SYLLABUS
 ────────────────────────────────────────────
 ${hytStr}
-${profileSection}
+${profileSection}${exclusionSection}
 YOUR RESPONSIBILITIES AS EXAMINER
 ──────────────────────────────────
 - Every question must reflect authentic ${courseName} standard and clinical depth for ${subject}
@@ -466,6 +492,40 @@ async function runAllProfessors(
   const completedSubjects: string[] = [];
   let totalQuestionsGenerated = 0;
 
+  // Fetch existing questions for this course (from previous jobs) to avoid duplicates
+  // Grouped by subject+topic for precise deduplication
+  const { data: existingQs } = await supabase
+    .from('qb_questions')
+    .select('subject, topic, question')
+    .eq('course_id', courseId)
+    .neq('job_id', jobId);
+
+  const stemsBySubjectTopic = new Map<string, string[]>();
+  if (existingQs && existingQs.length > 0) {
+    for (const q of existingQs) {
+      const key = `${(q.subject || '').toLowerCase().trim()}::${(q.topic || '').toLowerCase().trim()}`;
+      if (!stemsBySubjectTopic.has(key)) stemsBySubjectTopic.set(key, []);
+      stemsBySubjectTopic.get(key)!.push(q.question);
+    }
+    // Attach per-topic stems to each task
+    for (const task of tasks) {
+      const subjKey = task.subject.toLowerCase().trim();
+      const topicMap = new Map<string, string[]>();
+      for (const topic of task.hyt_topics) {
+        const key = `${subjKey}::${topic.toLowerCase().trim()}`;
+        const stems = stemsBySubjectTopic.get(key);
+        if (stems && stems.length > 0) topicMap.set(topic, stems);
+      }
+      // Also check for stems with empty topic (older data)
+      const noTopicKey = `${subjKey}::`;
+      const noTopicStems = stemsBySubjectTopic.get(noTopicKey);
+      if (noTopicStems && noTopicStems.length > 0) topicMap.set('_general', noTopicStems);
+
+      if (topicMap.size > 0) task.existing_stems_by_topic = topicMap;
+    }
+    console.log(`📋 Found ${existingQs.length} existing questions across previous jobs for deduplication`);
+  }
+
   console.log(`\n🚀 Launching ${totalSubjects} professor agents in parallel for ${courseName}\n`);
 
   await supabase
@@ -566,6 +626,101 @@ async function runAllProfessors(
   console.log(`\n🏁 Generation complete: ${totalQuestionsGenerated} questions across ${totalSubjects} subjects\n`);
 }
 
+// ── Build tasks for topic-wise mode ──
+// Uses exam format for style/bloom's/image% but derives question counts from course structure
+
+async function buildTopicWiseTasks(
+  courseStructure: Record<string, unknown>,
+  examFormat: Record<string, unknown>,
+  courseName: string,
+  questionsPerTopic: number = 5
+): Promise<SubjectTask[]> {
+  const subjects = (courseStructure.subjects as Array<Record<string, unknown>>) || [];
+  if (subjects.length === 0) throw new Error('Course has no subjects');
+
+  // Bloom's distribution from exam format (same logic as buildSubjectTasks)
+  const bloomsRaw = (examFormat.blooms_distribution as Record<string, number>) || {};
+  const l2to5: Record<string, number> = {};
+  for (const [k, v] of Object.entries(bloomsRaw)) {
+    if (['2', '3', '4', '5'].some((n) => k.startsWith(n))) {
+      l2to5[k] = v;
+    }
+  }
+  if (Object.keys(l2to5).length === 0) {
+    Object.assign(l2to5, { '2_understand': 1, '3_apply': 1, '4_analyze': 1, '5_evaluate': 1 });
+  }
+  const totalBloom = Object.values(l2to5).reduce((a, b) => a + b, 0) || 1;
+  const bloomRatios: Record<string, number> = {};
+  for (const [k, v] of Object.entries(l2to5)) bloomRatios[k] = v / totalBloom;
+
+  // Exam params from exam format
+  const qf = (examFormat.question_format as Record<string, unknown>) || {};
+  const examParams = {
+    style: (qf.type as string) || 'single_best_answer',
+    num_options: (qf.num_options as number) || 4,
+    marking: (examFormat.negative_marking as string) || 'Standard positive marking',
+  };
+
+  // Image percentages by subject from exam format
+  const imgBySubject = (examFormat.image_percentage_by_subject as Record<string, number>) || {};
+  const defaultImgPct = (qf.image_questions_percentage as number) || 20;
+
+  function findImgPct(subjectName: string): number {
+    const key = subjectName.trim().toLowerCase();
+    if (subjectName in imgBySubject) return imgBySubject[subjectName];
+    for (const [k, v] of Object.entries(imgBySubject)) {
+      if (k.toLowerCase().trim() === key || k.toLowerCase().includes(key) || key.includes(k.toLowerCase())) return v;
+    }
+    return defaultImgPct;
+  }
+
+  const tasks: SubjectTask[] = [];
+
+  for (const subj of subjects) {
+    const name = ((subj.name as string) || '').trim();
+    if (!name) continue;
+
+    const topics = (subj.topics as Array<Record<string, unknown>>) || [];
+    const topicNames = topics.map((t) => (t.name as string) || '').filter(Boolean);
+    const numQ = Math.max(questionsPerTopic, topicNames.length * questionsPerTopic);
+    const imgPct = findImgPct(name);
+    const numImageQ = Math.round(numQ * imgPct / 100);
+
+    // Bloom counts proportional from ratios
+    const bloomCounts: Record<string, number> = {};
+    let remainder = numQ;
+    const sortedLevels = Object.entries(bloomRatios).sort((a, b) => b[1] - a[1]);
+    for (let i = 0; i < sortedLevels.length; i++) {
+      const [level, ratio] = sortedLevels[i];
+      if (i === sortedLevels.length - 1) {
+        bloomCounts[level] = Math.max(0, remainder);
+      } else {
+        const c = Math.round(numQ * ratio);
+        bloomCounts[level] = c;
+        remainder -= c;
+      }
+    }
+
+    tasks.push({
+      subject: name,
+      num_questions: numQ,
+      num_image_qs: numImageQ,
+      bloom_counts: bloomCounts,
+      hyt_topics: topicNames,
+      exam_params: examParams,
+    });
+  }
+
+  // Generate subject profiles in parallel
+  const profilePromises = tasks.map(async (task) => {
+    const profile = await generateSubjectProfile(task.subject, courseName, task.hyt_topics);
+    task.subject_profile = profile;
+  });
+  await Promise.all(profilePromises);
+
+  return tasks;
+}
+
 // ── Main entry: start or check generation for a job ──
 
 export async function generateBatchForJob(
@@ -616,11 +771,19 @@ export async function generateBatchForJob(
   const courseName = course.name as string;
   const structure = course.structure as Record<string, unknown>;
   const examFormat = (course.exam_format || {}) as Record<string, unknown>;
+  const jobType = (job.type as string) || '';
 
-  // Step 1: Build subject tasks with profiles (parallel LLM calls)
-  console.log(`Building subject tasks for ${courseName}...`);
-  const tasks = await buildSubjectTasks(examFormat, structure, examFormat, courseName);
+  // Step 1: Build subject tasks — topic-wise uses course structure directly, mock exam uses exam format
+  console.log(`Building subject tasks for ${courseName} (${jobType})...`);
+  const jobConfig = (job.config || {}) as Record<string, unknown>;
+  const tasks = jobType === 'topic_wise' || jobType === 'topic_qbank'
+    ? await buildTopicWiseTasks(structure, examFormat, courseName, (jobConfig.questions_per_topic as number) || 5)
+    : await buildSubjectTasks(examFormat, structure, examFormat, courseName);
   const totalSubjects = tasks.length;
+
+  if (totalSubjects === 0) {
+    throw new Error('No subjects found to generate questions for. Check course structure.');
+  }
 
   // Mark as running
   runningJobs.set(jobId, { status: 'generating', completed: 0, total: totalSubjects });

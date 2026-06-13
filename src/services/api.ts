@@ -28,8 +28,11 @@ export const courses = {
   delete: (id: string) =>
     request<{ success: boolean }>(`/courses/${id}`, { method: 'DELETE' }),
 
-  analyzeExamFormat: (id: string) =>
-    request<{ course: unknown }>(`/courses/${id}/exam-format`, { method: 'POST' }),
+  analyzeExamFormat: (id: string, qbankMode?: string) =>
+    request<{ course: unknown }>(`/courses/${id}/exam-format`, {
+      method: 'POST',
+      body: JSON.stringify({ qbank_mode: qbankMode }),
+    }),
 };
 
 // ── Jobs ────────────────────────────────────────────────────

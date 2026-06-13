@@ -102,9 +102,11 @@ coursesRouter.delete('/:id', async (req, res, next) => {
   }
 });
 
-// Analyze exam format and fetch mock exam specs
+// Analyze exam format (and optionally fetch mock exam specs)
 coursesRouter.post('/:id/exam-format', async (req, res, next) => {
   try {
+    const { qbank_mode } = req.body || {};
+
     // Fetch current course
     const { data: course, error: fetchError } = await supabase
       .from('qb_courses')
@@ -120,15 +122,18 @@ coursesRouter.post('/:id/exam-format', async (req, res, next) => {
     // Step 1: Analyze exam format (question type, bloom's, difficulty, image %)
     const examFormat = await analyzeExamFormat(courseName, structure);
 
-    // Step 2: Fetch mock exam specs (total questions, per-subject distribution)
-    const subjects = ((structure.subjects as Array<{ name: string }>) || []).map((s) => s.name);
-    const mockSpecs = await fetchMockExamSpecs(courseName, subjects);
+    let combinedFormat: Record<string, unknown>;
 
-    // Merge into a single exam_format object
-    const combinedFormat = {
-      ...examFormat,
-      ...mockSpecs,
-    };
+    if (qbank_mode === 'topic_wise' || qbank_mode === 'topic_qbank') {
+      // Topic-wise: only need question style, bloom's, difficulty, image %
+      // No mock exam specs (total questions, subject distribution) needed
+      combinedFormat = examFormat;
+    } else {
+      // Mock exam: also fetch total questions, per-subject distribution
+      const subjects = ((structure.subjects as Array<{ name: string }>) || []).map((s) => s.name);
+      const mockSpecs = await fetchMockExamSpecs(courseName, subjects);
+      combinedFormat = { ...examFormat, ...mockSpecs };
+    }
 
     // Save to DB
     const { data, error } = await supabase
