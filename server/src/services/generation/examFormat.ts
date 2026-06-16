@@ -2,148 +2,155 @@ import { orCall, MODELS } from '../llm/openrouter.js';
 
 /**
  * MODULE 2: Exam Format Analyzer
- * Faithful port of V1 analyze_exam_format() (app.py lines 474-631)
  *
- * Determines question format, Bloom's distribution, difficulty distribution,
- * and image percentages by subject.
+ * Two-phase approach:
+ * Phase 1: Generate a detailed exam pattern profile (testing philosophy, stem style, etc.)
+ * Phase 2: Extract structured numbers (bloom's, difficulty, image % by subject)
+ *
+ * The pattern profile is stored alongside the numbers and threaded into generation prompts.
  */
 export async function analyzeExamFormat(
   courseName: string,
   courseStructure: Record<string, unknown>
 ): Promise<Record<string, unknown>> {
-  const examType = (courseStructure.exam_type as string) || 'general';
-  const domainChars = (courseStructure.domain_characteristics as string) || '';
-
   const subjects = (courseStructure.subjects as Array<{ name: string }>) || [];
   const subjectsList = subjects.map((s) => s.name);
-  const subjectsStr = subjectsList.length > 0 ? subjectsList.slice(0, 10).join(', ') : 'various subjects';
+  const subjectsStr = subjectsList.length > 0 ? subjectsList.slice(0, 15).join(', ') : 'various subjects';
 
-  const formatPrompt = `You are an assessment design expert with access to official exam data. Analyze the exam format for: ${courseName}
+  // ── Phase 1: Deep exam pattern profile ──
+  const patternPrompt = `You are a psychometrician and exam analysis expert. Produce a DETAILED question-pattern profile for: ${courseName}
 
-COURSE TYPE: ${examType}
-DOMAIN CHARACTERISTICS: ${domainChars}
-SUBJECTS IN COURSE: ${subjectsStr}
+SUBJECTS: ${subjectsStr}
 
-🔍 MANDATORY RESEARCH REQUIREMENT: Use OFFICIAL published exam specifications and statistics for ${courseName}:
+You must research and describe the SPECIFIC, DISTINCTIVE patterns of ${courseName} — not generic MCQ advice.
+Different exams test very differently even within medicine. For example:
+- NEET PG: Direct recall-heavy, one-liner stems, tests factual knowledge (drugs, doses, classifications, eponymous signs), minimal clinical reasoning, rapid-fire format
+- INICET: Conceptual and analytical, longer stems, tests understanding of mechanisms and "why", pattern-recognition over memorisation
+- USMLE Step 1: Basic science mechanisms applied to clinical vignettes, 2-3 step reasoning, integrates across disciplines
+- USMLE Step 2 CK: Long clinical vignettes (100+ words), next-best-step management, requires synthesising history/exam/labs
+- UKMLA AKT: Scenario-based primary care focus, 5 options, tests clinical decision-making in GP/community settings
+- PLAB: UK-focused clinical scenarios, patient safety emphasis, NHS-specific guidelines
 
-**For UKMLA AKT (UK Medical Licensing Assessment Applied Knowledge Test):**
-- Source: GMC (General Medical Council), UKMLA blueprint
-- Number of options: 5 (A, B, C, D, E) - CONFIRMED from official GMC specification
-- Image questions: ~30-40% overall (ECGs, radiology, dermatology, ophthalmology images)
-- Question style: Single best answer, clinical scenario-based
-- Avg stem: 60-80 words per question
-
-**For NEET PG (National Eligibility cum Entrance Test - Postgraduate):**
-- Source: NBE (National Board of Examinations), NEET PG information bulletin
-- Number of options: 4 (A, B, C, D) - CONFIRMED from official specification
-- Image questions: ~40% overall (varies 10-75% by subject)
-- Question style: Single best answer, clinically oriented
-
-**For USMLE (United States Medical Licensing Examination):**
-- Source: NBME, USMLE content outline
-- Number of options: 4-5 (varies by step)
-- Image questions: ~20-30% (anatomical, pathological, radiological images)
-- Question style: Clinical vignettes, single best answer
-
-Use the OFFICIAL specification for number of options - this is critical and must be accurate.
-
-Determine the optimal question bank format including:
-
-1. **Question Format**:
-   - MCQ type (single best answer, multiple correct, true/false, assertion-reason, etc.)
-   - Number of options (typically 4-5)
-   - Clinical vignette length (for medical exams)
-   - Stem complexity
-   - **CRITICAL**: image_questions_percentage - the TYPICAL percentage of image-based questions in this exam overall
-
-2. **Bloom's Taxonomy Distribution**:
-   - Level 1 (Remember/Recall): X%
-   - Level 2 (Understand): X%
-   - Level 3 (Apply): X%
-   - Level 4 (Analyze): X%
-   - Level 5 (Evaluate): X%
-   - Level 6 (Create): X%
-   - Level 7 (Integrate/Synthesize): X%
-
-   Consider:
-   - Medical exams: Higher emphasis on Apply/Analyze (clinical reasoning)
-   - Engineering exams: Balance of Understand/Apply/Analyze
-   - Certification exams: Focus on Apply/Evaluate
-
-3. **Difficulty Distribution**:
-   - Easy: X%
-   - Medium: X%
-   - Hard: X%
-
-4. **Image-Based Questions by Subject** (CRITICAL FOR MEDICAL EXAMS):
-   Research typical image percentages for each subject. Examples:
-   - NEET PG: Radiology ~75%, Ophthalmology ~60%, Medicine ~40%, Biochemistry ~10%
-   - USMLE Step 1: Pathology ~30%, Anatomy ~50%, Physiology ~15%
-
-   Provide subject-specific percentages as a map.
-
-5. **Domain-Specific Characteristics**:
-   - Medical: Case-based scenarios, image-based questions
-   - Engineering: Calculation-based, diagram interpretation
-   - Business: Case studies, scenario analysis
-
-OUTPUT FORMAT (strict JSON):
+Return ONLY a JSON object:
 {
-    "question_format": {
-        "type": "single_best_answer",
-        "num_options": 4,
-        "avg_stem_words": 50,
-        "uses_vignettes": true,
-        "image_questions_percentage": 40
-    },
-    "blooms_distribution": {
-        "1_remember": 15,
-        "2_understand": 15,
-        "3_apply": 30,
-        "4_analyze": 25,
-        "5_evaluate": 10,
-        "6_create": 5,
-        "7_integrate": 0
-    },
-    "difficulty_distribution": {
-        "easy": 20,
-        "medium": 50,
-        "hard": 30
-    },
-    "image_percentage_by_subject": {
-        "Radiology": 75,
-        "Internal Medicine": 40,
-        "Biochemistry": 10,
-        "Surgery": 45
-    },
-    "domain_characteristics": {
-        "key_features": ["feature1", "feature2"],
-        "memory_aids": "mnemonics|formulas|frameworks|acronyms",
-        "visual_elements": "high|medium|low"
-    }
+  "exam_board": "<official examining body — e.g. NBE, NBME, GMC>",
+  "examiner_role": "<how to roleplay the question-setter — e.g. 'senior NBE examiner', 'NBME item-writer', 'GMC assessment panel member'>",
+  "testing_philosophy": "<3-4 sentences: What does this exam fundamentally test? Recall vs reasoning vs clinical decision-making? Speed vs depth? What separates a pass from a fail?>",
+  "stem_style": {
+    "typical_format": "<e.g. 'one-liner direct question', 'short clinical scenario (2-3 lines)', 'long clinical vignette (5-8 lines)', 'two-step reasoning stem'>",
+    "avg_stem_words": <integer>,
+    "lead_in_patterns": ["<typical question endings — e.g. 'What is the most likely diagnosis?', 'Which of the following is the next best step?', 'What is the mechanism of action?'>"],
+    "what_the_stem_tests": "<1-2 sentences: Does the stem present a novel scenario requiring reasoning, or test direct factual recall? Does it require integrating multiple data points?>",
+    "common_stem_structures": ["<e.g. 'Patient demographics → presentation → single finding → ask diagnosis', 'Drug name → ask side effect', 'Lab values → ask interpretation'>"]
+  },
+  "option_style": {
+    "num_options": <integer — MUST match official spec>,
+    "option_characteristics": "<how options are constructed — e.g. 'short single-word/phrase options', 'options are diagnoses', 'options are management steps', 'mix of short and medium-length'>",
+    "distractor_philosophy": "<how wrong options are designed — e.g. 'close differentials that share 2-3 features', 'drugs from same class', 'factually true but not the BEST answer'>",
+    "typical_option_length": "<e.g. '2-5 words per option', '1-2 sentences per option'>"
+  },
+  "recall_vs_reasoning_ratio": {
+    "direct_recall_pct": <integer — % of questions that are pure factual recall>,
+    "applied_reasoning_pct": <integer — % requiring clinical reasoning or application>,
+    "description": "<1-2 sentences explaining the balance>"
+  },
+  "distinctive_patterns": [
+    "<pattern 1: something UNIQUE to this exam — e.g. 'NEET PG frequently tests exact drug doses and classification ranks', 'USMLE Step 1 loves mechanism-of-action vignettes where you identify the drug from its effect'>",
+    "<pattern 2>",
+    "<pattern 3>",
+    "<pattern 4>",
+    "<pattern 5>"
+  ],
+  "what_NOT_to_do": [
+    "<anti-pattern 1: something that would make questions NOT match this exam — e.g. 'Do not write long clinical vignettes for NEET PG — they use short direct stems', 'Do not test management algorithms for USMLE Step 1 — it is basic science focused'>",
+    "<anti-pattern 2>",
+    "<anti-pattern 3>"
+  ],
+  "example_stem_templates": [
+    "<a realistic example stem pattern (without actual content) showing the structure — e.g. 'A [age]-year-old [gender] presents with [symptom] for [duration]. On examination, [finding]. What is the most likely diagnosis?'>",
+    "<template 2>",
+    "<template 3>"
+  ]
 }
 
-Generate ONLY the JSON, no other text.`;
+Be HIGHLY specific to ${courseName}. If you are unsure about a detail, research it from the official exam body guidelines. Do NOT give generic advice.`;
 
-  const webFormatPrompt =
-    `Using your knowledge of the official question format and exam specifications for '${courseName}', ` +
-    `including official exam board guidelines, published blueprints, and candidate handbooks, ` +
-    `answer the following:\n\n` +
-    formatPrompt;
-
-  const response = await orCall(MODELS.STRUCTURE, '', webFormatPrompt, {
+  const patternResponse = await orCall(MODELS.STRUCTURE, '', patternPrompt, {
     temperature: 0.2,
     maxTokens: 4000,
   });
 
-  let text = response.content.trim();
-  if (text.includes('```json')) {
-    text = text.split('```json')[1].split('```')[0].trim();
-  } else if (text.includes('```')) {
-    text = text.split('```')[1].split('```')[0].trim();
+  let patternText = patternResponse.content.trim();
+  if (patternText.includes('```json')) patternText = patternText.split('```json')[1].split('```')[0].trim();
+  else if (patternText.includes('```')) patternText = patternText.split('```')[1].split('```')[0].trim();
+
+  let examPattern: Record<string, unknown>;
+  try {
+    examPattern = JSON.parse(patternText);
+  } catch {
+    examPattern = {};
   }
 
-  return JSON.parse(text);
+  // ── Phase 2: Structured numbers (bloom's, difficulty, image %) ──
+  const numOptions = (examPattern.option_style as Record<string, unknown>)?.num_options || 4;
+
+  const formatPrompt = `You are an assessment design expert. Based on the OFFICIAL exam specifications for ${courseName}, provide the structured numerical distributions.
+
+EXAM: ${courseName}
+SUBJECTS: ${subjectsStr}
+CONFIRMED number of options: ${numOptions}
+
+Return ONLY this JSON:
+{
+    "question_format": {
+        "type": "single_best_answer",
+        "num_options": ${numOptions},
+        "avg_stem_words": <integer based on this specific exam>,
+        "uses_vignettes": <true/false>,
+        "image_questions_percentage": <integer — overall % of image-based questions in this exam>
+    },
+    "blooms_distribution": {
+        "1_remember": <integer %>,
+        "2_understand": <integer %>,
+        "3_apply": <integer %>,
+        "4_analyze": <integer %>,
+        "5_evaluate": <integer %>,
+        "6_create": <integer %>,
+        "7_integrate": <integer %>
+    },
+    "difficulty_distribution": {
+        "easy": <integer %>,
+        "medium": <integer %>,
+        "hard": <integer %>
+    },
+    "image_percentage_by_subject": {
+${subjectsList.map((s) => `        "${s}": <integer % of image questions for this subject in ${courseName}>`).join(',\n')}
+    }
+}
+
+CRITICAL: These numbers must reflect ${courseName} SPECIFICALLY.
+- A recall-heavy exam (e.g. NEET PG) should have high 1_remember + 2_understand.
+- A reasoning-heavy exam (e.g. USMLE Step 2 CK) should have high 3_apply + 4_analyze.
+- Image percentages vary dramatically by exam and subject. Use your knowledge of ${courseName}.
+
+Generate ONLY the JSON, no other text.`;
+
+  const formatResponse = await orCall(MODELS.STRUCTURE, '', formatPrompt, {
+    temperature: 0.2,
+    maxTokens: 3000,
+  });
+
+  let formatText = formatResponse.content.trim();
+  if (formatText.includes('```json')) formatText = formatText.split('```json')[1].split('```')[0].trim();
+  else if (formatText.includes('```')) formatText = formatText.split('```')[1].split('```')[0].trim();
+
+  const formatData = JSON.parse(formatText);
+
+  // Merge pattern profile with structured numbers
+  return {
+    ...formatData,
+    exam_pattern: examPattern,
+  };
 }
 
 /**

@@ -17,42 +17,67 @@ const PROFESSOR_BATCH_SIZE = 6;
 async function generateSubjectProfile(
   subjectName: string,
   courseName: string,
-  hytTopics: string[]
+  hytTopics: string[],
+  examPattern?: Record<string, unknown>
 ): Promise<Record<string, unknown>> {
   const topicsStr = hytTopics.length > 0 ? hytTopics.slice(0, 20).join(', ') : subjectName;
 
-  const prompt = `You are an expert curriculum designer for ${courseName} postgraduate medical entrance examinations.
+  // Build exam-specific context from the pattern profile
+  let examContext = '';
+  if (examPattern && Object.keys(examPattern).length > 0) {
+    const philosophy = (examPattern.testing_philosophy as string) || '';
+    const stemStyle = examPattern.stem_style as Record<string, unknown> | undefined;
+    const distinctive = (examPattern.distinctive_patterns as string[]) || [];
+    const antiPatterns = (examPattern.what_NOT_to_do as string[]) || [];
+    const recallRatio = examPattern.recall_vs_reasoning_ratio as Record<string, unknown> | undefined;
 
+    examContext = `\nEXAM-SPECIFIC CONTEXT FOR ${courseName}:
+Testing philosophy: ${philosophy}
+Stem format: ${stemStyle?.typical_format || 'standard MCQ'}
+What stems test: ${stemStyle?.what_the_stem_tests || ''}
+Recall vs reasoning: ${recallRatio?.description || ''}
+Distinctive patterns:
+${distinctive.slice(0, 5).map((p) => `  • ${p}`).join('\n')}
+What NOT to do for this exam:
+${antiPatterns.slice(0, 3).map((p) => `  • ${p}`).join('\n')}
+
+Your subject profile MUST align with these exam-specific patterns. For example:
+- If the exam is recall-heavy, your question_style should emphasise direct factual testing
+- If the exam uses long vignettes, your question_style should describe clinical scenario construction
+- Distractor archetypes must match how THIS exam designs wrong options\n`;
+  }
+
+  const prompt = `You are an expert curriculum designer for ${courseName} examinations.
+${examContext}
 Generate a subject-specific examiner profile for: ${subjectName}
+This profile must reflect how ${subjectName} is ACTUALLY tested in ${courseName} — not generic MCQ advice.
 
 High-yield topics: ${topicsStr}
 
 Return ONLY a JSON object with these exact keys:
 
 {
-  "question_style": "<2-3 sentences: how questions in THIS subject typically work — e.g. clinical vignette vs. direct recall vs. image interpretation vs. data interpretation; what makes distractors hard in this subject>",
+  "question_style": "<2-3 sentences: how ${subjectName} questions work SPECIFICALLY in ${courseName} — what format, what depth, what the stem looks like, what makes distractors hard>",
   "image_types": [
-    "<modality 1 specific to ${subjectName} — e.g. 'PA chest X-ray' not just 'X-ray'>",
+    "<modality 1 specific to ${subjectName} in ${courseName} — e.g. 'PA chest X-ray' not just 'X-ray'>",
     "<modality 2>",
     "<modality 3>",
     "<modality 4>",
     "<modality 5>"
   ],
-  "image_question_focus": "<what students must identify from images in ${subjectName} exams — e.g. 'ECG rhythm diagnosis', 'histological pattern recognition', 'radiological finding localisation'>",
+  "image_question_focus": "<what students must identify from images in ${subjectName} in ${courseName}>",
   "distractor_archetypes": [
-    "<archetype 1: a category of plausible wrong answer used repeatedly in this subject — e.g. 'related drug from the same class but wrong indication'>",
+    "<archetype 1: a category of plausible wrong answer typical in ${courseName} for ${subjectName}>",
     "<archetype 2>",
     "<archetype 3>",
     "<archetype 4>"
   ],
-  "bloom_guidance": "<1-2 sentences: which Bloom's levels dominate in ${subjectName} and why — e.g. 'Apply and Analyse dominate because questions present novel clinical scenarios requiring diagnosis'>",
-  "special_instructions": "<2-3 subject-specific rules for this examiner — e.g. drug dose ranges, classification systems to use, eponymous findings to test, common confusables to exploit>"
-}
-
-Be specific to ${subjectName} as a distinct medical discipline. Do not give generic medical exam advice.`;
+  "bloom_guidance": "<1-2 sentences: which Bloom's levels dominate for ${subjectName} in ${courseName} and why>",
+  "special_instructions": "<2-3 subject-specific rules aligned with ${courseName} patterns — e.g. what facts/classifications/systems are commonly tested>"
+}`;
 
   try {
-    const response = await orCall(MODELS.GENERATOR, '', prompt, { maxTokens: 1200, temperature: 0.2 });
+    const response = await orCall(MODELS.GENERATOR, '', prompt, { maxTokens: 1500, temperature: 0.2 });
     let raw = response.content;
     if (raw.includes('```json')) raw = raw.split('```json')[1].split('```')[0];
     else if (raw.includes('```')) raw = raw.split('```')[1].split('```')[0];
@@ -61,12 +86,12 @@ Be specific to ${subjectName} as a distinct medical discipline. Do not give gene
     return profile;
   } catch {
     return {
-      question_style: `Clinical vignette-based questions requiring application and analysis specific to ${subjectName}.`,
+      question_style: `Questions specific to ${subjectName} as tested in ${courseName}.`,
       image_types: [`${subjectName} clinical photograph`, `${subjectName} diagnostic image`, 'histology slide', 'radiograph', 'diagram'],
       image_question_focus: `Identifying key diagnostic findings in ${subjectName}`,
       distractor_archetypes: ['related condition with similar presentation', 'correct diagnosis wrong management', 'partial knowledge trap', 'common misconception'],
-      bloom_guidance: 'Apply and Analyse levels dominate; recall-only questions are rare.',
-      special_instructions: `Use current standard guidelines. Test high-yield differentials and management decision points in ${subjectName}.`,
+      bloom_guidance: 'Distribution follows the typical pattern for this exam.',
+      special_instructions: `Use current standard guidelines relevant to ${courseName}. Test high-yield concepts in ${subjectName}.`,
     };
   }
 }
@@ -80,6 +105,7 @@ interface SubjectTask {
   bloom_counts: Record<string, number>;
   hyt_topics: string[];
   exam_params: { style: string; num_options: number; marking: string };
+  exam_pattern?: Record<string, unknown>;
   subject_profile?: Record<string, unknown>;
   existing_stems_by_topic?: Map<string, string[]>;
   _batch?: string;
@@ -91,6 +117,9 @@ export async function buildSubjectTasks(
   examFormat: Record<string, unknown>,
   courseName: string
 ): Promise<SubjectTask[]> {
+  // Extract exam pattern profile for threading into generation
+  const examPattern = (examFormat.exam_pattern as Record<string, unknown>) || {};
+
   // Bloom's distribution: filter L2–L5, renormalize
   const bloomsRaw = (examFormat.blooms_distribution as Record<string, number>) || {};
   const l2to5: Record<string, number> = {};
@@ -163,12 +192,13 @@ export async function buildSubjectTasks(
       bloom_counts: bloomCounts,
       hyt_topics: findHyt(subjName),
       exam_params: examParams,
+      exam_pattern: examPattern,
     });
   }
 
-  // Generate subject profiles in parallel
+  // Generate subject profiles in parallel (with exam pattern context)
   const profilePromises = tasks.map(async (task) => {
-    const profile = await generateSubjectProfile(task.subject, courseName, task.hyt_topics);
+    const profile = await generateSubjectProfile(task.subject, courseName, task.hyt_topics, examPattern);
     task.subject_profile = profile;
   });
   await Promise.all(profilePromises);
@@ -182,9 +212,59 @@ function buildProfessorPrompt(subjectTask: SubjectTask, courseName: string): str
   const { subject, num_questions: numQ, num_image_qs: numImgQ, bloom_counts: bloom, exam_params: ep } = subjectTask;
   const hyt = subjectTask.hyt_topics || [];
   const profile = subjectTask.subject_profile || {};
+  const examPattern = subjectTask.exam_pattern || {};
 
   const hytStr = hyt.length > 0 ? hyt.slice(0, 25).map((t) => `  • ${t}`).join('\n') : '  (Full subject syllabus)';
   const bloomStr = Object.entries(bloom).sort().map(([k, v]) => `  ${k}: ${v} question${v !== 1 ? 's' : ''}`).join('\n');
+
+  // Dynamic examiner role from exam pattern (fallback to generic)
+  const examinerRole = (examPattern.examiner_role as string) || `senior examiner for the ${courseName} examination`;
+  const examBoard = (examPattern.exam_board as string) || '';
+
+  // Exam pattern section — testing philosophy, stem style, distinctive patterns
+  let examPatternSection = '';
+  if (Object.keys(examPattern).length > 0) {
+    const philosophy = (examPattern.testing_philosophy as string) || '';
+    const stemStyle = examPattern.stem_style as Record<string, unknown> | undefined;
+    const optionStyle = examPattern.option_style as Record<string, unknown> | undefined;
+    const recallRatio = examPattern.recall_vs_reasoning_ratio as Record<string, unknown> | undefined;
+    const distinctive = (examPattern.distinctive_patterns as string[]) || [];
+    const antiPatterns = (examPattern.what_NOT_to_do as string[]) || [];
+    const exampleTemplates = (examPattern.example_stem_templates as string[]) || [];
+
+    examPatternSection = `\nEXAM PATTERN — ${courseName.toUpperCase()}\n${'═'.repeat(50)}`;
+    if (philosophy) examPatternSection += `\nTesting philosophy: ${philosophy}`;
+    if (recallRatio?.description) examPatternSection += `\nRecall vs reasoning: ${recallRatio.description}`;
+    if (stemStyle) {
+      examPatternSection += `\n\nSTEM STYLE:`;
+      if (stemStyle.typical_format) examPatternSection += `\n  Format: ${stemStyle.typical_format}`;
+      if (stemStyle.avg_stem_words) examPatternSection += `\n  Target stem length: ~${stemStyle.avg_stem_words} words`;
+      if (stemStyle.what_the_stem_tests) examPatternSection += `\n  What stems test: ${stemStyle.what_the_stem_tests}`;
+      const leadIns = (stemStyle.lead_in_patterns as string[]) || [];
+      if (leadIns.length > 0) examPatternSection += `\n  Typical lead-in endings:\n${leadIns.slice(0, 5).map((l) => `    • "${l}"`).join('\n')}`;
+      const structures = (stemStyle.common_stem_structures as string[]) || [];
+      if (structures.length > 0) examPatternSection += `\n  Common stem structures:\n${structures.slice(0, 4).map((s) => `    • ${s}`).join('\n')}`;
+    }
+    if (optionStyle) {
+      examPatternSection += `\n\nOPTION STYLE:`;
+      if (optionStyle.option_characteristics) examPatternSection += `\n  Characteristics: ${optionStyle.option_characteristics}`;
+      if (optionStyle.distractor_philosophy) examPatternSection += `\n  Distractor philosophy: ${optionStyle.distractor_philosophy}`;
+      if (optionStyle.typical_option_length) examPatternSection += `\n  Option length: ${optionStyle.typical_option_length}`;
+    }
+    if (distinctive.length > 0) {
+      examPatternSection += `\n\nDISTINCTIVE PATTERNS OF ${courseName}:`;
+      examPatternSection += `\n${distinctive.slice(0, 5).map((p) => `  ★ ${p}`).join('\n')}`;
+    }
+    if (antiPatterns.length > 0) {
+      examPatternSection += `\n\nCRITICAL — DO NOT DO THESE (they make questions NOT match ${courseName}):`;
+      examPatternSection += `\n${antiPatterns.slice(0, 4).map((p) => `  ✗ ${p}`).join('\n')}`;
+    }
+    if (exampleTemplates.length > 0) {
+      examPatternSection += `\n\nEXAMPLE STEM TEMPLATES (follow these structures):`;
+      examPatternSection += `\n${exampleTemplates.slice(0, 3).map((t, i) => `  ${i + 1}. ${t}`).join('\n')}`;
+    }
+    examPatternSection += '\n';
+  }
 
   // Profile section
   let profileSection = '';
@@ -214,7 +294,6 @@ function buildProfessorPrompt(subjectTask: SubjectTask, courseName: string): str
     const topicBlocks: string[] = [];
     for (const [topic, stems] of existingByTopic) {
       const label = topic === '_general' ? '(General / untagged)' : topic;
-      // Cap at 50 stems per topic, 80 chars each
       const capped = stems.slice(0, 50);
       totalExisting += capped.length;
       const stemList = capped.map((s, i) => `    ${i + 1}. ${s.slice(0, 80)}`).join('\n');
@@ -233,9 +312,10 @@ ${topicBlocks.join('\n\n')}
 
   const batchLabel = subjectTask._batch || '';
   const batchNote = batchLabel ? ` (batch ${batchLabel})` : '';
+  const boardNote = examBoard ? ` (${examBoard})` : '';
 
-  return `You are a Professor of ${subject} and a senior NBE examiner for the ${courseName} examination.
-You are now setting your department's contribution to this year's question paper${batchNote}.
+  return `You are a Professor of ${subject} and a ${examinerRole}.
+You are now setting your department's contribution to this year's ${courseName}${boardNote} question paper${batchNote}.
 
 EXAMINATION BRIEF
 ─────────────────
@@ -244,7 +324,7 @@ Your allocation:  ${numQ} questions
 Format:           ${ep.style.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())}, ${ep.num_options} options per question
 Marking scheme:   ${ep.marking || 'Standard positive marking'}
 Image-based Qs:   ${numImgQ} of your ${numQ} questions must be marked is_image_question: true
-
+${examPatternSection}
 BLOOM'S TAXONOMY — YOU MUST HIT THESE COUNTS EXACTLY
 ──────────────────────────────────────────────────────
 ${bloomStr}
@@ -255,7 +335,7 @@ ${hytStr}
 ${profileSection}${exclusionSection}
 YOUR RESPONSIBILITIES AS EXAMINER
 ──────────────────────────────────
-- Every question must reflect authentic ${courseName} standard and clinical depth for ${subject}
+- Every question MUST match the ${courseName} exam pattern described above — stem format, length, lead-in style, option style
 - Follow the question style and distractor archetypes described in the Subject Profile above
 - Wrong options must be genuinely plausible to a well-prepared ${subject} candidate
 - Exploit the distractor archetypes listed above
@@ -638,6 +718,9 @@ async function buildTopicWiseTasks(
   const subjects = (courseStructure.subjects as Array<Record<string, unknown>>) || [];
   if (subjects.length === 0) throw new Error('Course has no subjects');
 
+  // Extract exam pattern profile for threading into generation
+  const examPattern = (examFormat.exam_pattern as Record<string, unknown>) || {};
+
   // Bloom's distribution from exam format (same logic as buildSubjectTasks)
   const bloomsRaw = (examFormat.blooms_distribution as Record<string, number>) || {};
   const l2to5: Record<string, number> = {};
@@ -708,12 +791,13 @@ async function buildTopicWiseTasks(
       bloom_counts: bloomCounts,
       hyt_topics: topicNames,
       exam_params: examParams,
+      exam_pattern: examPattern,
     });
   }
 
-  // Generate subject profiles in parallel
+  // Generate subject profiles in parallel (with exam pattern context)
   const profilePromises = tasks.map(async (task) => {
-    const profile = await generateSubjectProfile(task.subject, courseName, task.hyt_topics);
+    const profile = await generateSubjectProfile(task.subject, courseName, task.hyt_topics, examPattern);
     task.subject_profile = profile;
   });
   await Promise.all(profilePromises);
