@@ -9,74 +9,127 @@ export async function refineCourseStructure(
   currentStructure: Record<string, unknown>,
   userMessage: string
 ): Promise<{ response: string; updated_structure?: Record<string, unknown>; modified: boolean }> {
+  // Build a condensed view of the structure (subject names + topic names only, no chapters)
+  const subjects = (currentStructure.subjects as Array<Record<string, unknown>>) || [];
+  const condensed = subjects.map((s) => {
+    const topics = (s.topics as Array<Record<string, unknown>>) || [];
+    return {
+      name: s.name,
+      topics: topics.map((t) => (t.name as string) || ''),
+      high_yield_topics: topics.filter((t) => t.high_yield || t.is_high_yield).map((t) => (t.name as string) || ''),
+    };
+  });
+
   const refinePrompt = `You are helping to refine a course structure for "${courseName}".
 
-CURRENT STRUCTURE:
-${JSON.stringify(currentStructure, null, 2)}
+CURRENT SUBJECTS AND TOPICS:
+${JSON.stringify(condensed, null, 2)}
 
 USER REQUEST:
 ${userMessage}
 
-Your task:
-1. Understand what the user wants to change (add subjects/topics, remove items, rename, reorder, etc.)
-2. Modify the structure accordingly
-3. Respond with a JSON object containing:
-   - "response": A friendly message explaining what you changed (1-2 sentences)
-   - "updated_structure": The COMPLETE updated structure in the same JSON format
-   - "modified": true
+Respond with a JSON object describing the CHANGES to make (not the full structure):
+{
+  "response": "<1-2 sentence explanation of what you changed>",
+  "modified": true,
+  "changes": [
+    { "action": "add_subject", "name": "<subject name>", "topics": ["topic1", "topic2", ...] },
+    { "action": "remove_subject", "name": "<subject name>" },
+    { "action": "rename_subject", "old_name": "<old>", "new_name": "<new>" },
+    { "action": "add_topics", "subject": "<subject name>", "topics": ["new topic 1", "new topic 2"] },
+    { "action": "remove_topics", "subject": "<subject name>", "topics": ["topic to remove"] },
+    { "action": "rename_topic", "subject": "<subject name>", "old_name": "<old>", "new_name": "<new>" }
+  ]
+}
 
-If no changes are needed (e.g., user just asking a question), set "modified": false and don't include "updated_structure".
+If no changes are needed (user is just asking a question), return:
+{ "response": "<answer>", "modified": false, "changes": [] }
 
-IMPORTANT:
-- Maintain the exact JSON structure format with "course" and "subjects" array
-- Each subject has "name" and "topics" (array of strings)
-- Keep all existing fields that weren't asked to change
-- When asked to remove subjects, only keep the ones the user wants
-- Output ONLY valid JSON, no markdown fences, no extra text`;
+Output ONLY valid JSON.`;
 
   const responseText = await orCall(
     MODELS.STRUCTURE,
     '',
     refinePrompt,
-    { temperature: 0.3, maxTokens: 16000 }
+    { temperature: 0.3, maxTokens: 4000 }
   );
 
   let text = responseText.content.trim();
+  if (text.includes('```json')) text = text.split('```json')[1].split('```')[0].trim();
+  else if (text.includes('```')) text = text.split('```')[1].split('```')[0].trim();
 
-  // Extract JSON from markdown if needed
-  if (text.includes('```json')) {
-    text = text.split('```json')[1].split('```')[0].trim();
-  } else if (text.includes('```')) {
-    text = text.split('```')[1].split('```')[0].trim();
-  }
-
-  // Extract outermost JSON object
   const jsonMatch = text.match(/\{[\s\S]*\}/);
   if (jsonMatch) text = jsonMatch[0];
 
   try {
     const result = JSON.parse(text);
+    if (!result.modified || !result.changes || result.changes.length === 0) {
+      return { response: result.response || 'No changes needed.', modified: false };
+    }
+
+    // Apply changes to the full structure
+    const updated = JSON.parse(JSON.stringify(currentStructure)) as Record<string, unknown>;
+    const updatedSubjects = (updated.subjects as Array<Record<string, unknown>>) || [];
+
+    for (const change of result.changes as Array<Record<string, unknown>>) {
+      const action = change.action as string;
+
+      if (action === 'add_subject') {
+        const topicNames = (change.topics as string[]) || [];
+        updatedSubjects.push({
+          name: change.name as string,
+          topics: topicNames.map((t) => ({ name: t, chapters: [], high_yield: false })),
+          description: '',
+        });
+      } else if (action === 'remove_subject') {
+        const name = (change.name as string).toLowerCase().trim();
+        const idx = updatedSubjects.findIndex((s) => ((s.name as string) || '').toLowerCase().trim() === name);
+        if (idx >= 0) updatedSubjects.splice(idx, 1);
+      } else if (action === 'rename_subject') {
+        const oldName = (change.old_name as string).toLowerCase().trim();
+        const subj = updatedSubjects.find((s) => ((s.name as string) || '').toLowerCase().trim() === oldName);
+        if (subj) subj.name = change.new_name as string;
+      } else if (action === 'add_topics') {
+        const subjName = (change.subject as string).toLowerCase().trim();
+        const subj = updatedSubjects.find((s) => ((s.name as string) || '').toLowerCase().trim() === subjName);
+        if (subj) {
+          const topics = (subj.topics as Array<Record<string, unknown>>) || [];
+          for (const t of (change.topics as string[]) || []) {
+            topics.push({ name: t, chapters: [], high_yield: false });
+          }
+          subj.topics = topics;
+        }
+      } else if (action === 'remove_topics') {
+        const subjName = (change.subject as string).toLowerCase().trim();
+        const subj = updatedSubjects.find((s) => ((s.name as string) || '').toLowerCase().trim() === subjName);
+        if (subj) {
+          const toRemove = ((change.topics as string[]) || []).map((t) => t.toLowerCase().trim());
+          subj.topics = ((subj.topics as Array<Record<string, unknown>>) || []).filter(
+            (t) => !toRemove.includes(((t.name as string) || '').toLowerCase().trim())
+          );
+        }
+      } else if (action === 'rename_topic') {
+        const subjName = (change.subject as string).toLowerCase().trim();
+        const subj = updatedSubjects.find((s) => ((s.name as string) || '').toLowerCase().trim() === subjName);
+        if (subj) {
+          const oldName = (change.old_name as string).toLowerCase().trim();
+          const topic = ((subj.topics as Array<Record<string, unknown>>) || []).find(
+            (t) => ((t.name as string) || '').toLowerCase().trim() === oldName
+          );
+          if (topic) topic.name = change.new_name as string;
+        }
+      }
+    }
+
+    updated.subjects = updatedSubjects;
+
     return {
       response: result.response || 'Structure updated.',
-      updated_structure: result.updated_structure,
-      modified: result.modified ?? !!result.updated_structure,
+      updated_structure: updated,
+      modified: true,
     };
   } catch (parseErr) {
     console.error('[refine] JSON parse failed:', parseErr instanceof Error ? parseErr.message : parseErr);
-    console.error('[refine] Raw text (first 500 chars):', text.slice(0, 500));
-
-    // Attempt to salvage: maybe the LLM returned the structure directly without wrapper
-    try {
-      const directParse = JSON.parse(text);
-      if (directParse.subjects && Array.isArray(directParse.subjects)) {
-        return {
-          response: 'Structure updated.',
-          updated_structure: directParse,
-          modified: true,
-        };
-      }
-    } catch { /* ignore */ }
-
     return {
       response: 'I understood your request, but encountered an error updating the structure. Please try rephrasing.',
       modified: false,

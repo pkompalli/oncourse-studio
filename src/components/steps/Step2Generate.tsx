@@ -240,6 +240,35 @@ export default function Step2Generate() {
         return;
       }
 
+      // Update progress from polling (in case Supabase Realtime isn't delivering)
+      if (res.status === 'generating' && batchResult) {
+        const completed = (batchResult.completed as number) || 0;
+        const total = (batchResult.total as number) || 0;
+        const message = batchResult.message as string | undefined;
+        const completedList = batchResult.completed_subjects as string[] | undefined;
+        const phase = batchResult.phase as string | undefined;
+
+        // Use server message if available, otherwise build one
+        if (message) {
+          setStatusMessage(message);
+        } else if (completed > 0 || total > 0) {
+          setStatusMessage(`Generating... ${completed}/${total} subjects complete`);
+        }
+
+        // During image phase, mark all subjects as done
+        if (phase === 'images') {
+          setSubjectProgress((prev) => prev.map((s) => ({ ...s, status: 'done' as const })));
+        } else if (completedList && completedList.length > 0) {
+          // Update subject progress from completed list
+          setSubjectProgress((prev) =>
+            prev.map((s) => {
+              if (completedList.includes(s.subject)) return { ...s, status: 'done' as const };
+              return s;
+            })
+          );
+        }
+      }
+
       setTimeout(() => pollNextBatch(jobId), 3000);
     } catch {
       setTimeout(() => pollNextBatch(jobId), 5000);

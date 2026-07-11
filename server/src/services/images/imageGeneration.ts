@@ -215,14 +215,15 @@ export async function processAllImageQuestions(jobId: string): Promise<{
     return { totalProcessed: 0, totalSuccess: 0, totalFailed: 0 };
   }
 
-  console.log(`\n🎨 Image pipeline: generating ${imageQuestions.length} images with ${OPENAI_IMAGE_MODEL}\n`);
+  const totalImages = imageQuestions.length;
+  console.log(`\n🎨 Image pipeline: generating ${totalImages} images with ${OPENAI_IMAGE_MODEL}\n`);
 
   let totalSuccess = 0;
   let totalFailed = 0;
 
   // Process 3 at a time to avoid rate limits
   const CONCURRENCY = 3;
-  for (let i = 0; i < imageQuestions.length; i += CONCURRENCY) {
+  for (let i = 0; i < totalImages; i += CONCURRENCY) {
     const batch = imageQuestions.slice(i, i + CONCURRENCY);
     const results = await Promise.allSettled(
       batch.map((q) => generateAndStoreImage(q, jobId))
@@ -231,9 +232,23 @@ export async function processAllImageQuestions(jobId: string): Promise<{
       if (r.status === 'fulfilled' && r.value) totalSuccess++;
       else totalFailed++;
     }
+
+    // Update job progress after each batch
+    const processed = Math.min(i + CONCURRENCY, totalImages);
+    await supabase
+      .from('qb_jobs')
+      .update({
+        progress: {
+          completed: processed,
+          total: totalImages,
+          message: `Generating images... ${totalSuccess}/${totalImages} done (${totalFailed} failed)`,
+          phase: 'images',
+        },
+      })
+      .eq('id', jobId);
   }
 
-  console.log(`\n🎨 Image pipeline complete: ${totalSuccess}/${imageQuestions.length} images generated\n`);
+  console.log(`\n🎨 Image pipeline complete: ${totalSuccess}/${totalImages} images generated\n`);
   return { totalProcessed: imageQuestions.length, totalSuccess, totalFailed };
 }
 

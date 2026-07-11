@@ -665,7 +665,7 @@ async function runAllProfessors(
     console.error('Failed to save generated snapshots:', e);
   }
 
-  // Image pipeline: generate images for image questions
+  // Image pipeline: generate images for image questions (with timeout)
   try {
     const { processAllImageQuestions, isImageGenerationAvailable } = await import('../images/imageGeneration.js');
     if (isImageGenerationAvailable()) {
@@ -681,14 +681,24 @@ async function runAllProfessors(
         })
         .eq('id', jobId);
 
-      const imgResult = await processAllImageQuestions(jobId);
-      console.log(`🎨 Image pipeline: ${imgResult.totalSuccess}/${imgResult.totalProcessed} images generated`);
+      // 5-minute timeout for image pipeline to prevent job getting stuck
+      const IMAGE_TIMEOUT_MS = 5 * 60 * 1000;
+      const imgPromise = processAllImageQuestions(jobId);
+      const timeoutPromise = new Promise<{ totalProcessed: number; totalSuccess: number; totalFailed: number }>((resolve) =>
+        setTimeout(() => resolve({ totalProcessed: 0, totalSuccess: 0, totalFailed: -1 }), IMAGE_TIMEOUT_MS)
+      );
+      const imgResult = await Promise.race([imgPromise, timeoutPromise]);
+      if (imgResult.totalFailed === -1) {
+        console.warn('Image pipeline timed out after 5 minutes — proceeding to review');
+      } else {
+        console.log(`🎨 Image pipeline: ${imgResult.totalSuccess}/${imgResult.totalProcessed} images generated`);
+      }
     }
   } catch (e) {
     console.error('Image pipeline error (non-fatal):', e);
   }
 
-  // All done
+  // All done — always transition to reviewing
   await supabase
     .from('qb_jobs')
     .update({
@@ -810,7 +820,7 @@ async function buildTopicWiseTasks(
 export async function generateBatchForJob(
   jobId: string,
   courseId: string
-): Promise<{ status: string; completed: number; total: number }> {
+): Promise<{ status: string; completed: number; total: number; message?: string; completed_subjects?: string[]; phase?: string }> {
   // If already running or complete, return current status
   const cached = runningJobs.get(jobId);
   if (cached) {
@@ -841,6 +851,9 @@ export async function generateBatchForJob(
       status: 'generating',
       completed: (progress.completed as number) || 0,
       total: (progress.total as number) || 0,
+      message: (progress.message as string) || '',
+      completed_subjects: (progress.completed_subjects as string[]) || [],
+      phase: (progress.phase as string) || '',
     };
   }
 

@@ -132,7 +132,47 @@ coursesRouter.post('/:id/exam-format', async (req, res, next) => {
       // Mock exam: also fetch total questions, per-subject distribution
       const subjects = ((structure.subjects as Array<{ name: string }>) || []).map((s) => s.name);
       const mockSpecs = await fetchMockExamSpecs(courseName, subjects);
-      combinedFormat = { ...examFormat, ...mockSpecs };
+      combinedFormat = { ...examFormat, ...mockSpecs, exam_pattern: examFormat.exam_pattern };
+
+      // Override subject_distribution image percentages with Phase 2 data (more accurate)
+      const phase2ImgPct = (examFormat.image_percentage_by_subject as Record<string, number>) || {};
+      const subjectDist = (combinedFormat.subject_distribution as Record<string, { questions: number; percentage: number; image_pct: number }>) || {};
+      let totalImgQ = 0;
+      for (const [subjName, dist] of Object.entries(subjectDist)) {
+        // Find matching Phase 2 image percentage
+        const key = subjName.toLowerCase().trim();
+        let imgPct: number | null = null;
+        if (subjName in phase2ImgPct) imgPct = phase2ImgPct[subjName];
+        else {
+          for (const [k, v] of Object.entries(phase2ImgPct)) {
+            if (k.toLowerCase().trim() === key || k.toLowerCase().includes(key) || key.includes(k.toLowerCase())) {
+              imgPct = v;
+              break;
+            }
+          }
+        }
+        if (imgPct !== null) {
+          dist.image_pct = imgPct;
+        }
+        totalImgQ += Math.round((dist.questions * dist.image_pct) / 100);
+      }
+      // Enforce overall image target — scale up per-subject image_pct if weighted average is too low
+      const qf = (combinedFormat.question_format as Record<string, number>) || {};
+      const targetImgPct = qf.image_questions_percentage || 35;
+      const totalQ = Object.values(subjectDist).reduce((sum, d) => sum + d.questions, 0);
+      const targetImgQ = Math.round((totalQ * targetImgPct) / 100);
+
+      if (totalImgQ < targetImgQ && totalImgQ > 0) {
+        const scaleFactor = targetImgQ / totalImgQ;
+        totalImgQ = 0;
+        for (const dist of Object.values(subjectDist)) {
+          dist.image_pct = Math.min(90, Math.round(dist.image_pct * scaleFactor));
+          totalImgQ += Math.round((dist.questions * dist.image_pct) / 100);
+        }
+      }
+
+      combinedFormat.subject_distribution = subjectDist;
+      combinedFormat.image_questions_total = totalImgQ;
     }
 
     // Save to DB

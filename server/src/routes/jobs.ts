@@ -132,6 +132,29 @@ jobsRouter.post('/:id/next-batch', async (req, res, next) => {
       return;
     }
 
+    // Detect stuck jobs: if generating with all subjects done for > 7 minutes, force-transition
+    if (job.status === 'generating') {
+      const progress = (job.progress || {}) as Record<string, unknown>;
+      const completed = (progress.completed as number) || 0;
+      const total = (progress.total as number) || 0;
+      if (completed > 0 && completed >= total) {
+        const updatedAt = new Date(job.updated_at || job.modified_at || job.created_at).getTime();
+        const stuckMinutes = (Date.now() - updatedAt) / 60000;
+        if (stuckMinutes > 7) {
+          console.warn(`Job ${jobId} stuck at generating (${completed}/${total}) for ${Math.round(stuckMinutes)}min — forcing to reviewing`);
+          await supabase
+            .from('qb_jobs')
+            .update({
+              status: 'reviewing',
+              progress: { ...progress, message: `Generation complete — ${total} subjects (images may be partial)` },
+            })
+            .eq('id', jobId);
+          res.json({ status: 'reviewing', batch_result: { completed: total, total } });
+          return;
+        }
+      }
+    }
+
     // Determine which phase to execute
     const currentPhase = phase || job.status;
 

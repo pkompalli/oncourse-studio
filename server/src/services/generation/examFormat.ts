@@ -94,18 +94,26 @@ Be HIGHLY specific to ${courseName}. If you are unsure about a detail, research 
   // ── Phase 2: Structured numbers (bloom's, difficulty, image %) ──
   const numOptions = (examPattern.option_style as Record<string, unknown>)?.num_options || 4;
 
+  // Extract Phase 1 insights to guide Phase 2 numbers
+  const recallRatio = examPattern.recall_vs_reasoning_ratio as Record<string, unknown> | undefined;
+  const recallPct = (recallRatio?.direct_recall_pct as number) || 0;
+  const stemStyle = examPattern.stem_style as Record<string, unknown> | undefined;
+  const avgStemWords = (stemStyle?.avg_stem_words as number) || 0;
+
   const formatPrompt = `You are an assessment design expert. Based on the OFFICIAL exam specifications for ${courseName}, provide the structured numerical distributions.
 
 EXAM: ${courseName}
 SUBJECTS: ${subjectsStr}
 CONFIRMED number of options: ${numOptions}
+${recallPct > 0 ? `CONFIRMED recall vs reasoning ratio: ${recallPct}% recall / ${100 - recallPct}% reasoning (from Phase 1 analysis)` : ''}
+${avgStemWords > 0 ? `CONFIRMED avg stem words: ~${avgStemWords} words (from Phase 1 analysis)` : ''}
 
 Return ONLY this JSON:
 {
     "question_format": {
         "type": "single_best_answer",
         "num_options": ${numOptions},
-        "avg_stem_words": <integer based on this specific exam>,
+        "avg_stem_words": ${avgStemWords > 0 ? avgStemWords : '<integer based on this specific exam>'},
         "uses_vignettes": <true/false>,
         "image_questions_percentage": <integer — overall % of image-based questions in this exam>
     },
@@ -131,7 +139,33 @@ ${subjectsList.map((s) => `        "${s}": <integer % of image questions for thi
 CRITICAL: These numbers must reflect ${courseName} SPECIFICALLY.
 - A recall-heavy exam (e.g. NEET PG) should have high 1_remember + 2_understand.
 - A reasoning-heavy exam (e.g. USMLE Step 2 CK) should have high 3_apply + 4_analyze.
-- Image percentages vary dramatically by exam and subject. Use your knowledge of ${courseName}.
+
+IMAGE PERCENTAGE GUIDANCE — BE ACCURATE:
+- image_questions_percentage is the OVERALL % of the entire paper that contains image/visual-based questions.
+- Recent trends in medical exams show INCREASING image percentages.
+- Known benchmarks (use these as reference, adjust for ${courseName}):
+  * NEET PG: 30-40% overall image questions (heavily image-based, increasing trend)
+  * INICET: 25-35% overall
+  * USMLE Step 1: 20-30% overall
+  * USMLE Step 2 CK: 15-25% overall
+  * UKMLA AKT: 25-35% overall
+- Per-subject benchmarks for medical exams (these are MINIMUMS — adjust UP for image-heavy exams like NEET PG):
+  * Radiology: 70-85% (almost all questions have images)
+  * Dermatology: 55-75% (clinical photographs are central)
+  * Ophthalmology: 45-65% (fundoscopy, slit-lamp, clinical photos)
+  * Pathology: 40-55% (histology slides, gross specimens)
+  * Anatomy: 35-50% (cross-sections, imaging, cadaveric photos, surface anatomy)
+  * Microbiology: 25-35% (culture plates, Gram stain, parasitology, histopathology)
+  * Orthopedics: 30-45% (X-rays, clinical deformities, fracture patterns)
+  * ENT: 30-40% (otoscopy, endoscopy, CT images)
+  * Forensic Medicine: 25-35% (injury photos, wound patterns, medicolegal images)
+  * Medicine: 25-35% (ECGs, X-rays, fundoscopy, clinical photos, peripheral smears)
+  * Surgery: 25-35% (clinical photos, operative images, X-rays, CT scans)
+  * Pediatrics: 20-30% (clinical photos, growth charts, X-rays)
+  * OBGYN: 20-30% (USG images, CTG, clinical photos)
+  * Physiology: 10-20% (graphs, waveforms, diagrams)
+  * Pharmacology/Biochemistry/PSM/Psychiatry: 5-15% (graphs, charts, flowcharts)
+- IMPORTANT: The weighted average across all subjects MUST approximately equal the overall image_questions_percentage. If your per-subject numbers produce a weighted average that is too low, increase the percentages for high-question-count subjects.
 
 Generate ONLY the JSON, no other text.`;
 
