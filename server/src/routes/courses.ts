@@ -22,9 +22,11 @@ coursesRouter.post('/', async (req, res, next) => {
         try {
           // Try to parse as JSON directly
           structure = parseStructureFromInput(reference_doc, name);
+          console.log(`[courses] Parsed uploaded JSON directly — ${(structure.subjects as unknown[])?.length || 0} subjects`);
         } catch (e) {
           if (e instanceof Error && e.message === 'NEEDS_AI_PROCESSING') {
-            // Not valid JSON — use AI to structure it
+            // Not valid JSON or unrecognized structure — use AI to structure it
+            console.log(`[courses] Uploaded content needs AI processing — calling LLM...`);
             structure = await generateCourseStructure(name, reference_doc);
           } else {
             throw e;

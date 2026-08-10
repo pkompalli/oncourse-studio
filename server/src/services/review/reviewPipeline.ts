@@ -518,7 +518,18 @@ async function runReviewPipeline(jobId: string): Promise<void> {
     setStep(jobId, 'Loading course data...');
     const courseName = await getCourseName(jobId);
 
-    setStep(jobId, 'Fetching generated questions from database...');
+    // ── Reset ALL questions for this job to 'generated' before fetching ──
+    // This ensures re-runs clear stale audit data (quality_score, status=approved/flagged)
+    setStep(jobId, 'Clearing stale review/audit data from any prior runs...');
+    await supabase.from('qb_questions').update({
+      audit_trail: [],
+      validator_score: null,
+      adversarial_score: null,
+      quality_score: null,
+      status: 'generated',
+    }).eq('job_id', jobId).is('replaced_by_id', null);
+
+    setStep(jobId, 'Fetching questions from database...');
     const questions = await fetchJobQuestions(jobId, 'generated');
 
     if (questions.length === 0) {
@@ -528,22 +539,6 @@ async function runReviewPipeline(jobId: string): Promise<void> {
       }).eq('id', jobId);
       setState(jobId, { status: 'complete', phase: 'done' });
       return;
-    }
-
-    // ── Reset audit_trail to prevent duplicates on re-runs ──
-    setStep(jobId, 'Clearing stale review data from any prior runs...');
-    for (const q of questions) {
-      await supabase.from('qb_questions').update({
-        audit_trail: [],
-        validator_score: null,
-        adversarial_score: null,
-        quality_score: null,
-        status: 'generated',
-      }).eq('id', q.id);
-      // Update in-memory copy too
-      q.audit_trail = [];
-      q.validator_score = null;
-      q.adversarial_score = null;
     }
 
     // ── Pre-screen: auto-fail image questions with missing images (V1 pattern) ──

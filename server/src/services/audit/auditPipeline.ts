@@ -2,7 +2,7 @@
  * Audit Pipeline — V2 Step 4
  *
  * Single-pass GPT-5.4 scoring of reviewed questions.
- * Score > 7 → approved, ≤ 7 → flagged.
+ * Score >= 7 → approved, < 7 → flagged.
  * Combined score = (validator_score + adversarial_score) / 2, capped at 10.
  */
 
@@ -140,7 +140,7 @@ Scoring guide:
 
 For each question, provide:
 - quality_score (1-10)
-- status: "approved" if score > 7, "flagged" if score <= 7
+- status: "approved" if score >= 7, "flagged" if score < 7
 - reason: 1 sentence explaining the score
 - issues: array of specific problems (empty if approved)
 
@@ -257,7 +257,7 @@ async function runAuditPipeline(jobId: string): Promise<void> {
           ? Math.round(((vScore + aScore + auditScore) / 3) * 10) / 10
           : auditScore;
 
-        const status = auditScore > 7 ? 'approved' : 'flagged';
+        const status = auditScore >= 7 ? 'approved' : 'flagged';
 
         const trail = Array.isArray(q.audit_trail) ? [...(q.audit_trail as unknown[])] : [];
         trail.push({

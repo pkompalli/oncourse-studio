@@ -11,6 +11,9 @@ export type ContentPart =
   | { type: 'text'; text: string }
   | { type: 'image_url'; image_url: { url: string } };
 
+const MAX_RETRIES = 3;
+const INITIAL_BACKOFF_MS = 2000;
+
 export async function orCall(
   model: string,
   systemPrompt: string,
@@ -23,39 +26,74 @@ export async function orCall(
 ): Promise<LLMResponse> {
   const userContent = typeof userPrompt === 'string' ? userPrompt : userPrompt;
 
-  const res = await fetch(`${OPENROUTER_BASE_URL}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
-      'HTTP-Referer': 'https://qbank-studio.vercel.app',
-    },
-    body: JSON.stringify({
-      model,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userContent },
-      ],
-      temperature: options?.temperature ?? 0.7,
-      max_tokens: options?.maxTokens ?? 4096,
-      ...(options?.jsonMode ? { response_format: { type: 'json_object' } } : {}),
-    }),
+  const body = JSON.stringify({
+    model,
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userContent },
+    ],
+    temperature: options?.temperature ?? 0.7,
+    max_tokens: options?.maxTokens ?? 4096,
+    ...(options?.jsonMode ? { response_format: { type: 'json_object' } } : {}),
   });
 
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`OpenRouter error (${res.status}): ${err}`);
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const res = await fetch(`${OPENROUTER_BASE_URL}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+          'HTTP-Referer': 'https://qbank-studio.vercel.app',
+        },
+        body,
+      });
+
+      if (res.status === 429 || res.status >= 500) {
+        const err = await res.text();
+        if (attempt < MAX_RETRIES) {
+          const delay = INITIAL_BACKOFF_MS * Math.pow(2, attempt);
+          console.log(`  [OpenRouter] ${res.status} on attempt ${attempt + 1}, retrying in ${delay}ms...`);
+          await new Promise((r) => setTimeout(r, delay));
+          continue;
+        }
+        throw new Error(`OpenRouter error (${res.status}): ${err}`);
+      }
+
+      if (!res.ok) {
+        const err = await res.text();
+        throw new Error(`OpenRouter error (${res.status}): ${err}`);
+      }
+
+      const data = await res.json();
+      const choice = data.choices?.[0];
+      if (!choice) {
+        if (attempt < MAX_RETRIES) {
+          const delay = INITIAL_BACKOFF_MS * Math.pow(2, attempt);
+          console.log(`  [OpenRouter] Empty response on attempt ${attempt + 1}, retrying in ${delay}ms...`);
+          await new Promise((r) => setTimeout(r, delay));
+          continue;
+        }
+        throw new Error('No response from OpenRouter after retries');
+      }
+
+      return {
+        content: choice.message?.content || '',
+        model: data.model || model,
+        usage: data.usage,
+      };
+    } catch (e) {
+      if (attempt < MAX_RETRIES && (e instanceof TypeError || (e as Error).message?.includes('fetch'))) {
+        const delay = INITIAL_BACKOFF_MS * Math.pow(2, attempt);
+        console.log(`  [OpenRouter] Network error on attempt ${attempt + 1}, retrying in ${delay}ms...`);
+        await new Promise((r) => setTimeout(r, delay));
+        continue;
+      }
+      throw e;
+    }
   }
 
-  const data = await res.json();
-  const choice = data.choices?.[0];
-  if (!choice) throw new Error('No response from OpenRouter');
-
-  return {
-    content: choice.message?.content || '',
-    model: data.model || model,
-    usage: data.usage,
-  };
+  throw new Error('No response from OpenRouter after retries');
 }
 
 // Default models (from V1 config — app.py lines 71-75)

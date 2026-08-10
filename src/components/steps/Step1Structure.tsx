@@ -203,8 +203,24 @@ export default function Step1Structure() {
     const file = e.target.files?.[0];
     if (!file) return;
     const reader = new FileReader();
-    reader.onload = (ev) => setPasteContent(ev.target?.result as string);
+    reader.onload = (ev) => {
+      const content = ev.target?.result as string;
+      setPasteContent(content);
+      // Try to auto-populate course name from JSON
+      if (!courseName.trim()) {
+        try {
+          const parsed = JSON.parse(content);
+          const name = parsed.course || parsed.courseName || parsed.course_name || parsed.name || parsed.exam || parsed.title || '';
+          if (name) setCourseName(String(name));
+        } catch {
+          // Not JSON or no name field — that's fine
+        }
+      }
+    };
+    reader.onerror = () => setError('Failed to read file');
     reader.readAsText(file);
+    // Reset input so the same file can be re-selected
+    e.target.value = '';
   };
 
   const handleExamFormatFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -550,11 +566,11 @@ export default function Step1Structure() {
               <div className="flex gap-3">
                 <button
                   onClick={generateStructure}
-                  disabled={loading}
+                  disabled={loading || (inputMethod === 'upload' && !pasteContent)}
                   className="flex items-center gap-2 px-6 py-2.5 bg-indigo-600 text-white rounded-lg font-medium hover:bg-indigo-700 disabled:opacity-50 transition-colors"
                 >
                   {loading ? (
-                    <><Loader2 className="w-4 h-4 animate-spin" />{inputMethod === 'ai' ? 'Generating structure...' : 'Processing...'}</>
+                    <><Loader2 className="w-4 h-4 animate-spin" />{inputMethod === 'ai' ? 'Generating structure...' : 'Processing (this may take a moment)...'}</>
                   ) : (
                     <><Sparkles className="w-4 h-4" />{inputMethod === 'ai' ? 'Generate Structure' : 'Create Course'}</>
                   )}

@@ -173,7 +173,7 @@ Scoring guide:
 
 For each question, provide:
 - quality_score (1-10)
-- status: "approved" if score > 7, "flagged" if score <= 7
+- status: "approved" if score >= 7, "flagged" if score < 7
 - reason: 1 sentence explaining the score
 - issues: array of specific problems (empty if approved)
 
@@ -518,7 +518,7 @@ async function runReprocessPipeline(jobId: string): Promise<void> {
         const q = batch[i];
         const result = results[i] || {};
         const auditScore = (result.quality_score as number) || 5;
-        const newStatus = auditScore > 7 ? 'approved' : 'flagged';
+        const newStatus = auditScore >= 7 ? 'approved' : 'flagged';
 
         const vScore = (q.validator_score as number) || 0;
         const aScore = (q.adversarial_score as number) || 0;

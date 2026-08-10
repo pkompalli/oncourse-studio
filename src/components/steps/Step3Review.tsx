@@ -73,6 +73,12 @@ export default function Step3Review() {
     }
   }, [progress?.events]);
 
+  // Always load fresh questions on mount
+  useEffect(() => {
+    if (job) loadQuestions();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [job?.id]);
+
   // Auto-start review when component mounts if job is in reviewing status
   useEffect(() => {
     if (job && (job.status === 'reviewing' || job.status === 'review') && overallStatus === 'idle') {
