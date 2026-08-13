@@ -5,9 +5,11 @@ import { supabase } from '../../services/supabase';
 import type { Job, Question } from '../../types';
 import { Loader2, CheckCircle2, XCircle, Shield, Swords, Wrench, ChevronDown, ChevronUp, Clock, Trash2, ImageIcon } from 'lucide-react';
 import QuestionImage from '../common/QuestionImage';
+import QuestionRenderer from '../common/QuestionRenderer';
 import { useSnapshots, groupSnapshotsBySubject, STAGE_LABELS } from '../../hooks/useSnapshots';
 import type { SnapshotStage } from '../../hooks/useSnapshots';
 import StageSelector from '../common/StageSelector';
+import TokenUsage from '../common/TokenUsage';
 import { displayStatus } from '../../utils/questionStatus';
 
 interface SubjectStatus {
@@ -270,7 +272,7 @@ export default function Step3Review() {
               <div className="flex-1">
                 <div className="flex items-center justify-between">
                   <span className="text-sm font-medium text-slate-700">
-                    Phase 1: Validator Review (GPT-5.4)
+                    Phase 1: Validator Review (Sonnet 5)
                     {phase === 'validator_fixing' && <span className="ml-2 text-xs text-amber-600 font-normal">fixing flagged...</span>}
                   </span>
                   {isValidatorActive(phase) && <Loader2 className="w-4 h-4 text-blue-500 animate-spin" />}
@@ -306,7 +308,7 @@ export default function Step3Review() {
               <div className="flex-1">
                 <div className="flex items-center justify-between">
                   <span className="text-sm font-medium text-slate-700">
-                    Phase 2: Adversarial Review (GPT-5.4)
+                    Phase 2: Adversarial Review (Sonnet 5)
                     {phase === 'adversarial_fixing' && <span className="ml-2 text-xs text-amber-600 font-normal">fixing flagged...</span>}
                   </span>
                   {isAdversarialActive(phase) && <Loader2 className="w-4 h-4 text-purple-500 animate-spin" />}
@@ -328,6 +330,11 @@ export default function Step3Review() {
               </div>
             </div>
           </div>
+          {overallStatus === 'done' && (job?.progress as Record<string, unknown>)?.token_usage && (
+            <div className="mt-1 px-1">
+              <TokenUsage label="Review" data={((job?.progress as Record<string, unknown>)?.token_usage as Record<string, unknown>)?.review as { prompt_tokens: number; completion_tokens: number; total_tokens: number; calls: number } | undefined} />
+            </div>
+          )}
         </div>
       )}
 
@@ -462,28 +469,7 @@ export default function Step3Review() {
                             </span>
                           )}
                         </div>
-                        {q.image_url && (
-                          <QuestionImage
-                            imageUrl={q.image_url as string}
-                            imageType={q.image_type as string}
-                            imageSource={q.image_source as string}
-                          />
-                        )}
-                        <p className="text-sm text-slate-700">{q.question as string}</p>
-                        <div className="grid grid-cols-2 gap-1 mt-2">
-                          {Object.entries((q.options as Record<string, string>) || {}).map(([key, val]) => (
-                            <div key={key} className={`text-xs p-1.5 rounded ${
-                              key === (q.correct_option as string)
-                                ? 'bg-green-100 border border-green-200 text-green-800 font-medium'
-                                : 'bg-white text-slate-600'
-                            }`}>
-                              <span className="font-medium">{key}.</span> {val}
-                            </div>
-                          ))}
-                        </div>
-                        {q.explanation && (
-                          <p className="text-xs text-slate-500 mt-2 bg-white p-2 rounded">{q.explanation as string}</p>
-                        )}
+                        <QuestionRenderer question={q as unknown as Question} showAnswer={true} />
                       </div>
                       {!viewStage && (
                       <button

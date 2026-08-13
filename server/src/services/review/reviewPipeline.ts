@@ -14,6 +14,7 @@ import { runAdversarialBatch } from './adversarial.js';
 import { fixQuestion } from './fixer.js';
 import { saveJobSnapshots } from '../snapshots.js';
 import { regenerateQuestionImage, isImageGenerationAvailable } from '../images/imageGeneration.js';
+import { startTracking, getStepTokens } from '../llm/tokenTracker.js';
 
 const REVIEW_BATCH_SIZE = 10;
 const MAX_CONCURRENT_BATCHES = 8;
@@ -97,11 +98,25 @@ async function fetchJobQuestions(jobId: string, status?: string): Promise<Record
   return (data || []) as Record<string, unknown>[];
 }
 
-async function getCourseName(jobId: string): Promise<string> {
+async function getCourseInfo(jobId: string): Promise<{ name: string; examFormat: Record<string, unknown>; guidelines: Record<string, unknown> }> {
   const { data: job } = await supabase.from('qb_jobs').select('course_id').eq('id', jobId).single();
-  if (!job) return 'Unknown';
-  const { data: course } = await supabase.from('qb_courses').select('name').eq('id', job.course_id).single();
-  return (course?.name as string) || 'Unknown';
+  if (!job) return { name: 'Unknown', examFormat: {}, guidelines: {} };
+
+  // Try with generation_guidelines first; fall back if column doesn't exist yet
+  let course: Record<string, unknown> | null = null;
+  const { data: d1, error: e1 } = await supabase.from('qb_courses').select('name, exam_format, generation_guidelines').eq('id', job.course_id).single();
+  if (e1 && e1.message?.includes('generation_guidelines')) {
+    const { data: d2 } = await supabase.from('qb_courses').select('name, exam_format').eq('id', job.course_id).single();
+    course = d2 as Record<string, unknown> | null;
+  } else {
+    course = d1 as Record<string, unknown> | null;
+  }
+
+  return {
+    name: (course?.name as string) || 'Unknown',
+    examFormat: (course?.exam_format as Record<string, unknown>) || {},
+    guidelines: (course?.generation_guidelines as Record<string, unknown>) || {},
+  };
 }
 
 function buildSubjectMap(questions: Record<string, unknown>[]): SubjectStatus[] {
@@ -159,7 +174,9 @@ async function pushProgress(jobId: string) {
 async function runValidatorPhase(
   jobId: string,
   questions: Record<string, unknown>[],
-  courseName: string
+  courseName: string,
+  examFormat?: Record<string, unknown>,
+  guidelines?: Record<string, unknown>
 ): Promise<{ reviewed: number; fixed: number }> {
   const batches = chunk(questions, REVIEW_BATCH_SIZE);
   let totalReviewed = 0;
@@ -179,7 +196,7 @@ async function runValidatorPhase(
     // ── Step: Sending to validator ──
     setStep(jobId, `[Validator] Batch ${batchNum}/${batchesTotal}: sending Q${qStart}–Q${qEnd} to GPT-5.4...`);
 
-    const results = await runValidatorBatch(batch);
+    const results = await runValidatorBatch(batch, 'qbank', 'medical education', examFormat, guidelines);
 
     // ── Step: Processing scores ──
     setStep(jobId, `[Validator] Batch ${batchNum}/${batchesTotal}: processing scores for Q${qStart}–Q${qEnd}`);
@@ -191,7 +208,21 @@ async function runValidatorPhase(
       const q = batch[i];
       const result = results[i] || {};
       const score = (result.overall_accuracy_score as number) || 5;
-      const changes = (result.changes_required as string[]) || [];
+      const formatIssues = (result.format_compliance_issues as string[]) || [];
+      const caseStudyIssues = (result.case_study_issues as string[]) || [];
+      const difficultyIssues = (result.difficulty_issues as string[]) || [];
+      const explanationIssues = (result.explanation_issues as string[]) || [];
+      const hotspotIssues = (result.hotspot_issues as string[]) || [];
+      const answerKeyIssue = (result.answer_key_issue as string) || '';
+      const changes = [
+        ...((result.changes_required as string[]) || []),
+        ...formatIssues.map((fi: string) => `FORMAT: ${fi}`),
+        ...caseStudyIssues.map((ci: string) => `CASE_STUDY: ${ci}`),
+        ...difficultyIssues.map((di: string) => `DIFFICULTY: ${di}`),
+        ...explanationIssues.map((ei: string) => `EXPLANATION: ${ei}`),
+        ...hotspotIssues.map((hi: string) => `HOTSPOT: ${hi}`),
+        ...(answerKeyIssue ? [`ANSWER KEY: ${answerKeyIssue}`] : []),
+      ];
       const assetIssues = (result.asset_issues as string[]) || [];
       const missingImages = (result.missing_images as string[]) || [];
 
@@ -340,7 +371,8 @@ async function runAdversarialPhase(
   jobId: string,
   questions: Record<string, unknown>[],
   courseName: string,
-  prevFixed: number
+  prevFixed: number,
+  examFormat?: Record<string, unknown>
 ): Promise<{ reviewed: number; fixed: number }> {
   const batches = chunk(questions, REVIEW_BATCH_SIZE);
   let totalReviewed = 0;
@@ -359,7 +391,7 @@ async function runAdversarialPhase(
 
     setStep(jobId, `[Adversarial] Batch ${batchNum}/${batchesTotal}: sending Q${qStart}–Q${qEnd} to GPT-5.4...`);
 
-    const results = await runAdversarialBatch(batch);
+    const results = await runAdversarialBatch(batch, 'qbank', 'medical education', examFormat);
 
     setStep(jobId, `[Adversarial] Batch ${batchNum}/${batchesTotal}: processing scores for Q${qStart}–Q${qEnd}`);
 
@@ -370,7 +402,17 @@ async function runAdversarialPhase(
       const q = batch[i];
       const result = results[i] || {};
       const score = (result.adversarial_score as number) || 5;
-      const changes = (result.changes_required as string[]) || [];
+      const conceptOverlap = (result.concept_overlap as string) || '';
+      const answerKeyIssue = (result.answer_key_issue as string) || '';
+      const caseStudyIssues = (result.case_study_issues as string[]) || [];
+      const explanationIssues = (result.explanation_contradictions as string[]) || [];
+      const changes = [
+        ...((result.changes_required as string[]) || []),
+        ...(conceptOverlap ? [`CONCEPT OVERLAP: ${conceptOverlap}`] : []),
+        ...(answerKeyIssue ? [`ANSWER KEY: ${answerKeyIssue}`] : []),
+        ...caseStudyIssues.map((ci: string) => `CASE_STUDY: ${ci}`),
+        ...explanationIssues.map((ei: string) => `EXPLANATION: ${ei}`),
+      ];
       const assetIssues = (result.asset_issues as string[]) || [];
       const missingImages = (result.missing_images as string[]) || [];
 
@@ -515,8 +557,9 @@ async function runAdversarialPhase(
 
 async function runReviewPipeline(jobId: string): Promise<void> {
   try {
+    startTracking(jobId, 'review');
     setStep(jobId, 'Loading course data...');
-    const courseName = await getCourseName(jobId);
+    const { name: courseName, examFormat, guidelines } = await getCourseInfo(jobId);
 
     // ── Reset ALL questions for this job to 'generated' before fetching ──
     // This ensures re-runs clear stale audit data (quality_score, status=approved/flagged)
@@ -592,7 +635,7 @@ async function runReviewPipeline(jobId: string): Promise<void> {
     await pushProgress(jobId);
 
     // Phase A — only send valid questions (not structural failures)
-    const validatorResult = await runValidatorPhase(jobId, validQuestions, courseName);
+    const validatorResult = await runValidatorPhase(jobId, validQuestions, courseName, examFormat, guidelines);
 
     // Save post-validator snapshot
     setStep(jobId, 'Saving post-validator snapshots...');
@@ -611,7 +654,7 @@ async function runReviewPipeline(jobId: string): Promise<void> {
     });
 
     // Phase B
-    const adversarialResult = await runAdversarialPhase(jobId, freshValid, courseName, validatorResult.fixed);
+    const adversarialResult = await runAdversarialPhase(jobId, freshValid, courseName, validatorResult.fixed, examFormat);
 
     // Save post-adversarial snapshot
     setStep(jobId, 'Saving post-adversarial snapshots...');
@@ -629,12 +672,18 @@ async function runReviewPipeline(jobId: string): Promise<void> {
     const finalMsg = `Review complete — ${total} questions reviewed, ${totalFixed} fixed inline. Ready for audit.`;
     setStep(jobId, finalMsg);
 
+    // Merge token usage from generation + review
+    const reviewTokens = getStepTokens(jobId, 'review');
+    const { data: currentJob } = await supabase.from('qb_jobs').select('progress').eq('id', jobId).single();
+    const existingTokens = (currentJob?.progress as Record<string, unknown>)?.token_usage as Record<string, unknown> || {};
+
     await supabase.from('qb_jobs').update({
       status: 'auditing',
       progress: {
         phase: 'done', step: finalMsg,
         reviewed: total, fixed: totalFixed, total,
         events: runningReviews.get(jobId)?.events.slice(-10) || [],
+        token_usage: { ...existingTokens, review: reviewTokens },
       },
     }).eq('id', jobId);
 

@@ -5,9 +5,11 @@ import { supabase } from '../../services/supabase';
 import type { Job, Question } from '../../types';
 import { Play, Loader2, CheckCircle2, XCircle, Clock, History, ArrowRight, Trash2, ChevronDown, ChevronUp, ImageIcon, AlertTriangle } from 'lucide-react';
 import QuestionImage from '../common/QuestionImage';
+import QuestionRenderer from '../common/QuestionRenderer';
 import { useSnapshots, groupSnapshotsBySubject, STAGE_LABELS } from '../../hooks/useSnapshots';
 import type { SnapshotStage } from '../../hooks/useSnapshots';
 import StageSelector from '../common/StageSelector';
+import TokenUsage from '../common/TokenUsage';
 import { displayStatus } from '../../utils/questionStatus';
 
 interface SubjectProgress {
@@ -126,10 +128,10 @@ export default function Step2Generate() {
     const targetStep = STATUS_STEP_MAP[resumeJob.status] || 'generate';
 
     // Mark completed steps up to the target
-    const stepOrder = ['structure', 'generate', 'review', 'audit', 'replace', 'export'];
+    const stepOrder = ['structure', 'guidelines', 'generate', 'review', 'audit', 'export'];
     const targetIdx = stepOrder.indexOf(targetStep);
     for (let i = 0; i < targetIdx; i++) {
-      completeStep(stepOrder[i] as 'structure' | 'generate' | 'review' | 'audit' | 'export');
+      completeStep(stepOrder[i] as 'structure' | 'guidelines' | 'generate' | 'review' | 'audit' | 'export');
     }
 
     // If generation is done, mark it complete and go to the right step
@@ -447,6 +449,9 @@ export default function Step2Generate() {
               {completedSubjects}/{subjectProgress.length} subjects
             </div>
           )}
+          {overallStatus === 'done' && (job?.progress as Record<string, unknown>)?.token_usage && (
+            <TokenUsage label="Generation" data={((job?.progress as Record<string, unknown>)?.token_usage as Record<string, unknown>)?.generation as { prompt_tokens: number; completion_tokens: number; total_tokens: number; calls: number } | undefined} />
+          )}
         </div>
       )}
 
@@ -613,28 +618,7 @@ export default function Step2Generate() {
                             </span>
                           )}
                         </div>
-                        {q.image_url && (
-                          <QuestionImage
-                            imageUrl={q.image_url as string}
-                            imageType={q.image_type as string}
-                            imageSource={q.image_source as string}
-                          />
-                        )}
-                        <p className="text-sm text-slate-700">{q.question as string}</p>
-                        <div className="grid grid-cols-2 gap-1 mt-2">
-                          {Object.entries((q.options as Record<string, string>) || {}).map(([key, val]) => (
-                            <div key={key} className={`text-xs p-1.5 rounded ${
-                              key === (q.correct_option as string)
-                                ? 'bg-green-100 border border-green-200 text-green-800 font-medium'
-                                : 'bg-white text-slate-600'
-                            }`}>
-                              <span className="font-medium">{key}.</span> {val}
-                            </div>
-                          ))}
-                        </div>
-                        {q.explanation && (
-                          <p className="text-xs text-slate-500 mt-2 bg-white p-2 rounded">{q.explanation as string}</p>
-                        )}
+                        <QuestionRenderer question={q as Question} showAnswer={true} />
                       </div>
                       {!viewStage && (
                       <button

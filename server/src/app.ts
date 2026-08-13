@@ -5,6 +5,7 @@ import { coursesRouter } from './routes/courses.js';
 import { jobsRouter } from './routes/jobs.js';
 import { questionsRouter } from './routes/questions.js';
 import { exportRouter } from './routes/exports.js';
+import { formatsRouter } from './routes/formats.js';
 import { errorHandler } from './middleware/errorHandler.js';
 
 const app = express();
@@ -18,6 +19,7 @@ app.use('/api/courses', coursesRouter);
 app.use('/api/jobs', jobsRouter);
 app.use('/api/questions', questionsRouter);
 app.use('/api/export', exportRouter);
+app.use('/api/formats', formatsRouter);
 
 // Health check
 app.get('/api/health', (_req, res) => {

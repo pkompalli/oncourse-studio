@@ -5,9 +5,11 @@ import { supabase } from '../../services/supabase';
 import type { Job, Question } from '../../types';
 import { Loader2, CheckCircle2, AlertTriangle, Play, Clock, Trash2, ChevronDown, ChevronUp, ImageIcon } from 'lucide-react';
 import QuestionImage from '../common/QuestionImage';
+import QuestionRenderer from '../common/QuestionRenderer';
 import { useSnapshots, groupSnapshotsBySubject, STAGE_LABELS } from '../../hooks/useSnapshots';
 import type { SnapshotStage } from '../../hooks/useSnapshots';
 import StageSelector from '../common/StageSelector';
+import TokenUsage from '../common/TokenUsage';
 import { displayStatus } from '../../utils/questionStatus';
 
 interface SubjectStatus {
@@ -285,6 +287,13 @@ export default function Step4Audit() {
             <CheckCircle2 className="w-5 h-5 text-green-600 shrink-0" />
             <span className="text-sm font-medium text-green-800">{progress.step}</span>
           </div>
+          {(job?.progress as Record<string, unknown>)?.token_usage && (
+            <div className="mt-2 space-y-0.5">
+              <TokenUsage label="Generation" data={((job?.progress as Record<string, unknown>)?.token_usage as Record<string, unknown>)?.generation as { prompt_tokens: number; completion_tokens: number; total_tokens: number; calls: number } | undefined} />
+              <TokenUsage label="Review" data={((job?.progress as Record<string, unknown>)?.token_usage as Record<string, unknown>)?.review as { prompt_tokens: number; completion_tokens: number; total_tokens: number; calls: number } | undefined} />
+              <TokenUsage label="Audit" data={((job?.progress as Record<string, unknown>)?.token_usage as Record<string, unknown>)?.audit as { prompt_tokens: number; completion_tokens: number; total_tokens: number; calls: number } | undefined} />
+            </div>
+          )}
         </div>
       )}
 
@@ -423,31 +432,7 @@ export default function Step4Audit() {
                           </span>
                         )}
                       </div>
-                      {q.image_url && (
-                        <QuestionImage
-                          imageUrl={q.image_url as string}
-                          imageType={q.image_type as string}
-                          imageSource={q.image_source as string}
-                        />
-                      )}
-                      <p className="text-sm text-slate-700">{q.question as string}</p>
-                      <div className="grid grid-cols-2 gap-1 mt-2">
-                        {Object.entries((q.options as Record<string, string>) || {}).map(([key, val]) => (
-                          <div
-                            key={key}
-                            className={`text-xs p-1.5 rounded ${
-                              key === (q.correct_option as string)
-                                ? 'bg-green-100 border border-green-200 text-green-800 font-medium'
-                                : 'bg-white text-slate-600'
-                            }`}
-                          >
-                            <span className="font-medium">{key}.</span> {val}
-                          </div>
-                        ))}
-                      </div>
-                      {q.explanation && (
-                        <p className="text-xs text-slate-500 mt-2 bg-slate-50 p-2 rounded">{q.explanation as string}</p>
-                      )}
+                      <QuestionRenderer question={q as unknown as Question} showAnswer={true} />
                     </div>
                     {!viewStage && (
                     <button

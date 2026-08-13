@@ -6,7 +6,7 @@ import type { StepId } from '../../types';
 export default function Stepper() {
   const { currentStep, completedSteps, setStep } = useAppStore();
 
-  const stepOrder: StepId[] = ['structure', 'generate', 'review', 'audit', 'export'];
+  const stepOrder: StepId[] = ['structure', 'guidelines', 'generate', 'review', 'audit', 'export'];
 
   const canNavigate = (stepId: StepId) => {
     if (stepId === currentStep) return true;

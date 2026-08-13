@@ -9,7 +9,7 @@ import { extractJsonArray, formatQuestionsForReviewWithImages } from './shared.j
 
 // ── Validator Prompt (V1 lines 5803-5857, verbatim) ──
 
-export function getBatchValidatorPrompt(contentType: string, domain = 'medical education'): string {
+export function getBatchValidatorPrompt(contentType: string, domain = 'medical education', examFormat?: Record<string, unknown>, guidelines?: Record<string, unknown>, formatsInBatch?: Set<string>): string {
   if (contentType === 'lesson') {
     return `You are a senior ${domain} content validator. Fix what is genuinely wrong — do not over-correct content that is already accurate and appropriate.
 
@@ -61,30 +61,151 @@ Return a JSON ARRAY — one object per section:
 Output ONLY the JSON array. No preamble, no trailing text.`;
   }
 
+  // Build exam format context if available
+  let examFormatContext = '';
+  if (examFormat && Object.keys(examFormat).length > 0) {
+    const parts: string[] = [];
+    const stemStyle = examFormat.stem_style as Record<string, unknown> | undefined;
+    const optionCount = examFormat.option_count || (stemStyle?.option_count);
+    const philosophy = examFormat.testing_philosophy as string;
+    const distinctive = (examFormat.distinctive_patterns as string[]) || [];
+    const antiPatterns = (examFormat.what_NOT_to_do as string[]) || [];
+    const recallRatio = examFormat.recall_vs_reasoning_ratio as Record<string, unknown> | undefined;
+
+    if (philosophy) parts.push(`Testing philosophy: ${philosophy}`);
+    if (stemStyle?.typical_format) parts.push(`Expected stem format: ${stemStyle.typical_format}`);
+    if (optionCount) parts.push(`Expected option count: ${optionCount}`);
+    if (recallRatio?.description) parts.push(`Recall vs reasoning: ${recallRatio.description}`);
+    if (distinctive.length > 0) parts.push(`Distinctive patterns:\n${distinctive.slice(0, 4).map(p => `  • ${p}`).join('\n')}`);
+    if (antiPatterns.length > 0) parts.push(`What this exam does NOT do:\n${antiPatterns.slice(0, 3).map(p => `  • ${p}`).join('\n')}`);
+
+    if (parts.length > 0) {
+      examFormatContext = `\nEXAM FORMAT REQUIREMENTS (use these to judge format compliance):\n${parts.join('\n')}\n`;
+    }
+  }
+
+  // Build guidelines context if available
+  let guidelinesContext = '';
+  if (guidelines && Object.keys(guidelines).length > 0) {
+    const gParts: string[] = [];
+    const stem = guidelines.stem_guidelines as Record<string, unknown> | undefined;
+    if (stem) {
+      const rules: string[] = [];
+      if (stem.style) rules.push(`Style: ${stem.style}`);
+      if (stem.vignette_required) rules.push('Vignettes REQUIRED');
+      if (stem.min_words || stem.max_words) rules.push(`Stem length: ${stem.min_words || '?'}–${stem.max_words || '?'} words`);
+      if (stem.clinical_scenario_depth) rules.push(`Clinical depth: ${stem.clinical_scenario_depth}`);
+      if (rules.length > 0) gParts.push(`Stem: ${rules.join(', ')}`);
+    }
+    const dist = guidelines.distractor_guidelines as Record<string, unknown> | undefined;
+    if (dist) {
+      const rules = (dist.quality_rules as string[]) || [];
+      if (rules.length > 0) gParts.push(`Distractor rules:\n${rules.slice(0, 5).map(r => `  • ${r}`).join('\n')}`);
+    }
+    const expl = guidelines.explanation_guidelines as Record<string, unknown> | undefined;
+    if (expl) {
+      const rules: string[] = [];
+      if (expl.must_justify_correct) rules.push('Must justify correct answer');
+      if (expl.must_address_distractors) rules.push('Must address why distractors are wrong');
+      if (expl.min_sentences) rules.push(`Min ${expl.min_sentences} sentences`);
+      if (rules.length > 0) gParts.push(`Explanation: ${rules.join(', ')}`);
+    }
+    const anti = (guidelines.anti_patterns as string[]) || [];
+    if (anti.length > 0) gParts.push(`Anti-patterns to flag:\n${anti.slice(0, 5).map(a => `  • ${a}`).join('\n')}`);
+    const coverage = (guidelines.coverage_rules as string[]) || [];
+    if (coverage.length > 0) gParts.push(`Coverage rules:\n${coverage.slice(0, 4).map(c => `  • ${c}`).join('\n')}`);
+
+    if (gParts.length > 0) {
+      guidelinesContext = `\nGENERATION GUIDELINES (check compliance against these rules):\n${gParts.join('\n')}\n`;
+    }
+  }
+
+  // Determine which format-specific checks to include based on batch contents
+  const hasCaseStudy = !formatsInBatch || formatsInBatch.has('case_study');
+  const hasHotSpot = !formatsInBatch || formatsInBatch.has('hot_spot');
+
+  // Build format-specific check sections
+  let formatSpecificChecks = '';
+  if (hasCaseStudy) {
+    formatSpecificChecks += `
+8. CASE STUDY COMPLIANCE (for format_type = "case_study"):
+   a. Does the case have exactly 6 sub-questions? If fewer, flag and set needs_revision true.
+   b. Does the case use at least 3 DIFFERENT format_types across sub-questions? If only 1-2, flag.
+   c. Does EACH sub-question have its own "rationale" field? If any rationale is missing or empty, flag.
+   d. Does each sub-question have a "cjmm_step" tag? If missing, flag.${hasHotSpot ? `
+   e. Hot_spot sub-questions must use the stimulus+correct_ids contract (see check 11).` : ''}`;
+  }
+  if (hasHotSpot) {
+    formatSpecificChecks += `
+11. HOT_SPOT CONTRACT (for format_type = "hot_spot", including hot_spot sub-questions inside case studies):
+   The answer MUST be a set of target IDs — NEVER a text description of where to click.
+   a. (HS001) If answer.region, answer.label, or answer.landmark exists → ERROR. Remove free-text answer; enumerate clickable elements as stimulus.targets with ids and set answer.correct_ids.
+   b. (HS002) content.stimulus must exist with type "text_targets" or "image_regions". If missing → ERROR.
+   c. (HS003) stimulus must have ≥2 targets/regions. If fewer → ERROR.
+   d. (HS004) Every target/region must have a valid lowercase-slug id matching ^[a-z0-9][a-z0-9_-]*$. If missing or invalid → ERROR.
+   e. (HS005) All ids must be unique within the item. If duplicates → ERROR.
+   f. (HS006) answer.correct_ids must exist and be non-empty. If missing → ERROR.
+   g. (HS007) correct_ids must not have duplicates.
+   h. (HS008) Every id in correct_ids must exist in stimulus targets/regions (referential integrity). If not → ERROR.
+   i. (HS010) content.scoring must be "dichotomous" or "plus_minus". If missing or invalid → ERROR.
+   j. (HS011) content.rationale should have one entry per target id. If missing → WARNING.
+   Report hot_spot contract violations in "hotspot_issues" array. Score ≤ 4 if any HS error found.`;
+  }
+
+  // Build format-specific scoring notes
+  const scoringLowNotes: string[] = ['wrong answer, dangerous error, broken question'];
+  if (hasCaseStudy) scoringLowNotes.push('case study missing sub-question rationales');
+  if (hasHotSpot) scoringLowNotes.push('hot_spot contract violations (HS001-HS008)');
+  scoringLowNotes.push('OR image explicitly referenced but absent');
+
+  // Build format-specific output fields
+  const caseStudyField = hasCaseStudy
+    ? `\n    "case_study_issues": [<flag if: fewer than 6 sub-questions, fewer than 3 format types, missing sub-question rationales, missing cjmm_step tags${hasHotSpot ? ', hot_spot answers are prose' : ''} — empty if none or not a case_study>],`
+    : '';
+  const hotspotField = hasHotSpot
+    ? `\n    "hotspot_issues": [<flag if: hot_spot contract violations — HS001-HS011 codes with specific fix instructions — empty if not hot_spot or no violations>],`
+    : '';
+
   // qbank (V1 lines 5803-5857)
   return `You are a senior ${domain} exam item validator.
-
-YOUR ROLE — accuracy and relevance: Is everything in this question factually correct? Is the content relevant to what the question is testing?
-You are NOT here to improve, expand, or polish. Only flag what is wrong or irrelevant.
+${examFormatContext}${guidelinesContext}
+YOUR ROLE — accuracy, relevance, AND format compliance: Is everything in this question factually correct? Does it match the target exam's format and structure?
+You are NOT here to improve, expand, or polish. Only flag what is wrong, irrelevant, or non-compliant.
 
 You will receive multiple questions numbered Q1, Q2, etc.
 
-For EACH question ask only:
+For EACH question ask:
 1. Is the marked correct answer factually correct? If yes, score it high and move on.
 2. Are the distractors factually wrong? Minor edge cases that don't change the answer are NOT issues.
-3. Is the explanation factually accurate and does it correctly justify the answer?
+3. EXPLANATION QUALITY (CRITICAL — score ≤ 6 if deficient):
+   a. Does the explanation justify WHY the correct answer is right?
+   b. Does the explanation address EACH distractor/wrong option BY NAME and state WHY it is wrong?
+   c. If the explanation only defends the correct answer without discussing distractors → flag as "explanation_issues" and set needs_revision true.
+   d. Minimum 3 sentences for standalone questions.
 4. Does the vignette contain the minimum data needed to reach the correct answer?
 5. Is the clinical content free of factual inaccuracies?
-6. IMAGE — relevance only:
+6. FORMAT COMPLIANCE (if exam format requirements are provided above):
+   a. Does the stem match the expected format (e.g., clinical vignette vs. direct recall)?
+   b. Does the option count match (e.g., 4 options vs. 5)?
+   c. Are the distractors structured as the exam expects (homogeneous length, parallel construction)?
+   d. Is the Bloom's level a valid normalized value (2_understand, 3_apply, 4_analyze, 5_evaluate)? Flag non-standard labels like NCJMM_*, raw text labels, etc.
+7. DIFFICULTY FIELD:
+   a. Does the question have a difficulty field with value "easy", "medium", or "hard"?
+   b. If missing or invalid → flag as format_compliance_issues.
+   c. Is the assigned difficulty reasonable for the question's complexity?${formatSpecificChecks}
+9. ANSWER KEY DIVERSITY — check the correct answer keys across the batch:
+   a. Note the correct answer letter (A/B/C/D/E) for each question.
+   b. If more than 40% of questions in this batch share the same correct answer key, flag the over-represented ones and request the answer key be changed (with appropriate content adjustment).
+10. IMAGE — relevance only:
    a. Image absent but the stem explicitly references it (e.g. "shown below", "image 1", "radiograph shown") → score ≤ 4 and set needs_revision true. The question is UNUSABLE without its image regardless of how good the text is.
    b. Image present but wrong modality or clearly irrelevant → flag and suggest replacement.
    c. Image that is imperfect but clinically appropriate → do NOT flag.
 
 Scoring (10 = nothing to fix, 1 = unacceptable):
-• 9–10 → factually correct and relevant — do not change
-• 7–8 → minor imprecision, correct answer not in doubt
-• 5–6 → genuine factual or relevance issue worth fixing
-• 1–4  → wrong answer, dangerous error, broken question, OR image explicitly referenced but absent
+• 9–10 → factually correct, explanation addresses all options, format compliant — do not change
+• 7–8 → minor imprecision, correct answer not in doubt, explanation mostly complete
+• 5–6 → explanation only defends correct answer without discussing distractors, OR format non-compliance, OR missing difficulty/bloom
+• 1–4  → ${scoringLowNotes.join(', ')}
 
 Each issue must be ONE specific sentence: what is wrong AND the preferred fix. No vague commentary.
 If nothing is wrong, leave all issue arrays empty and score 9–10.
@@ -100,7 +221,10 @@ Return a JSON ARRAY — one object per question:
     "factual_errors": [<confirmed wrong clinical facts only — empty if none>],
     "distractor_issues": [<only if a distractor is genuinely defensible as correct — empty if none>],
     "vignette_issues": [<only if key data is missing to reach the answer — empty if none>],
-    "explanation_issues": [<only if explanation contradicts or fails to justify the answer — empty if none>],
+    "explanation_issues": [<flag if: explanation only defends correct answer without discussing distractors, too short, or contradicts answer — empty if none>],${caseStudyField}
+    "difficulty_issues": [<flag if: difficulty field missing, invalid value, or unreasonable for question complexity — empty if none>],${hotspotField}
+    "format_compliance_issues": [<stem format, option count, Bloom's level mismatches, non-normalized bloom labels — empty if none>],
+    "answer_key_issue": "<if this question's correct answer contributes to a skewed distribution (e.g., too many 'B' answers), suggest changing to a different key with rationale — null if fine>",
     "asset_issues": [<image mismatch — replace image only — empty if none>],
     "missing_images": [<image absent but explicitly required — empty if none>],
     "recommendations": [<empty if none>],
@@ -123,9 +247,27 @@ Output ONLY the JSON array. No preamble, no trailing text.`;
 export async function runValidatorBatch(
   questions: Record<string, unknown>[],
   contentType = 'qbank',
-  domain = 'medical education'
+  domain = 'medical education',
+  examFormat?: Record<string, unknown>,
+  guidelines?: Record<string, unknown>
 ): Promise<Record<string, unknown>[]> {
-  const prompt = getBatchValidatorPrompt(contentType, domain);
+  // Detect which format types are in this batch to conditionally include checks
+  const formatsInBatch = new Set<string>();
+  for (const q of questions) {
+    const ft = (q.format_type as string)
+      || ((q.tags as Record<string, unknown>)?.format_type as string)
+      || 'mcq_single';
+    formatsInBatch.add(ft);
+    // Also check for hot_spot sub-questions inside case studies
+    if (ft === 'case_study') {
+      const subs = ((q.content as Record<string, unknown>)?.sub_questions as Array<Record<string, unknown>>) || [];
+      for (const s of subs) {
+        if (s.format_type === 'hot_spot') formatsInBatch.add('hot_spot');
+      }
+    }
+  }
+
+  const prompt = getBatchValidatorPrompt(contentType, domain, examFormat, guidelines, formatsInBatch);
   const content = formatQuestionsForReviewWithImages(questions);
 
   // Build user message: multimodal if images present, plain text otherwise

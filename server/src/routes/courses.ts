@@ -2,7 +2,8 @@ import { Router } from 'express';
 import { supabase } from '../db/supabase.js';
 import { generateCourseStructure, parseStructureFromInput } from '../services/generation/courseStructure.js';
 import { refineCourseStructure, refineExamFormat } from '../services/generation/refineStructure.js';
-import { analyzeExamFormat, fetchMockExamSpecs } from '../services/generation/examFormat.js';
+import { analyzeExamFormat, fetchMockExamSpecs, interpretExamFormatFromText } from '../services/generation/examFormat.js';
+import { generateGuidelines, refineGuidelines } from '../services/generation/guidelines.js';
 
 export const coursesRouter = Router();
 
@@ -192,6 +193,44 @@ coursesRouter.post('/:id/exam-format', async (req, res, next) => {
   }
 });
 
+// Interpret raw text as exam format (accepts any format: plain text, markdown, guidelines, etc.)
+coursesRouter.post('/:id/exam-format-from-text', async (req, res, next) => {
+  try {
+    const { raw_text } = req.body;
+    if (!raw_text || !raw_text.trim()) {
+      res.status(400).json({ error: 'Text content is required' });
+      return;
+    }
+
+    const { data: course, error: fetchError } = await supabase
+      .from('qb_courses')
+      .select('*')
+      .eq('id', req.params.id)
+      .single();
+
+    if (fetchError) throw new Error(fetchError.message);
+
+    const structure = course.structure as Record<string, unknown>;
+    const courseName = course.name as string;
+
+    // Use AI to interpret the raw text into structured exam format
+    const examFormat = await interpretExamFormatFromText(raw_text, courseName, structure);
+
+    // Save to DB
+    const { data, error } = await supabase
+      .from('qb_courses')
+      .update({ exam_format: examFormat })
+      .eq('id', req.params.id)
+      .select()
+      .single();
+
+    if (error) throw new Error(error.message);
+    res.json({ course: data });
+  } catch (e) {
+    next(e);
+  }
+});
+
 // Refine course structure via chat
 coursesRouter.put('/:id', async (req, res, next) => {
   try {
@@ -240,6 +279,74 @@ coursesRouter.put('/:id', async (req, res, next) => {
       } else {
         res.json({ course, chat_response: result.response });
       }
+    }
+  } catch (e) {
+    next(e);
+  }
+});
+
+// Generate guidelines from exam format + structure
+coursesRouter.post('/:id/guidelines', async (req, res, next) => {
+  try {
+    const { data: course, error: fetchError } = await supabase
+      .from('qb_courses')
+      .select('*')
+      .eq('id', req.params.id)
+      .single();
+
+    if (fetchError) throw new Error(fetchError.message);
+
+    const structure = course.structure as Record<string, unknown>;
+    const examFormat = (course.exam_format || {}) as Record<string, unknown>;
+    const courseName = course.name as string;
+
+    const guidelines = await generateGuidelines(courseName, structure, examFormat);
+
+    const { data, error } = await supabase
+      .from('qb_courses')
+      .update({ generation_guidelines: guidelines })
+      .eq('id', req.params.id)
+      .select()
+      .single();
+
+    if (error) throw new Error(error.message);
+    res.json({ course: data });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// Refine guidelines via chat
+coursesRouter.put('/:id/guidelines', async (req, res, next) => {
+  try {
+    const { message } = req.body;
+    if (!message) {
+      res.status(400).json({ error: 'Message is required' });
+      return;
+    }
+
+    const { data: course, error: fetchError } = await supabase
+      .from('qb_courses')
+      .select('*')
+      .eq('id', req.params.id)
+      .single();
+
+    if (fetchError) throw new Error(fetchError.message);
+
+    const currentGuidelines = (course.generation_guidelines || {}) as Record<string, unknown>;
+    const result = await refineGuidelines(currentGuidelines, message, course.name as string);
+
+    if (result.updated_guidelines) {
+      const { data, error } = await supabase
+        .from('qb_courses')
+        .update({ generation_guidelines: result.updated_guidelines })
+        .eq('id', req.params.id)
+        .select()
+        .single();
+      if (error) throw new Error(error.message);
+      res.json({ course: data, chat_response: result.response });
+    } else {
+      res.json({ course, chat_response: result.response });
     }
   } catch (e) {
     next(e);

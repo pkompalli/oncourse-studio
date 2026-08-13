@@ -9,7 +9,7 @@ import { extractJsonArray, formatQuestionsForReviewWithImages } from './shared.j
 
 // ── Adversarial Prompt (V1 lines 5915-5966) ──
 
-export function getBatchAdversarialPrompt(contentType: string, domain = 'medical education'): string {
+export function getBatchAdversarialPrompt(contentType: string, domain = 'medical education', examFormat?: Record<string, unknown>): string {
   if (contentType === 'lesson') {
     return `You are an adversarial ${domain} content reviewer. Your role is to find real defects that would mislead learners or cause harm — not to invent problems where none exist.
 
@@ -61,11 +61,28 @@ Return a JSON ARRAY — one object per section:
 Output ONLY the JSON array. No preamble, no trailing text.`;
   }
 
+  // Build exam format context for adversarial
+  let examFormatContext = '';
+  if (examFormat && Object.keys(examFormat).length > 0) {
+    const parts: string[] = [];
+    const philosophy = examFormat.testing_philosophy as string;
+    const antiPatterns = (examFormat.what_NOT_to_do as string[]) || [];
+    const recallRatio = examFormat.recall_vs_reasoning_ratio as Record<string, unknown> | undefined;
+
+    if (philosophy) parts.push(`Testing philosophy: ${philosophy}`);
+    if (recallRatio?.description) parts.push(`Recall vs reasoning: ${recallRatio.description}`);
+    if (antiPatterns.length > 0) parts.push(`What this exam does NOT do:\n${antiPatterns.slice(0, 3).map(p => `  • ${p}`).join('\n')}`);
+
+    if (parts.length > 0) {
+      examFormatContext = `\nEXAM FORMAT CONTEXT (use to judge educational alignment):\n${parts.join('\n')}\n`;
+    }
+  }
+
   // qbank
   return `You are an adversarial ${domain} exam item reviewer.
-
-YOUR ROLE — missing or misleading content: Does this question have anything absent or misleading that would cause confusion, reinforce a wrong mental model, or reduce its educational value?
-You are NOT a fact-checker (the validator handles accuracy). Your lens is: could a student come away from this question more confused or with a worse understanding than before?
+${examFormatContext}
+YOUR ROLE — missing or misleading content, AND batch-level quality: Does this question have anything absent or misleading that would cause confusion, reinforce a wrong mental model, or reduce its educational value? Does the batch as a whole have diversity issues?
+You are NOT a fact-checker (the validator handles accuracy). Your lens is: could a student come away from this question more confused or with a worse understanding than before? And does the batch as a whole represent good exam design?
 
 You will receive multiple questions numbered Q1, Q2, etc.
 
@@ -74,7 +91,23 @@ Flag only if one of these is true:
 2. The question is misleading in a way that would teach a wrong mental model (e.g., explanation implies a false rule, distractor wording implies wrong pathophysiology)
 3. An alternative answer is so defensible that a well-prepared student would reasonably choose it — not a far-fetched edge case
 4. A triviality clue bypasses clinical reasoning entirely, making the question educationally worthless
-5. IMAGE: actively misleading (wrong pathology/anatomy shown) OR absent when the stem explicitly references it — a question that says "shown below" or "Image 1" with no image present is educationally broken and scores ≤ 4
+5. EXPLANATION COMPLETENESS — the explanation MUST:
+   a. Justify WHY the correct answer is right
+   b. Address EACH wrong option BY NAME and explain WHY it is wrong
+   c. If the explanation only defends the correct answer without discussing distractors → flag as "explanation_contradictions" and score ≤ 6
+6. IMAGE: actively misleading (wrong pathology/anatomy shown) OR absent when the stem explicitly references it — a question that says "shown below" or "Image 1" with no image present is educationally broken and scores ≤ 4
+7. CASE STUDY STRUCTURE — for format_type "case_study":
+   a. Must have exactly 6 sub-questions (flag if fewer)
+   b. Must use at least 3 different format_types across sub-questions
+   c. Each sub-question MUST have its own "rationale" explaining correct answer + why distractors are wrong
+   d. Each sub-question MUST have a "cjmm_step" tag (Recognize Cues, Analyze Cues, Prioritize Hypotheses, Generate Solutions, Take Action, Evaluate Outcomes)
+   e. Hot-spot answers must be structured objects, not prose strings
+8. CONCEPT DIVERSITY — look across the entire batch:
+   a. Flag questions that test the EXACT same concept/fact as another question in the batch (conceptual duplicate even if worded differently)
+   b. Flag questions that are too similar in clinical presentation (e.g., 3 questions all presenting with chest pain → suggest varying the presentation)
+9. ANSWER KEY BALANCE — check correct answer distribution across the batch:
+   a. If correct answer keys are heavily skewed (e.g., 6 out of 10 are "B"), flag the ones that should change to achieve better balance
+   b. A well-designed exam has roughly equal distribution across answer keys
 
 Do NOT flag:
 • Omissions that don't affect clinical reasoning for this question
@@ -83,10 +116,10 @@ Do NOT flag:
 • Wanting the question to cover more ground than it needs to
 
 Scoring (10 = high educational value, no confusion risk; 1 = misleading or educationally harmful):
-• 9–10 → clear, sound, good learning value — no changes needed
+• 9–10 → clear, sound, good learning value, explanation covers all options — no changes needed
 • 7–8 → trivial gap or very minor risk of confusion
-• 5–6 → genuine concern — something missing or misleading that affects learning
-• 1–4  → seriously misleading, reinforces wrong reasoning, educationally counterproductive, OR image explicitly referenced in stem but absent
+• 5–6 → explanation only defends correct answer without addressing distractors, OR case study missing rationales/cjmm_step, OR genuine concern affecting learning
+• 1–4  → seriously misleading, reinforces wrong reasoning, case study structurally broken, OR image explicitly referenced in stem but absent
 
 If nothing meets the bar above, score 9–10, leave all arrays empty, and say "No significant defects found."
 
@@ -101,8 +134,11 @@ Return a JSON ARRAY — one object per question:
     "alternative_answers": [<only if genuinely defensible — empty if answer is clear>],
     "ambiguities": [<genuine confusion that would lead most candidates astray — empty if none>],
     "distractor_defenses": [<only if a distractor is actually defensible as correct — empty if none>],
-    "explanation_contradictions": [<only if explanation logically fails to justify the answer — empty if none>],
+    "explanation_contradictions": [<if explanation only defends the correct answer without discussing distractors, or logically fails to justify — empty if none>],
+    "case_study_issues": [<if case_study: missing sub-question rationales, too few sub-questions, too few formats, missing cjmm_step, prose hot_spot answers — empty if none or not case_study>],
     "triviality_clues": [<only if answer is obvious without clinical reasoning — empty if none>],
+    "concept_overlap": "<if this question tests the same concept as another Q in the batch, state which Q and suggest differentiation — null if unique>",
+    "answer_key_issue": "<if this question contributes to skewed answer distribution, suggest changing to a different key — null if fine>",
     "asset_issues": [<clear mismatch only — empty if image is appropriate even if imperfect>],
     "missing_images": [<image explicitly required but absent — empty if none>],
     "recommendations": [<empty if none>],
@@ -120,9 +156,10 @@ Output ONLY the JSON array. No preamble, no trailing text.`;
 export async function runAdversarialBatch(
   questions: Record<string, unknown>[],
   contentType = 'qbank',
-  domain = 'medical education'
+  domain = 'medical education',
+  examFormat?: Record<string, unknown>
 ): Promise<Record<string, unknown>[]> {
-  const prompt = getBatchAdversarialPrompt(contentType, domain);
+  const prompt = getBatchAdversarialPrompt(contentType, domain, examFormat);
   const content = formatQuestionsForReviewWithImages(questions);
 
   let userMessage: string | ContentPart[];

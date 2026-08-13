@@ -101,11 +101,25 @@ async function pushProgress(jobId: string) {
   }).eq('id', jobId);
 }
 
-async function getCourseName(jobId: string): Promise<string> {
+async function getCourseInfo(jobId: string): Promise<{ name: string; examFormat: Record<string, unknown>; guidelines: Record<string, unknown> }> {
   const { data: job } = await supabase.from('qb_jobs').select('course_id').eq('id', jobId).single();
-  if (!job) return 'Unknown';
-  const { data: course } = await supabase.from('qb_courses').select('name').eq('id', job.course_id).single();
-  return (course?.name as string) || 'Unknown';
+  if (!job) return { name: 'Unknown', examFormat: {}, guidelines: {} };
+
+  // Try with generation_guidelines first; fall back if column doesn't exist yet
+  let course: Record<string, unknown> | null = null;
+  const { data: d1, error: e1 } = await supabase.from('qb_courses').select('name, exam_format, generation_guidelines').eq('id', job.course_id).single();
+  if (e1 && e1.message?.includes('generation_guidelines')) {
+    const { data: d2 } = await supabase.from('qb_courses').select('name, exam_format').eq('id', job.course_id).single();
+    course = d2 as Record<string, unknown> | null;
+  } else {
+    course = d1 as Record<string, unknown> | null;
+  }
+
+  return {
+    name: (course?.name as string) || 'Unknown',
+    examFormat: (course?.exam_format as Record<string, unknown>) || {},
+    guidelines: (course?.generation_guidelines as Record<string, unknown>) || {},
+  };
 }
 
 // ── Extract audit issues from a question's audit_trail ──
@@ -151,18 +165,20 @@ function getAuditIssues(question: Record<string, unknown>): string[] {
 // ── Audit prompt (same as audit pipeline but for re-audit) ──
 
 function getAuditPrompt(): string {
-  return `You are a final quality gate auditor for medical exam questions.
+  return `You are a final quality gate auditor for exam questions.
 
 You will receive questions that have been fixed based on prior review feedback.
+Questions may be in ANY format: MCQ, Select All That Apply (SATA), ordered response, fill-in-the-blank, hot spot, matrix grid, extended matching, case study, etc.
 Your job is a FINAL holistic quality check — one combined score per question.
 
 Score each question 1-10 based on:
 1. Factual accuracy of the correct answer and explanation
-2. Quality and plausibility of distractors
-3. Clinical relevance and educational value
-4. Clarity and unambiguity of the question stem
-5. Image completeness — if marked as IMAGE: MISSING, the question is UNUSABLE and must score <= 4
-6. Overall exam-readiness
+2. For choice-based formats: quality and plausibility of distractors/options
+3. For non-choice formats: appropriateness and accuracy of the expected answer
+4. Clinical/educational relevance and value
+5. Clarity and unambiguity of the question stem
+6. Image completeness — if marked as IMAGE: MISSING, the question is UNUSABLE and must score <= 4
+7. Overall exam-readiness
 
 Scoring guide:
 - 9-10: Exam-ready, no changes needed
@@ -229,49 +245,80 @@ async function runAuditBatch(questions: Record<string, unknown>[]): Promise<Reco
 async function runReprocessPipeline(jobId: string): Promise<void> {
   try {
     setStep(jobId, 'Loading flagged questions...');
-    const courseName = await getCourseName(jobId);
+    const { name: courseName, examFormat, guidelines } = await getCourseInfo(jobId);
 
-    // Fetch flagged questions
-    const { data: flaggedQuestions, error } = await supabase
+    // Fetch questions that are effectively flagged:
+    // 1. status = 'flagged' (explicitly flagged)
+    // 2. status = 'reviewed'/'approved' but scores indicate flagged
+    //    (matches displayStatus() logic in the UI)
+    const { data: candidateQuestions, error } = await supabase
       .from('qb_questions')
       .select('*')
       .eq('job_id', jobId)
-      .eq('status', 'flagged')
+      .in('status', ['flagged', 'reviewed', 'approved'])
       .is('replaced_by_id', null)
       .order('question_number', { ascending: true });
 
     if (error) throw new Error(error.message);
-    if (!flaggedQuestions || flaggedQuestions.length === 0) {
+
+    // Apply the same flagging logic as the UI's displayStatus()
+    const flaggedQuestions = (candidateQuestions || []).filter((q) => {
+      if (q.status === 'flagged') return true;
+      // quality_score (from audit) is the primary indicator
+      if (q.quality_score != null) return (q.quality_score as number) < 7;
+      // validator + adversarial scores
+      if (q.validator_score != null && q.adversarial_score != null) {
+        return (q.validator_score as number) < 7 || (q.adversarial_score as number) < 7;
+      }
+      // validator only (e.g. post-migration, pre-adversarial)
+      if (q.validator_score != null) return (q.validator_score as number) < 7;
+      // status is 'reviewed' with no scores — needs processing
+      if (q.status === 'reviewed') return true;
+      return false;
+    });
+
+    if (flaggedQuestions.length === 0) {
       setStep(jobId, 'No flagged questions to reprocess');
       setState(jobId, { status: 'complete', phase: 'done' });
       return;
     }
 
     const total = flaggedQuestions.length;
+    // Capture IDs for all downstream re-fetches (status may change during processing)
+    const flaggedIds = flaggedQuestions.map(q => q.id as string);
     setState(jobId, { total });
     setStep(jobId, `Found ${total} flagged questions to reprocess for "${courseName}"`);
     await pushProgress(jobId);
 
-    // ── Phase 1: Retry missing images ──
-    const missingImageQs = flaggedQuestions.filter(
-      (q) => q.is_image_question && !q.image_url
-    );
+    // ── Phase 1: Retry images — missing OR flagged for replacement ──
+    const IMAGE_REPLACE_RE = /\b(replace|regenerate|swap|redo|wrong|incorrect|mismatch|inconsistent|not\s+match|does\s+not\s+(show|depict|display))\b.*\b(image|photo|illustration|picture|figure|x-?ray|ct|mri|scan|radiograph|visual)\b|\b(image|photo|illustration|picture|figure|x-?ray|ct|mri|scan|radiograph|visual)\b.*\b(replace|regenerate|swap|redo|wrong|incorrect|mismatch|inconsistent)\b/i;
+
+    const imageQsToRetry = flaggedQuestions.filter((q) => {
+      if (!q.is_image_question) return false;
+      // Missing image — always retry
+      if (!q.image_url) return true;
+      // Image exists but audit feedback says to replace it
+      const issues = getAuditIssues(q as Record<string, unknown>);
+      return issues.some(issue => IMAGE_REPLACE_RE.test(issue));
+    });
     let imageRetried = 0;
 
-    if (missingImageQs.length > 0 && isImageGenerationAvailable()) {
+    if (imageQsToRetry.length > 0 && isImageGenerationAvailable()) {
       setState(jobId, { phase: 'retrying_images' });
-      setStep(jobId, `Retrying image generation for ${missingImageQs.length} questions missing images...`);
+      const missingCount = imageQsToRetry.filter(q => !q.image_url).length;
+      const replaceCount = imageQsToRetry.length - missingCount;
+      setStep(jobId, `Retrying image generation: ${missingCount} missing, ${replaceCount} flagged for replacement...`);
       await pushProgress(jobId);
 
-      for (const q of missingImageQs) {
+      for (const q of imageQsToRetry) {
         const feedback = getAuditIssues(q as Record<string, unknown>);
         const success = await regenerateQuestionImage(q.id, jobId, feedback.length > 0 ? feedback : ['Generate appropriate medical image']);
         if (success) imageRetried++;
-        setStep(jobId, `Image retry: ${imageRetried}/${missingImageQs.length} succeeded`);
+        setStep(jobId, `Image retry: ${imageRetried}/${imageQsToRetry.length} succeeded`);
       }
 
       setState(jobId, { imageRetried });
-      setStep(jobId, `Image retry complete: ${imageRetried}/${missingImageQs.length} images generated`);
+      setStep(jobId, `Image retry complete: ${imageRetried}/${imageQsToRetry.length} images generated`);
       await pushProgress(jobId);
     }
 
@@ -286,9 +333,7 @@ async function runReprocessPipeline(jobId: string): Promise<void> {
     const { data: freshQuestions } = await supabase
       .from('qb_questions')
       .select('*')
-      .eq('job_id', jobId)
-      .eq('status', 'flagged')
-      .is('replaced_by_id', null)
+      .in('id', flaggedIds)
       .order('question_number', { ascending: true });
 
     const questionsToFix = freshQuestions || flaggedQuestions;
@@ -315,13 +360,21 @@ async function runReprocessPipeline(jobId: string): Promise<void> {
             timestamp: new Date().toISOString(),
           });
 
-          await supabase.from('qb_questions').update({
-            question: fixedQ.question,
-            options: fixedQ.options,
-            correct_option: fixedQ.correct_option || fixedQ.correct_answer,
-            explanation: fixedQ.explanation,
+          // Update all relevant fields from the fixed question (format-agnostic)
+          const fixUpdate: Record<string, unknown> = {
             audit_trail: trail,
-          }).eq('id', q.id);
+          };
+          // Legacy fields (if present in fix)
+          if (fixedQ.question != null) fixUpdate.question = fixedQ.question;
+          if (fixedQ.options != null) fixUpdate.options = fixedQ.options;
+          if (fixedQ.correct_option != null || fixedQ.correct_answer != null) {
+            fixUpdate.correct_option = fixedQ.correct_option || fixedQ.correct_answer;
+          }
+          if (fixedQ.explanation != null) fixUpdate.explanation = fixedQ.explanation;
+          // Flexible content (if present in fix)
+          if (fixedQ.content != null) fixUpdate.content = fixedQ.content;
+
+          await supabase.from('qb_questions').update(fixUpdate).eq('id', q.id);
           totalFixed++;
         }
       });
@@ -341,9 +394,7 @@ async function runReprocessPipeline(jobId: string): Promise<void> {
     const { data: fixedQuestions } = await supabase
       .from('qb_questions')
       .select('*')
-      .eq('job_id', jobId)
-      .eq('status', 'flagged')
-      .is('replaced_by_id', null)
+      .in('id', flaggedIds)
       .order('question_number', { ascending: true });
 
     const validQuestions = (fixedQuestions || questionsToFix) as Record<string, unknown>[];
@@ -360,7 +411,7 @@ async function runReprocessPipeline(jobId: string): Promise<void> {
     const vTasks = vBatches.map((batch, bi) => async () => {
       setStep(jobId, `[Validator] Batch ${bi + 1}/${vBatches.length}: scoring ${batch.length} questions...`);
 
-      const results = await runValidatorBatch(batch);
+      const results = await runValidatorBatch(batch, 'qbank', 'medical education', examFormat, guidelines);
 
       for (let i = 0; i < batch.length; i++) {
         const q = batch[i];
@@ -421,9 +472,7 @@ async function runReprocessPipeline(jobId: string): Promise<void> {
     const { data: postValidatorQs } = await supabase
       .from('qb_questions')
       .select('*')
-      .eq('job_id', jobId)
-      .eq('status', 'flagged')
-      .is('replaced_by_id', null)
+      .in('id', flaggedIds)
       .order('question_number', { ascending: true });
 
     const forAdversarial = ((postValidatorQs || forReview) as Record<string, unknown>[]).filter(q => {
@@ -437,7 +486,7 @@ async function runReprocessPipeline(jobId: string): Promise<void> {
     const aTasks = aBatches.map((batch, bi) => async () => {
       setStep(jobId, `[Adversarial] Batch ${bi + 1}/${aBatches.length}: scoring ${batch.length} questions...`);
 
-      const results = await runAdversarialBatch(batch);
+      const results = await runAdversarialBatch(batch, 'qbank', 'medical education', examFormat);
 
       for (let i = 0; i < batch.length; i++) {
         const q = batch[i];
@@ -498,9 +547,7 @@ async function runReprocessPipeline(jobId: string): Promise<void> {
     const { data: preAuditQs } = await supabase
       .from('qb_questions')
       .select('*')
-      .eq('job_id', jobId)
-      .eq('status', 'flagged')
-      .is('replaced_by_id', null)
+      .in('id', flaggedIds)
       .order('question_number', { ascending: true });
 
     const toAudit = (preAuditQs || questionsToFix) as Record<string, unknown>[];
@@ -622,15 +669,25 @@ export async function reprocessFlaggedForJob(jobId: string): Promise<{
     };
   }
 
-  // Count flagged questions
-  const { count } = await supabase
+  // Count effectively flagged questions (same logic as displayStatus in UI)
+  const { data: candidates } = await supabase
     .from('qb_questions')
-    .select('*', { count: 'exact', head: true })
+    .select('status, quality_score, validator_score, adversarial_score')
     .eq('job_id', jobId)
-    .eq('status', 'flagged')
+    .in('status', ['flagged', 'reviewed', 'approved'])
     .is('replaced_by_id', null);
 
-  const total = count || 0;
+  const total = (candidates || []).filter((q) => {
+    if (q.status === 'flagged') return true;
+    if (q.quality_score != null) return (q.quality_score as number) < 7;
+    if (q.validator_score != null && q.adversarial_score != null) {
+      return (q.validator_score as number) < 7 || (q.adversarial_score as number) < 7;
+    }
+    if (q.validator_score != null) return (q.validator_score as number) < 7;
+    if (q.status === 'reviewed') return true;
+    return false;
+  }).length;
+
   if (total === 0) {
     return {
       status: 'complete', phase: 'done', step: 'No flagged questions to reprocess',

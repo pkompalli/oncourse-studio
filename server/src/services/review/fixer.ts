@@ -31,13 +31,14 @@ export async function fixQuestion(
   const contentJson = JSON.stringify(question, null, 2);
   const changesText = changesRequired.map((c) => `  ${c}`).join('\n');
 
-  const prompt = `You are a medical education question editor. Apply EXACTLY the required changes below to the MCQ — nothing more, nothing less.
+  const prompt = `You are a medical education question editor. Apply EXACTLY the required changes below to this question — nothing more, nothing less.
 
 CRITICAL RULES:
 • ONLY change what is specifically listed in REQUIRED CHANGES. Do NOT rewrite, rephrase, or "improve" any text that isn't flagged.
 • Keep the original wording, structure, and style for all non-flagged parts.
 • If a change asks to fix a factual error, change ONLY the incorrect fact — do not rewrite the surrounding sentence.
 • Do NOT add new content, options, or explanations beyond what the changes require.
+• Preserve ALL fields from the original JSON — the question may be any format (MCQ, SATA, ordered response, fill-in-blank, etc.).
 
 COURSE: ${courseName}
 

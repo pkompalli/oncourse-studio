@@ -42,7 +42,7 @@ interface AppState {
   updateLesson: (id: string, updates: Partial<Lesson>) => void;
 }
 
-const STEP_ORDER: StepId[] = ['structure', 'generate', 'review', 'audit', 'export'];
+const STEP_ORDER: StepId[] = ['structure', 'guidelines', 'generate', 'review', 'audit', 'export'];
 
 export const useAppStore = create<AppState>((set) => ({
   // Top-level view

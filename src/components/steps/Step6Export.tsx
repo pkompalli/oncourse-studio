@@ -1,9 +1,10 @@
 import { useState, useEffect, useRef } from 'react';
 import { useAppStore } from '../../store/appStore';
-import { jobs, questions as questionsApi } from '../../services/api';
+import { jobs, questions as questionsApi, exportApi } from '../../services/api';
 import { Download, CheckCircle2, AlertTriangle, ImageIcon, ChevronDown, ChevronUp, Loader2, RefreshCw } from 'lucide-react';
 import { displayStatus } from '../../utils/questionStatus';
 import QuestionImage from '../common/QuestionImage';
+import QuestionRenderer from '../common/QuestionRenderer';
 import type { Question } from '../../types';
 
 export default function Step6Export() {
@@ -23,57 +24,6 @@ export default function Step6Export() {
     return ds === 'approved' || ds === 'reviewed';
   }).length;
   const flaggedCount = questions.filter((q) => displayStatus(q as Record<string, unknown>) === 'flagged').length;
-
-  // Fetch image as base64
-  const fetchImageBase64 = async (url: string): Promise<{ data: string; media_type: string } | null> => {
-    try {
-      const res = await fetch(url);
-      if (!res.ok) return null;
-      const blob = await res.blob();
-      const buffer = await blob.arrayBuffer();
-      const base64 = btoa(
-        new Uint8Array(buffer).reduce((data, byte) => data + String.fromCharCode(byte), '')
-      );
-      return { data: base64, media_type: blob.type || 'image/png' };
-    } catch {
-      return null;
-    }
-  };
-
-  // Build export JSON
-  const buildExportPayload = async () => {
-    const items = await Promise.all(
-      questions.map(async (q) => {
-        const ds = displayStatus(q as Record<string, unknown>);
-
-        let image_base64: string | null = null;
-        let image_media_type: string | null = null;
-        if (q.is_image_question && q.image_url) {
-          const img = await fetchImageBase64(q.image_url);
-          if (img) {
-            image_base64 = img.data;
-            image_media_type = img.media_type;
-          }
-        }
-
-        return {
-          question: q.question,
-          options: q.options,
-          correct_option: q.correct_option,
-          explanation: q.explanation || '',
-          subject: q.subject,
-          topic: q.topic,
-          blooms_level: q.blooms_level || '',
-          difficulty: q.difficulty ?? 1,
-          question_type: q.is_image_question ? 'image' : 'text',
-          ...(q.is_image_question ? { image_base64, image_media_type } : {}),
-          tags: [q.course],
-          quality_status: ds === 'approved' ? 'approved' : ds === 'flagged' ? 'flagged' : 'reviewed',
-        };
-      })
-    );
-    return items;
-  };
 
   // ── Reprocess flagged state ──
   const [reprocessing, setReprocessing] = useState(false);
@@ -142,9 +92,10 @@ export default function Step6Export() {
   const [exporting, setExporting] = useState(false);
 
   const handleExport = async () => {
+    if (!job) return;
     setExporting(true);
     try {
-      const payload = await buildExportPayload();
+      const payload = await exportApi.json(job.id);
       const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -379,29 +330,7 @@ export default function Step6Export() {
                     />
                   )}
 
-                  {/* Question stem */}
-                  <p className="text-sm text-slate-800 leading-relaxed">{q.question}</p>
-
-                  {/* Options */}
-                  <div className="grid grid-cols-2 gap-2">
-                    {Object.entries(q.options || {}).sort(([a], [b]) => a.localeCompare(b)).map(([key, val]) => (
-                      <div key={key} className={`text-sm p-2 rounded-lg ${
-                        key === q.correct_option
-                          ? 'bg-green-50 border border-green-200 text-green-800 font-medium'
-                          : 'bg-slate-50 text-slate-600'
-                      }`}>
-                        <span className="font-medium">{key}.</span> {val}
-                      </div>
-                    ))}
-                  </div>
-
-                  {/* Explanation */}
-                  {q.explanation && (
-                    <div className="text-sm text-slate-600 bg-blue-50 p-3 rounded-lg border border-blue-100">
-                      <span className="font-medium text-blue-700">Explanation: </span>
-                      {q.explanation}
-                    </div>
-                  )}
+                  <QuestionRenderer question={q} showAnswer={true} />
 
                   {/* Audit Trail — quality journey */}
                   {q.audit_trail && q.audit_trail.length > 0 && (

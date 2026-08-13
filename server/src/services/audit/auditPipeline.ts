@@ -11,6 +11,7 @@ import { orCall, MODELS } from '../llm/openrouter.js';
 import type { ContentPart } from '../llm/openrouter.js';
 import { formatQuestionsForReviewWithImages, extractJsonArray } from '../review/shared.js';
 import { saveJobSnapshots } from '../snapshots.js';
+import { startTracking, getStepTokens } from '../llm/tokenTracker.js';
 
 const AUDIT_BATCH_SIZE = 10;
 const MAX_CONCURRENT_BATCHES = 8;
@@ -118,18 +119,20 @@ async function pushProgress(jobId: string) {
 // ── Audit prompt ──
 
 function getAuditPrompt(): string {
-  return `You are a final quality gate auditor for medical exam questions.
+  return `You are a final quality gate auditor for exam questions.
 
 You will receive questions that have already passed validator and adversarial review.
+Questions may be in ANY format: MCQ, Select All That Apply (SATA), ordered response, fill-in-the-blank, hot spot, matrix grid, extended matching, case study, etc.
 Your job is a FINAL holistic quality check — one combined score per question.
 
 Score each question 1-10 based on:
 1. Factual accuracy of the correct answer and explanation
-2. Quality and plausibility of distractors
-3. Clinical relevance and educational value
-4. Clarity and unambiguity of the question stem
-5. Image completeness — if marked as IMAGE: MISSING, the question is UNUSABLE and must score ≤ 4
-6. Overall exam-readiness
+2. For choice-based formats: quality and plausibility of distractors/options
+3. For non-choice formats: appropriateness and accuracy of the expected answer
+4. Clinical/educational relevance and value
+5. Clarity and unambiguity of the question stem
+6. Image completeness — if marked as IMAGE: MISSING, the question is UNUSABLE and must score ≤ 4
+7. Overall exam-readiness
 
 Scoring guide:
 • 9-10: Exam-ready, no changes needed
@@ -199,6 +202,7 @@ async function runAuditBatch(questions: Record<string, unknown>[]): Promise<Reco
 
 async function runAuditPipeline(jobId: string): Promise<void> {
   try {
+    startTracking(jobId, 'audit');
     setStep(jobId, 'Fetching reviewed questions...');
 
     const { data: questions, error } = await supabase
@@ -323,6 +327,11 @@ async function runAuditPipeline(jobId: string): Promise<void> {
     const finalMsg = `Audit complete — ${totalApproved} approved, ${totalFlagged} flagged out of ${total}.`;
     setStep(jobId, finalMsg);
 
+    // Merge token usage from all steps
+    const auditTokens = getStepTokens(jobId, 'audit');
+    const { data: currentJob } = await supabase.from('qb_jobs').select('progress').eq('id', jobId).single();
+    const existingTokens = (currentJob?.progress as Record<string, unknown>)?.token_usage as Record<string, unknown> || {};
+
     await supabase.from('qb_jobs').update({
       status: nextStatus,
       progress: {
@@ -330,6 +339,7 @@ async function runAuditPipeline(jobId: string): Promise<void> {
         audited: totalAudited, approved: totalApproved, flagged: totalFlagged, total,
         events: runningAudits.get(jobId)?.events.slice(-10) || [],
         subjects: runningAudits.get(jobId)?.subjects || [],
+        token_usage: { ...existingTokens, audit: auditTokens },
       },
     }).eq('id', jobId);
 

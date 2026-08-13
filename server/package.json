@@ -9,7 +9,14 @@
     "start": "node dist/app.js"
   },
   "dependencies": {
+    "@ai-sdk/amazon-bedrock": "^5.0.50",
+    "@aws-crypto/sha256-js": "^5.2.0",
+    "@aws-sdk/client-bedrock": "^3.1106.0",
+    "@aws-sdk/client-bedrock-runtime": "^3.1106.0",
+    "@smithy/signature-v4": "^5.6.12",
     "@supabase/supabase-js": "^2.104.1",
+    "ai": "^7.0.58",
+    "aws4fetch": "^1.0.20",
     "cors": "^2.8.5",
     "dotenv": "^17.4.2",
     "express": "^5.1.0",

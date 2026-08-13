@@ -1,6 +1,7 @@
 import Stepper from './components/layout/Stepper';
 import { useAppStore } from './store/appStore';
 import Step1Structure from './components/steps/Step1Structure';
+import Step1bGuidelines from './components/steps/Step1bGuidelines';
 import Step2Generate from './components/steps/Step2Generate';
 import Step3Review from './components/steps/Step3Review';
 import Step4Audit from './components/steps/Step4Audit';
@@ -9,6 +10,7 @@ import Home from './components/Home';
 
 const STEP_COMPONENTS: Record<string, React.FC> = {
   structure: Step1Structure,
+  guidelines: Step1bGuidelines,
   generate: Step2Generate,
   review: Step3Review,
   audit: Step4Audit,

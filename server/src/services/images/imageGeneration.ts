@@ -163,16 +163,34 @@ async function generateAndStoreImage(
     return false;
   }
 
-  // Update image URL and clear stale structural-failure scores if present
+  // Update image URL, media array, and clear stale structural-failure scores if present
+  const imageSource = `AI Generated (${OPENAI_IMAGE_MODEL})`;
   const updateData: Record<string, unknown> = {
     image_url: publicUrl,
-    image_source: `AI Generated (${OPENAI_IMAGE_MODEL})`,
+    image_source: imageSource,
   };
 
-  // If this question was previously scored as structural failure (missing image),
+  // Update media array — set url and source on the first media entry, or create one
+  const existingMedia = (question.media as Array<Record<string, unknown>>) || [];
+  if (existingMedia.length > 0) {
+    const updatedMedia = existingMedia.map((m, i) => i === 0 ? { ...m, url: publicUrl, source: imageSource } : m);
+    updateData.media = updatedMedia;
+  } else {
+    updateData.media = [{
+      type: (question.image_type as string) || 'image',
+      url: publicUrl,
+      source: imageSource,
+      description: (question.image_description as string) || null,
+      search_terms: (question.image_search_terms as string[]) || [],
+    }];
+  }
+
+  // If this question was previously scored low (image-related failure),
   // reset scores so it gets properly re-evaluated in audit
-  const prevScore = question.validator_score as number | null;
-  if (prevScore !== null && prevScore <= 3) {
+  const prevQuality = question.quality_score as number | null;
+  const prevValidator = question.validator_score as number | null;
+  const prevScore = prevQuality ?? prevValidator;
+  if (prevScore !== null && prevScore <= 6) {
     updateData.validator_score = null;
     updateData.adversarial_score = null;
     updateData.quality_score = null;

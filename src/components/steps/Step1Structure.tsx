@@ -19,6 +19,13 @@ interface SubjectDist {
   image_pct: number;
 }
 
+interface QuestionTypeDisplay {
+  slug: string;
+  name: string;
+  percentage: number;
+  description?: string;
+}
+
 function ExamFormatDisplay({ examFormat }: { examFormat: Record<string, unknown> }) {
   const qf = examFormat.question_format as Record<string, unknown> | undefined;
   const blooms = examFormat.blooms_distribution as Record<string, number> | undefined;
@@ -28,6 +35,7 @@ function ExamFormatDisplay({ examFormat }: { examFormat: Record<string, unknown>
   const timeMins = examFormat.time_minutes as number | undefined;
   const negMarking = examFormat.negative_marking as string | undefined;
   const totalImgQ = examFormat.image_questions_total as number | undefined;
+  const questionTypes = examFormat.question_types as QuestionTypeDisplay[] | undefined;
 
   return (
     <div className="bg-white rounded-xl border border-slate-200 divide-y divide-slate-100">
@@ -59,12 +67,53 @@ function ExamFormatDisplay({ examFormat }: { examFormat: Record<string, unknown>
         )}
       </div>
 
-      {/* Question Format */}
-      {qf && (
+      {/* Question Types (multi-format) */}
+      {questionTypes && questionTypes.length > 0 && (
+        <div className="px-5 py-3">
+          <div className="text-xs font-medium text-slate-500 mb-2">
+            Question Types ({questionTypes.length} format{questionTypes.length > 1 ? 's' : ''})
+          </div>
+          <div className="space-y-2">
+            {questionTypes.map((qt) => (
+              <div key={qt.slug} className="flex items-center gap-3">
+                <div className="flex-1">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-medium text-slate-700">{qt.name}</span>
+                    <span className="text-xs text-slate-400">{qt.percentage}%</span>
+                  </div>
+                  {qt.description && (
+                    <div className="text-xs text-slate-400 mt-0.5">{qt.description}</div>
+                  )}
+                </div>
+                <div className="w-24 h-2 bg-slate-100 rounded-full overflow-hidden">
+                  <div className="h-full bg-indigo-400 rounded-full" style={{ width: `${qt.percentage}%` }} />
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Question Format (legacy/primary) */}
+      {qf && !questionTypes && (
         <div className="px-5 py-3">
           <div className="text-xs font-medium text-slate-500 mb-2">Question Format</div>
           <div className="flex flex-wrap gap-2 text-xs">
             <span className="px-2 py-1 bg-indigo-50 text-indigo-700 rounded">{(qf.type as string || '').replace(/_/g, ' ')}</span>
+            {qf.uses_vignettes && <span className="px-2 py-1 bg-amber-50 text-amber-700 rounded">Clinical Vignettes</span>}
+            {qf.avg_stem_words && <span className="px-2 py-1 bg-slate-100 text-slate-600 rounded">~{qf.avg_stem_words as number} words/stem</span>}
+            {qf.image_questions_percentage != null && <span className="px-2 py-1 bg-emerald-50 text-emerald-700 rounded">{qf.image_questions_percentage as number}% image Qs</span>}
+          </div>
+          {negMarking && <div className="text-xs text-slate-500 mt-2">Marking: {negMarking}</div>}
+        </div>
+      )}
+
+      {/* Primary format details when question_types exist */}
+      {qf && questionTypes && (
+        <div className="px-5 py-3">
+          <div className="text-xs font-medium text-slate-500 mb-2">Primary Format Details</div>
+          <div className="flex flex-wrap gap-2 text-xs">
+            <span className="px-2 py-1 bg-indigo-50 text-indigo-700 rounded">{(qf.primary_format_name as string || qf.type as string || '').replace(/_/g, ' ')}</span>
             {qf.uses_vignettes && <span className="px-2 py-1 bg-amber-50 text-amber-700 rounded">Clinical Vignettes</span>}
             {qf.avg_stem_words && <span className="px-2 py-1 bg-slate-100 text-slate-600 rounded">~{qf.avg_stem_words as number} words/stem</span>}
             {qf.image_questions_percentage != null && <span className="px-2 py-1 bg-emerald-50 text-emerald-700 rounded">{qf.image_questions_percentage as number}% image Qs</span>}
@@ -228,7 +277,9 @@ export default function Step1Structure() {
     if (!file) return;
     const reader = new FileReader();
     reader.onload = (ev) => setExamFormatPaste(ev.target?.result as string);
+    reader.onerror = () => setError('Failed to read file');
     reader.readAsText(file);
+    e.target.value = '';
   };
 
   // ── Generate structure ──
@@ -260,12 +311,12 @@ export default function Step1Structure() {
       setPhase('exam_format');
       setError('');
     } else {
-      // Skip exam format, go straight to generate
+      // Skip exam format, go to guidelines
       setJob(null);
       setQuestions([]);
-      resetFrom('generate');
+      resetFrom('guidelines');
       completeStep('structure');
-      setStep('generate');
+      setStep('guidelines');
       setView('pipeline');
     }
   };
@@ -292,21 +343,26 @@ export default function Step1Structure() {
     setExamFormatLoading(true);
     setError('');
     try {
-      // Try parsing as JSON
-      let parsed: Record<string, unknown>;
+      // Try parsing as JSON first
+      let parsed: Record<string, unknown> | null = null;
       try {
         parsed = JSON.parse(examFormatPaste.trim());
       } catch {
-        setError('Invalid JSON. Please paste valid exam format JSON.');
-        setExamFormatLoading(false);
-        return;
+        // Not JSON — that's fine, we'll send as raw text for AI interpretation
       }
-      // Save via refine endpoint with a special message
-      const res = await courses.refine(course.id, {
-        message: `Replace the entire exam format with this: ${JSON.stringify(parsed)}`,
-        refine_type: 'exam_format',
-      });
-      setCourse(res.course as Course);
+
+      if (parsed) {
+        // Valid JSON — save directly via refine endpoint
+        const res = await courses.refine(course.id, {
+          message: `Replace the entire exam format with this: ${JSON.stringify(parsed)}`,
+          refine_type: 'exam_format',
+        });
+        setCourse(res.course as Course);
+      } else {
+        // Raw text — send to AI interpretation endpoint
+        const res = await courses.interpretExamFormatFromText(course.id, examFormatPaste.trim());
+        setCourse(res.course as Course);
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to save exam format');
     } finally {
@@ -337,9 +393,9 @@ export default function Step1Structure() {
     if (course) {
       setJob(null);
       setQuestions([]);
-      resetFrom('generate');
+      resetFrom('guidelines');
       completeStep('structure');
-      setStep('generate');
+      setStep('guidelines');
       setView('pipeline');
     }
   };
@@ -361,8 +417,8 @@ export default function Step1Structure() {
 
   const examFormatMethodOptions: { id: InputMethod; label: string; icon: React.ReactNode; desc: string }[] = [
     { id: 'ai', label: 'AI Analyze', icon: <Sparkles className="w-5 h-5" />, desc: 'AI determines exam format & specs' },
-    { id: 'upload', label: 'Upload File', icon: <Upload className="w-5 h-5" />, desc: 'Upload exam format JSON' },
-    { id: 'paste', label: 'Paste JSON', icon: <ClipboardPaste className="w-5 h-5" />, desc: 'Paste exam format specs' },
+    { id: 'upload', label: 'Upload File', icon: <Upload className="w-5 h-5" />, desc: 'Upload any format: JSON, text, markdown' },
+    { id: 'paste', label: 'Paste Content', icon: <ClipboardPaste className="w-5 h-5" />, desc: 'Paste exam specs in any format' },
   ];
 
   // ════════════════════════════════════════════════════════════
@@ -753,13 +809,14 @@ export default function Step1Structure() {
                 {/* Upload File */}
                 {examFormatMethod === 'upload' && (
                   <div>
-                    <input ref={examFormatFileRef} type="file" accept=".json" onChange={handleExamFormatFileUpload} className="hidden" />
+                    <input ref={examFormatFileRef} type="file" accept=".json,.txt,.md,.csv,.doc,.docx,.rtf" onChange={handleExamFormatFileUpload} className="hidden" />
                     <button
                       onClick={() => examFormatFileRef.current?.click()}
                       className="w-full p-8 border-2 border-dashed border-slate-300 rounded-lg hover:border-indigo-400 hover:bg-indigo-50 transition-all flex flex-col items-center gap-2"
                     >
                       <Upload className="w-8 h-8 text-slate-400" />
-                      <span className="text-sm text-slate-600">Click to upload exam format JSON</span>
+                      <span className="text-sm text-slate-600">Click to upload exam format specification</span>
+                      <span className="text-xs text-slate-400">Supports JSON, text, markdown, or any document</span>
                     </button>
                     {examFormatPaste && <p className="text-sm text-green-600 mt-2">File loaded ({examFormatPaste.length} characters)</p>}
                   </div>
@@ -770,7 +827,7 @@ export default function Step1Structure() {
                   <textarea
                     value={examFormatPaste}
                     onChange={(e) => setExamFormatPaste(e.target.value)}
-                    placeholder={'Paste exam format JSON:\n{\n  "total_questions": 200,\n  "time_minutes": 210,\n  "num_options": 4,\n  "subject_distribution": { ... },\n  "blooms_distribution": { ... },\n  "difficulty_distribution": { "easy": 20, "medium": 50, "hard": 30 }\n}'}
+                    placeholder={'Paste exam format in any format — JSON, plain text, markdown, or exam guidelines.\n\nExamples:\n• "NCLEX-RN uses 85-150 adaptive questions: MCQ, SATA, ordered response, fill-in-blank, hot-spot, and drag-and-drop..."\n• Paste official exam blueprint text\n• Paste JSON with structured specs\n\nThe AI will interpret whatever you provide.'}
                     rows={12}
                     className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none font-mono text-sm resize-none"
                   />

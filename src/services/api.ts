@@ -33,6 +33,21 @@ export const courses = {
       method: 'POST',
       body: JSON.stringify({ qbank_mode: qbankMode }),
     }),
+
+  interpretExamFormatFromText: (id: string, rawText: string) =>
+    request<{ course: unknown }>(`/courses/${id}/exam-format-from-text`, {
+      method: 'POST',
+      body: JSON.stringify({ raw_text: rawText }),
+    }),
+
+  generateGuidelines: (id: string) =>
+    request<{ course: unknown }>(`/courses/${id}/guidelines`, { method: 'POST' }),
+
+  refineGuidelines: (id: string, message: string) =>
+    request<{ course: unknown; chat_response: string }>(`/courses/${id}/guidelines`, {
+      method: 'PUT',
+      body: JSON.stringify({ message }),
+    }),
 };
 
 // ── Jobs ────────────────────────────────────────────────────
@@ -93,9 +108,30 @@ export const questions = {
     request<{ stages: string[] }>(`/questions/snapshots/${jobId}`),
 };
 
+// ── Formats ─────────────────────────────────────────────────
+
+export const formats = {
+  list: () => request<{ formats: unknown[] }>('/formats'),
+
+  get: (id: string) => request<{ format: unknown }>(`/formats/${id}`),
+
+  getBySlug: (slug: string) => request<{ format: unknown }>(`/formats/slug/${slug}`),
+
+  create: (data: Record<string, unknown>) =>
+    request<{ format: unknown }>('/formats', { method: 'POST', body: JSON.stringify(data) }),
+
+  update: (id: string, data: Record<string, unknown>) =>
+    request<{ format: unknown }>(`/formats/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+
+  delete: (id: string) =>
+    request<{ success: boolean }>(`/formats/${id}`, { method: 'DELETE' }),
+};
+
 // ── Export ───────────────────────────────────────────────────
 
 export const exportApi = {
   create: (data: { job_id: string; format: string }) =>
     request<{ export: unknown }>('/export', { method: 'POST', body: JSON.stringify(data) }),
+  json: (jobId: string) =>
+    request<{ question_count: number; questions: unknown[]; exported_at: string }>(`/export/json/${jobId}`),
 };
