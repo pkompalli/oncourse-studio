@@ -612,22 +612,40 @@ function SubQuestionAnswer({ sq, showAnswer }: { sq: Record<string, unknown>; sh
   return null;
 }
 
-function CaseStudyBlock({ narrative, subQuestions, showAnswer }: {
+function CaseStudyBlock({ narrative, subQuestions, showAnswer, exhibits, narrativeLabel }: {
   narrative: string;
   subQuestions: Array<Record<string, unknown>>;
   showAnswer: boolean;
+  exhibits?: Array<Record<string, unknown>>;
+  narrativeLabel?: string;
 }) {
   return (
     <div className="space-y-3">
       <div className="text-xs p-3 bg-blue-50 border border-blue-100 rounded">
-        <div className="font-semibold text-blue-700 mb-1">Case Narrative:</div>
+        <div className="font-semibold text-blue-700 mb-1">{narrativeLabel || 'Case Narrative:'}</div>
         <p className="text-slate-700 whitespace-pre-wrap">{narrative}</p>
       </div>
+      {exhibits && exhibits.length > 0 && (
+        <div className="space-y-2">
+          {exhibits.map((ex, i) => (
+            <details key={i} open className="text-xs border border-amber-200 rounded overflow-hidden">
+              <summary className="px-3 py-1.5 bg-amber-50 font-semibold text-amber-800 cursor-pointer">
+                {(ex.label as string) || `Exhibit ${i + 1}`}{ex.title ? ` — ${ex.title}` : ''}
+              </summary>
+              {/* Exhibit content is Markdown; shown as readable pre-wrapped text in-app
+                  (downstream product renders the markdown). */}
+              <div className="px-3 py-2 bg-white text-slate-700 whitespace-pre-wrap font-mono text-[11px] leading-relaxed overflow-x-auto">
+                {(ex.content as string) || ''}
+              </div>
+            </details>
+          ))}
+        </div>
+      )}
       {subQuestions.map((sq, i) => {
-        const sqStem = (sq.stem as string) || (sq.question as string) || '';
+        const sqStem = (sq.prompt as string) || (sq.stem as string) || (sq.question as string) || '';
         const formatType = (sq.format_type as string) || '';
         const rationale = (sq.rationale as string) || '';
-        const cjmmStep = (sq.cjmm_step as string) || '';
+        const cjmmStep = (sq.reasoning_step as string) || (sq.cjmm_step as string) || '';
 
         return (
           <div key={i} className="text-xs p-2 bg-white border border-slate-100 rounded">
@@ -708,7 +726,9 @@ export default function QuestionRenderer({ question: q, showAnswer = true, compa
       {/* Layout-specific rendering */}
       {layout === 'case_with_sub_questions' ? (
         <CaseStudyBlock
-          narrative={(content.case_narrative as string) || stem}
+          narrative={(content.scenario as string) || (content.case_narrative as string) || stem}
+          narrativeLabel={content.exhibits ? 'Scenario:' : undefined}
+          exhibits={content.exhibits as Array<Record<string, unknown>> | undefined}
           subQuestions={(content.sub_questions as Array<Record<string, unknown>>) || []}
           showAnswer={showAnswer}
         />

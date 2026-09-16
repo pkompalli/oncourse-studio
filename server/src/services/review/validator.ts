@@ -5,7 +5,7 @@
 
 import { orCall, MODELS } from '../llm/openrouter.js';
 import type { ContentPart } from '../llm/openrouter.js';
-import { extractJsonArray, formatQuestionsForReviewWithImages } from './shared.js';
+import { extractJsonArray, formatQuestionsForReviewWithImages, gradabilityIssues } from './shared.js';
 
 // ── Validator Prompt (V1 lines 5803-5857, verbatim) ──
 
@@ -309,6 +309,21 @@ export async function runValidatorBatch(
     } catch (e) {
       console.warn(`  [Validator] Retry LLM call failed: ${e instanceof Error ? e.message : e}`);
     }
+  }
+
+  // HARD GATE: a case_study/TBS whose sub-questions aren't machine-gradable must
+  // never pass, regardless of what the LLM scored. Deterministic override.
+  for (let i = 0; i < questions.length; i++) {
+    const issues = gradabilityIssues(questions[i]);
+    if (issues.length === 0) continue;
+    const r = results.find((x) => (x.question_number as number) === i + 1) || results[i];
+    if (!r) continue;
+    const prior = (r.overall_accuracy_score as number) ?? 5;
+    r.overall_accuracy_score = Math.min(prior, 3);
+    r.needs_revision = true;
+    r.case_study_issues = [ ...((r.case_study_issues as string[]) || []), ...issues.map((s) => `NOT GRADABLE — ${s}`) ];
+    r.changes_required = [ ...((r.changes_required as string[]) || []), ...issues.map((s) => `Fix gradability: ${s}`) ];
+    r.summary = `Ungradable sub-question(s): ${issues.slice(0, 3).join('; ')}${issues.length > 3 ? '…' : ''}`;
   }
 
   return results;

@@ -20,6 +20,9 @@ export interface Subject {
   topics: Topic[];
 }
 
+/** Stored in structure.selected_exam when the user picks "All exams" (build the whole course). */
+export const ALL_EXAMS = '__all__';
+
 /** Metadata for one exam within a course (Course > Exam > Subject > Topic > Chapter). */
 export interface Exam {
   name: string;
@@ -97,6 +100,7 @@ export interface SubjectDistribution {
   questions: number;
   percentage: number;
   image_pct: number;
+  exhibit_pct?: number;
 }
 
 export interface ExamFormat {
@@ -105,11 +109,13 @@ export interface ExamFormat {
     num_options?: number;
     avg_stem_words?: number;
     uses_vignettes?: boolean;
-    image_questions_percentage?: number;
+    image_questions_percentage?: number;   // genuine visuals (x-ray, ECG, photo, diagram…)
+    exhibit_questions_percentage?: number; // document/data exhibits rendered as markdown
   };
   blooms_distribution?: Record<string, number>;
   difficulty_distribution?: Record<string, number>;
   image_percentage_by_subject?: Record<string, number>;
+  exhibit_percentage_by_subject?: Record<string, number>;
   domain_characteristics?: Record<string, unknown>;
   // Mock exam specs
   total_questions?: number;

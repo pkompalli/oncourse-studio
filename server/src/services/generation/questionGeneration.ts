@@ -2,6 +2,7 @@ import { orCall, MODELS } from '../llm/openrouter.js';
 import { supabase } from '../../db/supabase.js';
 import { fetchAllRows } from '../../db/pagination.js';
 import { startTracking, getStepTokens } from '../llm/tokenTracker.js';
+import { classifyQuestionType } from '../questionType.js';
 
 /**
  * Faithful port of V1's generation pipeline:
@@ -482,62 +483,101 @@ CASE STUDY RULES (MANDATORY):
       – Audit / accounting (CPA): Identify Risk, Gather Evidence, Evaluate Evidence, Determine Response, Form Conclusion, Report
       – Law / other: use that field's own reasoning progression (issue → rule → analysis → conclusion, etc.)
   • The overall "explanation" covers the reasoning thread across the full case
+  • GRADABILITY IS MANDATORY — every sub-question MUST be machine-gradable. Include the COMPLETE answer scaffolding for its format (see per-format shapes below). A sub-question whose answer exists only in the rationale prose is INVALID. Never omit options/choices/rows/columns or the answer key.
+  • Number sub-questions sequentially ("number": 1..N). Reference exhibits/data explicitly in each "question".
 {
   "format_type": "case_study",
   "case_narrative": "<detailed scenario unfolding across time — include the specific data, documents, figures, or evidence a candidate must analyze (clinical: vitals/labs/history; accounting: financials/exhibits/schedules; law: facts/filings; etc.)>",
+  "topics": ["<each distinct subtopic/area this case actually spans — e.g. Independence, Engagement Acceptance, Documentation, Communications>"],
+  "response_instructions": "<how the candidate enters answers — date format (MM/DD/YYYY), numeric format ($ whole dollars), selection rules>",
   "sub_questions": [
     {
-      "question": "<sub-question 1 — a decision the candidate must make from the scenario>",
-      "format_type": "mcq_single",
+      "number": 1, "format_type": "mcq_single",
+      "question": "<a decision from the scenario>",
       "options": ["A. ...", "B. ...", "C. ...", "D. ..."],
       "correct_answer": "B",
-      "rationale": "<Why B is correct AND why A, C, D are wrong — 2-4 sentences>",
-      "reasoning_step": "<a step in this exam's reasoning workflow — see taxonomy guidance above>",
-      "difficulty": "<easy|medium|hard>"
+      "rationale": "<Why B is correct AND why A, C, D are wrong>", "reasoning_step": "<step>", "difficulty": "<easy|medium|hard>"
     },
     {
-      "question": "<sub-question 2>",
-      "format_type": "sata",
+      "number": 2, "format_type": "sata",
+      "question": "<select all that apply>",
       "options": ["A. ...", "B. ...", "C. ...", "D. ...", "E. ..."],
       "correct_answers": ["A", "C"],
-      "rationale": "<Why A and C are correct AND why B, D, E are wrong>",
-      "reasoning_step": "<step>",
-      "difficulty": "<easy|medium|hard>"
+      "rationale": "<...>", "reasoning_step": "<step>", "difficulty": "<easy|medium|hard>"
     },
     {
-      "question": "<sub-question 3>",
-      "format_type": "ordered_response",
-      "items": ["<step 1>", "<step 2>", "<step 3>", "<step 4>"],
-      "correct_order": [3, 1, 4, 2],
-      "rationale": "<Why this order is correct>",
-      "reasoning_step": "<step>",
-      "difficulty": "<easy|medium|hard>"
+      "number": 3, "format_type": "matrix_grid",
+      "question": "<classify each row>",
+      "rows": ["<statement 1>", "<statement 2>", "<statement 3>"],
+      "columns": ["<option A>", "<option B>"],
+      "correct_answer": { "<statement 1>": "<option A>", "<statement 2>": "<option B>", "<statement 3>": "<option A>" },
+      "rationale": "<...>", "reasoning_step": "<step>", "difficulty": "<easy|medium|hard>"
     },
     {
-      "question": "<sub-question 4 — a 'click the relevant item' task on the exhibit/record>",
-      "format_type": "hot_spot",
-      "stimulus": {
-        "type": "text_targets",
-        "title": "<record/table title>",
-        "targets": [
-          { "id": "item-1", "text": "<clickable text 1>" },
-          { "id": "item-2", "text": "<clickable text 2>" },
-          { "id": "item-3", "text": "<clickable text 3>" }
-        ]
-      },
-      "answer": { "correct_ids": ["item-2"] },
-      "scoring": "dichotomous",
-      "rationale": "<Why item-2 is correct AND why others are wrong>",
-      "reasoning_step": "<step>",
-      "difficulty": "<easy|medium|hard>"
+      "number": 4, "format_type": "cloze_dropdown",
+      "question": "<sentence with [Blank 1] and [Blank 2] markers>",
+      "choices": { "Blank 1": ["opt1", "opt2", "opt3"], "Blank 2": ["optA", "optB", "optC"] },
+      "correct_answer": { "Blank 1": "opt2", "Blank 2": "optA" },
+      "rationale": "<...>", "reasoning_step": "<step>", "difficulty": "<easy|medium|hard>"
+    },
+    {
+      "number": 5, "format_type": "fill_blank",
+      "question": "<enter a date/number>",
+      "correct_answer": "04/16/2026",
+      "rationale": "<...>", "reasoning_step": "<step>", "difficulty": "<easy|medium|hard>"
+    },
+    {
+      "number": 6, "format_type": "ordered_response",
+      "question": "<put the steps in order>",
+      "items": ["<step A>", "<step B>", "<step C>", "<step D>"],
+      "correct_order": [2, 4, 1, 3],
+      "rationale": "<...>", "reasoning_step": "<step>", "difficulty": "<easy|medium|hard>"
     }
   ],
   "explanation": "<overall reasoning thread tying the case together — 3-5 sentences>",
   "bloom_level": "<4_analyze|5_evaluate>",
   "difficulty": "<medium|hard>",
-  "is_image_question": <true|false>,
-  "image_type": "<if image, else null>",
-  "image_search_terms": [<if image, else []>]
+  "is_image_question": false,
+  "image_type": null,
+  "image_search_terms": []
+}
+PER-FORMAT ANSWER KEY (all machine-gradable; use these EXACT shapes):
+  - mcq_single: options[] + correct_answer:"<letter>"
+  - sata: options[] + correct_answers:["<letters>"]
+  - matrix_grid: rows[] + columns[] + correct_answer:{ "<each row text>": "<chosen column text>" }
+  - cloze_dropdown: question has [Blank N] markers + choices:{ "Blank N": [options] } + correct_answer:{ "Blank N": "<one of its choices>" }
+  - fill_blank: correct_answer:"<exact value>" (NOT only in the rationale)
+  - ordered_response: items[] + correct_order — an array of 1-based item indices in the CORRECT SEQUENCE (e.g. [2,4,1,3] means item 2 is first). Do NOT use item→position mapping.
+PARTIAL CREDIT: sub-questions of type matrix_grid, sata, and ordered_response SHOULD include "scoring": "all_or_nothing" | "partial" (matrix/sata default to "partial" per-cell/per-option; ordered_response defaults to "all_or_nothing"). Single-answer formats (mcq_single, fill_blank, cloze_dropdown) omit scoring.`;
+        break;
+      case 'task_based_simulation':
+      case 'tbs':
+        schema = `FORMAT: task_based_simulation (${alloc.name}) — ${alloc.count} simulation(s)
+TASK-BASED SIMULATION RULES (MANDATORY):
+  • This is NOT an image question. Set is_image_question=false. Provide ALL exhibit data as MARKDOWN text/tables — NEVER as an image.
+  • Provide 2-5 "exhibits": the documents/data the candidate must analyze (contracts, financial statements, schedules, filings, correspondence, trial balances, etc.). Each exhibit's "content" is MARKDOWN (use markdown tables for tabular/numeric data).
+  • Provide 4-8 "sub_questions" (tasks) that reference the exhibits BY LABEL (e.g. "Using Exhibit 1…"). EVERY fact a task needs (dates, amounts, terms, names) MUST actually appear in an exhibit's markdown — do not reference data that isn't shown.
+  • Use realistic TBS task types across the sub-questions: fill_blank (numeric/date entry), cloze_dropdown (with "choices"), matrix_grid (with "rows"/"columns" — classify Correct/Incorrect), mcq_single (with "options"), emq (with "items"/"response_options" — matching), ordered_response (with "items").
+  • Each sub-question MUST have its own "rationale" (why correct + why alternatives wrong) and a "reasoning_step" appropriate to the exam's discipline.
+{
+  "format_type": "task_based_simulation",
+  "question": "<the scenario / directions the candidate reads first — the memo/task context>",
+  "exhibits": [
+    { "label": "Exhibit 1", "title": "<short title>", "type": "document|table|financials|correspondence|schedule", "content": "<exhibit content as MARKDOWN; use md tables for tabular data>" }
+  ],
+  "sub_questions": [
+    { "number": 1, "prompt": "<task referencing an exhibit by label>", "format_type": "fill_blank", "keyed_answer": "<answer>", "rationale": "<why correct + why alternatives wrong>", "bloom_level": "3_apply", "reasoning_step": "<step>" },
+    { "number": 2, "prompt": "<...>", "format_type": "cloze_dropdown", "choices": { "<blank_id>": ["opt1","opt2","opt3"] }, "keyed_answer": { "<blank_id>": "opt1" }, "rationale": "<...>", "bloom_level": "4_analyze", "reasoning_step": "<step>" },
+    { "number": 3, "prompt": "<...>", "format_type": "matrix_grid", "rows": ["<statement 1>","<statement 2>"], "columns": ["Correct","Incorrect"], "keyed_answer": { "<statement 1>": "Correct" }, "rationale": "<...>", "bloom_level": "4_analyze", "reasoning_step": "<step>" },
+    { "number": 4, "prompt": "<...>", "format_type": "mcq_single", "options": ["A. …","B. …","C. …","D. …"], "keyed_answer": "C", "rationale": "<...>", "bloom_level": "4_analyze", "reasoning_step": "<step>" }
+  ],
+  "response_instructions": "<how to enter answers — date format, dollar format, selection rules>",
+  "explanation": "<overall reasoning thread across the simulation — 3-5 sentences>",
+  "difficulty": "<medium|hard>",
+  "bloom_level": "<4_analyze|5_evaluate>",
+  "is_image_question": false,
+  "image_type": null,
+  "image_search_terms": []
 }`;
         break;
       default:
@@ -760,6 +800,11 @@ Your allocation:  ${numQ} questions
 Format:           ${formatBrief}
 Marking scheme:   ${ep.marking || 'Standard positive marking'}
 Image-based Qs:   ${numImgQ} of your ${numQ} questions must be marked is_image_question: true
+
+STIMULUS MEDIUM — choose correctly per question, respecting how ${courseName} ACTUALLY presents information:
+- GENUINE VISUAL (x-ray, ECG/rhythm strip, histology/pathology slide, photograph, anatomy, gel/blot, a diagram/chart/graph that must be drawn): set is_image_question: true with an image_type. These count toward the image allocation above.
+- SEPARATE DOCUMENT / DATA EXHIBIT (financial statement, workpaper, schedule, Schedule K-1, trial balance, ledger, contract, medication administration record, serial/trended lab table): set is_image_question: false and include an "exhibits" array — each exhibit { "label": "Exhibit 1", "title": "...", "type": "document|table|financials|schedule|correspondence", "content": "<MARKDOWN; use markdown tables for tabular/numeric data>" } — and reference exhibits by label. Every datum a task needs MUST appear in an exhibit. Use this ONLY when the exam genuinely shows a SEPARATE document/table.
+- PURE TEXT (default): if the exam conventionally weaves the data INTO the vignette prose — e.g. a single set of vitals or a lab panel written in the stem ("Hgb 9.1 g/dL, WBC 14,200, Cr 2.1 mg/dL") — keep it INLINE as text. Do NOT manufacture an exhibit for data that belongs in the vignette. Most USMLE/NCLEX questions are pure text this way.
 ${examPatternSection}
 BLOOM'S TAXONOMY — YOU MUST HIT THESE COUNTS EXACTLY
 ──────────────────────────────────────────────────────
@@ -1069,6 +1114,43 @@ async function getFormatId(slug: string): Promise<string | null> {
 }
 
 // ── Build content JSONB from LLM output (format-aware) ──
+// Preserve the COMPLETE, machine-gradable structure of a case_study / TBS
+// sub-question — never drop the fields a grader/renderer needs per format
+// (matrix rows+columns, cloze choices, the answer key, item order, etc.).
+function enrichSubQuestion(sq: Record<string, unknown>, idx: number): Record<string, unknown> {
+  const base: Record<string, unknown> = {
+    number: sq.number ?? idx + 1,
+    question: sq.question || sq.prompt || sq.stem || '',
+    format_type: sq.format_type || 'mcq_single',
+    // choice/answer scaffolding across all formats
+    options: sq.options,                 // mcq_single / sata
+    choices: sq.choices,                 // cloze_dropdown: { blankId: [opts] }
+    response_options: sq.response_options, // emq
+    items: sq.items,                     // ordered_response / emq
+    rows: sq.rows,                       // matrix_grid
+    columns: sq.columns,                 // matrix_grid
+    blanks: sq.blanks,                   // cloze (alt shape)
+    correct_order: sq.correct_order,
+    scoring: sq.scoring || null,
+    stimulus: sq.stimulus,               // hot_spot
+    rationale: sq.rationale || sq.explanation || '',
+    reasoning_step: sq.reasoning_step || sq.cjmm_step || null,
+    bloom_level: sq.bloom_level || null,
+    difficulty: sq.difficulty || null,
+  };
+  // Answer key — use EXACTLY ONE field per format (never emit twin keys):
+  //   sata/mcq_multi → correct_answers (array); everything else → correct_answer.
+  const ft = (sq.format_type as string) || 'mcq_single';
+  if (ft === 'sata' || ft === 'mcq_multi') {
+    base.correct_answers = sq.correct_answers ?? sq.correct_answer ?? sq.keyed_answer ?? sq.answer;
+  } else {
+    base.correct_answer = sq.correct_answer ?? sq.keyed_answer ?? sq.answer ?? sq.correct_answers;
+  }
+  // Drop keys that are genuinely absent so records stay clean.
+  for (const k of Object.keys(base)) if (base[k] === undefined) delete base[k];
+  return base;
+}
+
 function buildContentFromQuestion(q: Record<string, unknown>): Record<string, unknown> {
   const formatType = (q.format_type as string) || 'mcq_single';
 
@@ -1181,37 +1263,37 @@ function buildContentFromQuestion(q: Record<string, unknown>): Record<string, un
         explanation: (q.explanation as string) || '',
       };
     case 'case_study': {
-      // Ensure sub_questions preserve rationale and reasoning_step fields.
-      // Accept legacy `cjmm_step` from older generations for backward compatibility.
       const subs = (q.sub_questions as Array<Record<string, unknown>>) || [];
-      const enrichedSubs = subs.map((sq) => {
-        const base: Record<string, unknown> = {
-          question: sq.question || sq.stem || '',
-          format_type: sq.format_type || 'mcq_single',
-          options: sq.options,
-          correct_answer: sq.correct_answer,
-          correct_answers: sq.correct_answers,
-          items: sq.items,
-          correct_order: sq.correct_order,
-          blanks: sq.blanks,
-          rationale: sq.rationale || sq.explanation || '',
-          reasoning_step: sq.reasoning_step || sq.cjmm_step || null,
-          difficulty: sq.difficulty || null,
-        };
-        // Preserve hot_spot stimulus contract fields
-        if (sq.format_type === 'hot_spot') {
-          base.stimulus = sq.stimulus || null;
-          base.answer = sq.answer || null;
-          base.scoring = sq.scoring || 'dichotomous';
-          if (typeof sq.rationale === 'object' && sq.rationale !== null && !Array.isArray(sq.rationale)) {
-            base.rationale = sq.rationale; // keyed by target id
-          }
-        }
-        return base;
-      });
       return {
         case_narrative: (q.case_narrative as string) || (q.question as string) || '',
+        ...(Array.isArray(q.topics) ? { topics: q.topics } : {}),
+        sub_questions: subs.map(enrichSubQuestion),
+        response_instructions: (q.response_instructions as string) || '',
+        explanation: (q.explanation as string) || '',
+      };
+    }
+    case 'task_based_simulation':
+    case 'tbs': {
+      // Some models nest sub_questions/response_instructions under `answer`.
+      const ans = (q.answer as Record<string, unknown>) || {};
+      const subs = (q.sub_questions as Array<Record<string, unknown>>)
+        || (ans.sub_questions as Array<Record<string, unknown>>)
+        || [];
+      const enrichedSubs = subs.map(enrichSubQuestion);
+      const rawExhibits = (q.exhibits as Array<Record<string, unknown>>) || (ans.exhibits as Array<Record<string, unknown>>) || [];
+      const exhibits = rawExhibits.map((ex, i) => ({
+        label: (ex.label as string) || `Exhibit ${i + 1}`,
+        title: (ex.title as string) || '',
+        type: (ex.type as string) || 'document',
+        content: (ex.content as string) || (ex.markdown as string) || (ex.text as string) || '',
+      }));
+      return {
+        format_type: 'task_based_simulation',
+        scenario: (q.question as string) || (q.scenario as string) || (q.case_narrative as string) || '',
+        ...(Array.isArray(q.topics) ? { topics: q.topics } : {}),
+        exhibits,
         sub_questions: enrichedSubs,
+        response_instructions: (q.response_instructions as string) || (ans.response_instructions as string) || '',
         explanation: (q.explanation as string) || '',
       };
     }
@@ -1247,6 +1329,21 @@ async function insertSubjectQuestions(
     const formatType = (q.format_type as string) || 'mcq_single';
     const isMcq = formatType === 'mcq_single' || formatType === 'mcq_multi' || formatType === 'sata';
 
+    // Build content, preserving any markdown exhibits the model produced (any format).
+    const content = buildContentFromQuestion(q) as Record<string, unknown>;
+    if (!Array.isArray(content.exhibits) && Array.isArray(q.exhibits)) {
+      content.exhibits = (q.exhibits as Array<Record<string, unknown>>).map((ex, i) => ({
+        label: (ex.label as string) || `Exhibit ${i + 1}`,
+        title: (ex.title as string) || '',
+        type: (ex.type as string) || 'document',
+        content: (ex.content as string) || (ex.markdown as string) || (ex.text as string) || '',
+      }));
+    }
+    // Classify presentation medium; auto-correct a document mis-tagged as image.
+    const questionType = classifyQuestionType({ ...q, content });
+    content.question_type = questionType;
+    const isImage = questionType === 'image';
+
     return {
       job_id: jobId,
       course_id: courseId,
@@ -1261,22 +1358,23 @@ async function insertSubjectQuestions(
       course: courseName,
       blooms_level: (q.blooms_level as string) || '',
       difficulty: (q.difficulty as number) || 1,
-      is_image_question: (q.is_image_question as boolean) || false,
+      is_image_question: isImage,
       image_url: (q.image_url as string) || null,
-      image_type: (q.image_type as string) || null,
-      image_description: (q.image_description as string) || null,
-      image_search_terms: (q.image_search_terms as string[]) || [],
+      image_type: isImage ? ((q.image_type as string) || null) : null,
+      image_description: isImage ? ((q.image_description as string) || null) : null,
+      image_search_terms: isImage ? ((q.image_search_terms as string[]) || []) : [],
       // Flexible format columns
       format_id: formatIds[formatType] || formatIds['mcq_single'],
-      content: buildContentFromQuestion(q),
+      content,
       tags: {
         subject: q.subject as string,
         topic: (q.topic as string) || '',
         blooms: (q.blooms_level as string) || '',
         difficulty: (q.difficulty as number) || 1,
         format_type: formatType,
+        question_type: questionType,
       },
-      media: (q.is_image_question && q.image_type) ? [{
+      media: (isImage && q.image_type) ? [{
         type: (q.image_type as string) || 'image',
         url: (q.image_url as string) || null,
         description: (q.image_description as string) || null,
@@ -1695,7 +1793,7 @@ export async function generateBatchForJob(
   // the course has a selected exam (chosen on the structure page).
   // Subjects are tagged with `exam` at parse time, so we just filter the flat list.
   const selectedExam = (jobConfig.exam as string) || (structure.selected_exam as string) || '';
-  if (selectedExam) {
+  if (selectedExam && selectedExam !== '__all__') {
     const allSubjects = (structure.subjects as Array<Record<string, unknown>>) || [];
     const scoped = allSubjects.filter((s) => (s.exam as string) === selectedExam);
     if (scoped.length === 0) {

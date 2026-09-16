@@ -224,15 +224,18 @@ async function runAuditBatch(questions: Record<string, unknown>[]): Promise<Reco
     ];
   }
 
+  // 12000 (matching the main audit pipeline). 4000 truncated the response for
+  // large case-study batches, yielding no parseable score → questions stuck in
+  // needs_review/flagged limbo forever ("reprocess_audit_failed").
   const response = await orCall(MODELS.AUDITOR, '', userMessage, {
-    maxTokens: 4000,
+    maxTokens: 12000,
     temperature: 0.2,
   });
 
   let results = extractJsonArray(response.content, questions.length);
   if (results.length < questions.length) {
     const response2 = await orCall(MODELS.AUDITOR, '', userMessage, {
-      maxTokens: 4000,
+      maxTokens: 12000,
       temperature: 0.1,
     });
     const results2 = extractJsonArray(response2.content, questions.length);

@@ -102,6 +102,10 @@ Flag only if one of these is true:
    c. Each sub-question MUST have its own "rationale" explaining correct answer + why distractors are wrong
    d. Each sub-question MUST have a "reasoning_step" tag (legacy: "cjmm_step") using a step taxonomy appropriate to this exam's discipline — do NOT require the nursing Clinical-Judgment labels for non-clinical exams
    e. Hot-spot answers must be structured objects, not prose strings
+   f. ANSWER-KEY CORRECTNESS — verify EACH keyed answer against the exhibit facts + stated rule. In particular:
+      • Date/number boundary arithmetic: recompute the keyed value and check off-by-one errors (inclusive vs exclusive boundary). E.g. "earliest date documentation may be DESTROYED" = the day AFTER the retention period ends, not the last retained day. Flag if the key is off by one.
+      • Rule grounding: the answer must be gradable against a rule/threshold/fact that ACTUALLY appears in an exhibit or the narrative. Flag any sub-question whose key depends on a rule not stated in any exhibit.
+      • Cross-task consistency: two sub-questions in the same case must not apply contradictory rules (e.g. one task teaches "the 60-day documentation rule does not govern other deadlines" while another uses that same 60-day rule to judge a communication deadline). Flag the contradiction and name both sub-questions.
 8. CONCEPT DIVERSITY — look across the entire batch:
    a. Flag questions that test the EXACT same concept/fact as another question in the batch (conceptual duplicate even if worded differently)
    b. Flag questions that are too similar in scenario/presentation (e.g., 3 questions built on the same fact pattern → suggest varying it)

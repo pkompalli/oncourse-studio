@@ -3,6 +3,7 @@ import { useAppStore } from '../../store/appStore';
 import { jobs, questions as questionsApi } from '../../services/api';
 import { supabase } from '../../services/supabase';
 import type { Job, Question } from '../../types';
+import { ALL_EXAMS } from '../../types';
 import { Play, Loader2, CheckCircle2, XCircle, Clock, History, ArrowRight, Trash2, ChevronDown, ChevronUp, ImageIcon, AlertTriangle } from 'lucide-react';
 import QuestionImage from '../common/QuestionImage';
 import QuestionRenderer from '../common/QuestionRenderer';
@@ -71,13 +72,19 @@ export default function Step2Generate() {
   // if so, it's locked here. The picker only appears for legacy courses that have
   // multiple exams but no stored choice.
   const exams = course?.structure?.exams || [];
-  const lockedExam = course?.structure?.selected_exam;
-  const needsExamChoice = exams.length > 1 && !lockedExam;
+  const storedExam = course?.structure?.selected_exam;        // real exam | '__all__' | undefined
+  const isAllExams = storedExam === ALL_EXAMS;
+  const lockedExam = storedExam && !isAllExams ? storedExam : undefined; // a real locked exam
+  // Picker only for legacy multi-exam courses with no stored choice.
+  const needsExamChoice = exams.length > 1 && !storedExam;
+  // Empty string = no exam filter (single-exam course or "All exams").
   const [selectedExam, setSelectedExam] = useState('');
   useEffect(() => {
     if (lockedExam) setSelectedExam(lockedExam);
+    else if (isAllExams) setSelectedExam('');
     else if (exams.length === 1) setSelectedExam(exams[0].name);
-  }, [lockedExam, exams.length, exams]);
+    else setSelectedExam('');
+  }, [lockedExam, isAllExams, exams.length, exams]);
 
   // ── Topic-wise: pick which subjects/topics to generate (with "select all") ──
   const isTopicWiseMode = contentMode === 'qbank' && (qbankMode === 'topic_wise' || qbankMode === 'topic_qbank');
@@ -383,6 +390,7 @@ export default function Step2Generate() {
           <p className="text-sm text-slate-500 mt-1">
             {course?.name} &middot; {contentMode === 'qbank' ? (qbankMode === 'mock_exam' ? 'Mock Exam' : 'Topic-wise') : 'Lessons'}
             {selectedExam && <> &middot; <span className="font-medium text-indigo-600">{selectedExam}</span></>}
+            {isAllExams && <> &middot; <span className="font-medium text-indigo-600">All exams</span></>}
           </p>
         </div>
         {overallStatus === 'idle' && !job && (

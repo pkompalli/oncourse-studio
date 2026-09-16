@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { supabase } from '../db/supabase.js';
 import { fetchAllRows } from '../db/pagination.js';
+import { classifyQuestionType, needsMarkdownRegeneration } from '../services/questionType.js';
 
 export const exportRouter = Router();
 
@@ -50,31 +51,43 @@ exportRouter.get('/json/:jobId', async (req, res, next) => {
           ...(image_base64 ? { base64: image_base64, media_type: image_media_type } : {}),
         }] : [];
 
+        // Canonical, de-duplicated export item. Everything lives in ONE place:
+        // structured data in `content`, images in `media`, metadata in `tags`.
+        // (No flattened legacy duplicates, no separate markdown block — exhibits
+        // already live in content; no mcq scaffolding leaking into non-mcq records.)
+        const questionType = classifyQuestionType(q);
+        const needsRegen = needsMarkdownRegeneration(q);
+
+        // Canonical content — synthesize from legacy columns only if absent.
+        const content = q.content || {
+          stem: q.question,
+          options: Object.entries(q.options || {})
+            .sort(([a], [b]) => a.localeCompare(b))
+            .map(([key, text]) => ({ key, text })),
+          answer: { key: q.correct_option },
+          explanation: q.explanation || '',
+        };
+
+        // Uniform difficulty label (DB stores an int; sub-questions use strings).
+        const diffMap: Record<number, string> = { 1: 'easy', 2: 'medium', 3: 'hard' };
+        const difficulty = typeof q.difficulty === 'number'
+          ? (diffMap[q.difficulty] || 'medium')
+          : (q.difficulty || 'medium');
+        const topics = Array.isArray(q.content?.topics) ? q.content.topics : undefined;
+
         return {
           format: q.tags?.format_type || 'mcq_single',
-          content: q.content || {
-            stem: q.question,
-            options: Object.entries(q.options || {})
-              .sort(([a], [b]) => a.localeCompare(b))
-              .map(([key, text]) => ({ key, text })),
-            answer: { key: q.correct_option },
-            explanation: q.explanation || '',
-          },
+          question_type: questionType,           // 'text' | 'image' | 'markdown'
+          needs_regeneration: needsRegen,        // intended markdown but stored as image
+          content,                               // stem/exhibits/sub_questions/options/answer/explanation
+          media,                                 // images (base64 + url), [] if none
           tags: {
             subject: q.subject,
             topic: q.topic,
+            ...(topics ? { topics } : {}),       // multi-topic cases carry the full set
             blooms: q.blooms_level || '',
-            difficulty: q.difficulty ?? 1,
+            difficulty,                          // 'easy' | 'medium' | 'hard'
           },
-          media,
-          question: q.question,
-          options: q.options,
-          correct_option: q.correct_option,
-          explanation: q.explanation || '',
-          subject: q.subject,
-          topic: q.topic,
-          blooms_level: q.blooms_level || '',
-          difficulty: q.difficulty ?? 1,
           quality_status: q.status,
           quality_score: q.quality_score,
         };

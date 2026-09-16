@@ -7,8 +7,51 @@ import { processAllImageQuestions } from '../services/images/imageGeneration.js'
 import { reprocessFlaggedForJob, peekReprocess } from '../services/review/reprocessFlagged.js';
 import { orchestrateJob } from '../services/pipeline/orchestrator.js';
 import { fetchAllRows } from '../db/pagination.js';
+import { classifyQuestionType, needsMarkdownRegeneration } from '../services/questionType.js';
 
 export const jobsRouter = Router();
+
+// Flag questions whose intended medium is Markdown but that are stored as an
+// image (or have no exhibits) — so they can be regenerated with the markdown
+// pipeline. Marks tags.needs_regeneration + tags.question_type and returns a
+// report. Pass ?job_id= to scope to one job, otherwise scans all jobs.
+jobsRouter.post('/flag-markdown-regen', async (req, res, next) => {
+  try {
+    const jobId = (req.query.job_id as string) || (req.body?.job_id as string) || null;
+    const rows = await fetchAllRows<Record<string, any>>((from, to) => {
+      let q = supabase.from('qb_questions').select('*').is('replaced_by_id', null).order('id', { ascending: true }).range(from, to);
+      if (jobId) q = q.eq('job_id', jobId);
+      return q;
+    });
+
+    const flagged: Array<{ id: string; job_id: string; question_number: number; format_type: string; image_type: string }> = [];
+    for (const q of rows || []) {
+      if (!needsMarkdownRegeneration(q)) continue;
+      const tags = { ...(q.tags || {}), needs_regeneration: true, question_type: 'markdown' };
+      await supabase.from('qb_questions').update({ tags }).eq('id', q.id);
+      flagged.push({
+        id: q.id,
+        job_id: q.job_id,
+        question_number: q.question_number,
+        format_type: (q.tags?.format_type as string) || q.format_type || 'mcq_single',
+        image_type: q.image_type || '',
+      });
+    }
+
+    // Group the report by job for readability.
+    const byJob: Record<string, number[]> = {};
+    for (const f of flagged) (byJob[f.job_id] ||= []).push(f.question_number);
+
+    res.json({
+      scanned: rows?.length || 0,
+      flagged_count: flagged.length,
+      by_job: byJob,
+      flagged,
+    });
+  } catch (e) {
+    next(e);
+  }
+});
 
 // A question counts as approved/validated using the same logic as the UI's displayStatus().
 function isApproved(q: Record<string, any>): boolean {
