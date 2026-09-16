@@ -10,7 +10,7 @@ import { supabase } from '../../db/supabase.js';
 import { fetchAllRows } from '../../db/pagination.js';
 import { orCall, MODELS } from '../llm/openrouter.js';
 import type { ContentPart } from '../llm/openrouter.js';
-import { formatQuestionsForReviewWithImages, extractJsonArray } from '../review/shared.js';
+import { formatQuestionsForReviewWithImages, extractJsonArray, gradabilityIssues } from '../review/shared.js';
 import { saveJobSnapshots } from '../snapshots.js';
 import { startTracking, getStepTokens } from '../llm/tokenTracker.js';
 
@@ -296,7 +296,19 @@ async function runAuditPipeline(jobId: string): Promise<void> {
           continue;
         }
 
-        const auditScore = rawScore as number;
+        let auditScore = rawScore as number;
+
+        // FINAL SAFETY GATE: never approve a case_study/TBS whose sub-questions
+        // aren't machine-gradable, regardless of the LLM's score. (Validator is
+        // the primary structural check; this is the last line before approval.)
+        const gradeIssues = gradabilityIssues(q);
+        if (gradeIssues.length > 0 && auditScore >= 7) {
+          auditScore = 3;
+          if (result) {
+            result.reason = `Not gradable: ${gradeIssues.slice(0, 3).join('; ')}${gradeIssues.length > 3 ? '…' : ''}`;
+            result.issues = [ ...((result.issues as string[]) || []), ...gradeIssues.map((s) => `NOT GRADABLE — ${s}`) ];
+          }
+        }
 
         // Combined score: average of validator + adversarial + audit, or just audit if others missing
         const vScore = (q.validator_score as number) || 0;

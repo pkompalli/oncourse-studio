@@ -13,6 +13,40 @@ const SIMPLE_FORMATS = new Set(['mcq_single', 'mcq_multi', 'sata', 'true_false',
 // Cap the raw-content dump so a huge case narrative can't blow up the batch payload.
 const GROUND_TRUTH_CAP = 8000;
 
+// Deterministic gradability check for case_study / task_based_simulation:
+// every sub-question must carry the machine-readable answer scaffolding for its
+// format. Returns a list of concrete problems (empty = fully gradable). Used as
+// a HARD gate so an ungradable case can never pass QA.
+export function gradabilityIssues(q: Record<string, unknown>): string[] {
+  const ft = (q.format_type as string) || ((q.tags as Record<string, unknown>)?.format_type as string) || '';
+  if (!['case_study', 'task_based_simulation', 'tbs'].includes(ft)) return [];
+  const subs = ((q.content as Record<string, unknown>)?.sub_questions as Array<Record<string, unknown>>) || [];
+  const has = (v: unknown) =>
+    v !== undefined && v !== null && v !== '' &&
+    !(Array.isArray(v) && v.length === 0) &&
+    !(typeof v === 'object' && !Array.isArray(v) && Object.keys(v as object).length === 0);
+  const issues: string[] = [];
+  if (subs.length === 0) { issues.push('Case has no machine-readable sub_questions'); return issues; }
+  subs.forEach((sq, i) => {
+    const n = (sq.number as number) ?? i + 1;
+    const f = (sq.format_type as string) || 'mcq_single';
+    const key = sq.correct_answer ?? sq.keyed_answer ?? sq.answer;
+    const tag = `Sub-Q${n} (${f})`;
+    switch (f) {
+      case 'mcq_single': if (!has(sq.options)) issues.push(`${tag}: missing options`); if (!has(key)) issues.push(`${tag}: missing correct_answer`); break;
+      case 'sata': case 'mcq_multi': if (!has(sq.options)) issues.push(`${tag}: missing options`); if (!has(sq.correct_answers) && !has(key)) issues.push(`${tag}: missing correct_answers`); break;
+      case 'matrix_grid': if (!has(sq.rows)) issues.push(`${tag}: missing rows`); if (!has(sq.columns)) issues.push(`${tag}: missing columns`); if (!has(key)) issues.push(`${tag}: missing correct_answer`); break;
+      case 'cloze_dropdown': if (!has(sq.choices) && !has(sq.blanks)) issues.push(`${tag}: missing choices`); if (!has(key)) issues.push(`${tag}: missing correct_answer`); break;
+      case 'fill_blank': if (!has(key)) issues.push(`${tag}: missing correct_answer (answer only in prose is invalid)`); break;
+      case 'ordered_response': case 'drag_drop': if (!has(sq.items)) issues.push(`${tag}: missing items`); if (!has(sq.correct_order)) issues.push(`${tag}: missing correct_order`); break;
+      case 'emq': if (!has(sq.response_options)) issues.push(`${tag}: missing response_options`); if (!has(key) && !has(sq.items)) issues.push(`${tag}: missing answers`); break;
+      case 'hot_spot': if (!has(sq.stimulus)) issues.push(`${tag}: missing stimulus`); if (!has(sq.answer) && !has(key)) issues.push(`${tag}: missing answer`); break;
+      default: if (!has(key) && !has(sq.correct_answers) && !has(sq.correct_order)) issues.push(`${tag}: missing an answer key`);
+    }
+  });
+  return issues;
+}
+
 // Normalize difficulty to the labels the reviewer expects. Stored as int 1/2/3
 // in the DB column but the rubric wants easy/medium/hard.
 function normalizeDifficulty(v: unknown): string {

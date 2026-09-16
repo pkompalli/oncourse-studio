@@ -216,7 +216,8 @@ Return ONLY this JSON:
         ${numOptions ? `"num_options": ${numOptions},` : ''}
         "avg_stem_words": ${avgStemWords > 0 ? avgStemWords : '<integer based on this specific exam>'},
         "uses_vignettes": <true/false>,
-        "image_questions_percentage": <integer — overall % of image-based questions in this exam>
+        "image_questions_percentage": <integer — % needing a GENUINE VISUAL (x-ray, ECG, histology, photo, anatomy, a chart/diagram that must be drawn)>,
+        "exhibit_questions_percentage": <integer — % needing a DOCUMENT/DATA exhibit rendered as markdown/tables (financial statements, workpapers, schedules, lab reports, records, contracts) — NOT a picture>
     },
     "blooms_distribution": {
         "1_remember": <integer %>,
@@ -233,7 +234,10 @@ Return ONLY this JSON:
         "hard": <integer %>
     },
     "image_percentage_by_subject": {
-${subjectsList.map((s) => `        "${s}": <integer % of image questions for this subject in ${courseName}>`).join(',\n')}
+${subjectsList.map((s) => `        "${s}": <integer % of GENUINE-IMAGE questions for this subject>`).join(',\n')}
+    },
+    "exhibit_percentage_by_subject": {
+${subjectsList.map((s) => `        "${s}": <integer % of DOCUMENT/DATA-exhibit (markdown) questions for this subject>`).join(',\n')}
     }
 }
 
@@ -241,13 +245,16 @@ CRITICAL: These numbers must reflect ${courseName} SPECIFICALLY.
 - A recall-heavy exam should have high 1_remember + 2_understand.
 - A reasoning-heavy exam should have high 3_apply + 4_analyze.
 
-IMAGE PERCENTAGE GUIDANCE — BE ACCURATE and SPECIFIC TO ${courseName}:
-- image_questions_percentage is the OVERALL % of the entire paper that contains image/visual/exhibit-based questions.
-- Determine this from how ${courseName} ACTUALLY uses visuals — do NOT apply another discipline's benchmarks.
-  * Some exams are highly visual (e.g. radiology-heavy medical subjects, engineering diagrams, accounting exhibits/financial statements, charts/graphs).
-  * Others are almost entirely text (e.g. law reasoning, ethics, pure-recall subjects) → a low or near-zero image percentage is correct.
-- Set per-subject image percentages from the nature of each subject in THIS exam (a subject that hinges on interpreting figures/exhibits is high; a text-only subject is low).
-- The weighted average across all subjects MUST approximately equal the overall image_questions_percentage.
+STIMULUS PERCENTAGE GUIDANCE — DISTINGUISH THREE MEDIA, SPECIFIC TO ${courseName} and its ACTUAL conventions:
+1) image_questions_percentage = % needing a GENUINE picture/visual (radiograph, ECG, histology, clinical photo, anatomy, a chart/diagram that must be drawn). Medical/engineering exams are high here; accounting/law are usually near ZERO.
+2) exhibit_questions_percentage = % where the exam presents a SEPARATE document/table the candidate must open and read — rendered as MARKDOWN tables (financial statements, workpapers, schedules, K-1s, contracts, medication administration records, serial/trended lab tables).
+3) Everything else is PURE TEXT (implicitly 100 − image% − exhibit%).
+
+CRITICAL — do NOT over-count exhibits. Data that the exam conventionally weaves INLINE into the vignette prose is TEXT, not an exhibit:
+- USMLE/NCLEX/medical: a single set of vitals or a lab panel written in the stem ("Hgb 9.1, WBC 14,200, Cr 2.1…") is INLINE TEXT. Count as an exhibit ONLY when the exam shows a genuinely SEPARATE tab/table (e.g. serial labs across time points). Step 2 CK true separate exhibits are only ~5-8%.
+- CPA/CFA/accounting: the exhibits ARE genuinely separate documents (statements, workpapers, schedules) → exhibit% is legitimately HIGH.
+- Base each number on how THIS exam actually presents information — not on the presence of numbers/data alone.
+- Per-subject: image_percentage_by_subject counts genuine visuals; exhibit_percentage_by_subject counts genuinely-separate document/table stimuli. The two are independent.
 
 Generate ONLY the JSON, no other text.`;
 

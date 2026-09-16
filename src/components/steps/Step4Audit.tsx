@@ -432,6 +432,24 @@ export default function Step4Audit() {
                           </span>
                         )}
                       </div>
+                      {displayStatus(q) === 'flagged' && (() => {
+                        const trail = (q.audit_trail as Array<Record<string, unknown>>) || [];
+                        // Most recent entry that carries a human-readable reason.
+                        const withReason = [...trail].reverse().find((e) =>
+                          (e.reason as string) || (e.summary as string) || ((e.issues as unknown[]) || []).length);
+                        const reason = (withReason?.reason as string) || (withReason?.summary as string) || '';
+                        const issues = (withReason?.issues as string[]) || [];
+                        if (!reason && issues.length === 0) return null;
+                        return (
+                          <div className="mb-2 p-2 rounded border border-amber-300 bg-amber-100/60 text-xs">
+                            <span className="font-semibold text-amber-800">Why flagged: </span>
+                            <span className="text-amber-900">{reason || issues.join('; ')}</span>
+                            {reason && issues.length > 0 && (
+                              <div className="mt-0.5 text-amber-800">{issues.join('; ')}</div>
+                            )}
+                          </div>
+                        );
+                      })()}
                       <QuestionRenderer question={q as unknown as Question} showAnswer={true} />
                     </div>
                     {!viewStage && (

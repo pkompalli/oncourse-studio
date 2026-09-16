@@ -8,6 +8,10 @@
  * Non-destructive: the full parsed structure (all exams) stays intact, so the
  * user can re-select a different exam later without re-uploading.
  */
+// Sentinel stored in structure.selected_exam / job config when the user picks
+// "All exams" on the structure page — i.e. build the whole course, no scoping.
+export const ALL_EXAMS = '__all__';
+
 export function scopeCourseToExam(course: Record<string, unknown>): {
   courseName: string;
   structure: Record<string, unknown>;
@@ -17,7 +21,8 @@ export function scopeCourseToExam(course: Record<string, unknown>): {
   const baseName = (course.name as string) || 'Course';
   const selected = (structure.selected_exam as string) || null;
 
-  if (!selected) return { courseName: baseName, structure, selectedExam: null };
+  // No exam chosen, or "All exams" → no scoping (use the full structure).
+  if (!selected || selected === ALL_EXAMS) return { courseName: baseName, structure, selectedExam: null };
 
   const allSubjects = (structure.subjects as Array<Record<string, unknown>>) || [];
   const scoped = allSubjects.filter((s) => (s.exam as string) === selected);

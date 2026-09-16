@@ -2,6 +2,7 @@ import { useState, useRef, useEffect } from 'react';
 import { useAppStore } from '../../store/appStore';
 import { courses } from '../../services/api';
 import type { Course, CourseStructure, Subject } from '../../types';
+import { ALL_EXAMS } from '../../types';
 import {
   Sparkles, Upload, ClipboardPaste, BookOpen, ClipboardList, Layers, FileText,
   ChevronDown, ChevronUp, Loader2, BarChart3, Check, ArrowRight, ArrowLeft, X,
@@ -17,6 +18,7 @@ interface SubjectDist {
   questions: number;
   percentage: number;
   image_pct: number;
+  exhibit_pct?: number;
 }
 
 interface QuestionTypeDisplay {
@@ -103,6 +105,7 @@ function ExamFormatDisplay({ examFormat }: { examFormat: Record<string, unknown>
             {qf.uses_vignettes && <span className="px-2 py-1 bg-amber-50 text-amber-700 rounded">Vignettes</span>}
             {qf.avg_stem_words && <span className="px-2 py-1 bg-slate-100 text-slate-600 rounded">~{qf.avg_stem_words as number} words/stem</span>}
             {qf.image_questions_percentage != null && <span className="px-2 py-1 bg-emerald-50 text-emerald-700 rounded">{qf.image_questions_percentage as number}% image Qs</span>}
+            {qf.exhibit_questions_percentage != null && <span className="px-2 py-1 bg-sky-50 text-sky-700 rounded">{qf.exhibit_questions_percentage as number}% exhibit (markdown) Qs</span>}
           </div>
           {negMarking && <div className="text-xs text-slate-500 mt-2">Marking: {negMarking}</div>}
         </div>
@@ -117,6 +120,7 @@ function ExamFormatDisplay({ examFormat }: { examFormat: Record<string, unknown>
             {qf.uses_vignettes && <span className="px-2 py-1 bg-amber-50 text-amber-700 rounded">Vignettes</span>}
             {qf.avg_stem_words && <span className="px-2 py-1 bg-slate-100 text-slate-600 rounded">~{qf.avg_stem_words as number} words/stem</span>}
             {qf.image_questions_percentage != null && <span className="px-2 py-1 bg-emerald-50 text-emerald-700 rounded">{qf.image_questions_percentage as number}% image Qs</span>}
+            {qf.exhibit_questions_percentage != null && <span className="px-2 py-1 bg-sky-50 text-sky-700 rounded">{qf.exhibit_questions_percentage as number}% exhibit (markdown) Qs</span>}
           </div>
           {negMarking && <div className="text-xs text-slate-500 mt-2">Marking: {negMarking}</div>}
         </div>
@@ -174,7 +178,8 @@ function ExamFormatDisplay({ examFormat }: { examFormat: Record<string, unknown>
                   <th className="py-1 pr-3">Subject</th>
                   <th className="py-1 pr-3 text-right">Questions</th>
                   <th className="py-1 pr-3 text-right">%</th>
-                  <th className="py-1 text-right">Image %</th>
+                  <th className="py-1 pr-3 text-right">Image %</th>
+                  <th className="py-1 text-right">Exhibit %</th>
                 </tr>
               </thead>
               <tbody>
@@ -183,7 +188,8 @@ function ExamFormatDisplay({ examFormat }: { examFormat: Record<string, unknown>
                     <td className="py-1.5 pr-3 text-slate-700">{name}</td>
                     <td className="py-1.5 pr-3 text-right font-medium text-slate-800">{dist.questions}</td>
                     <td className="py-1.5 pr-3 text-right text-slate-500">{dist.percentage}%</td>
-                    <td className="py-1.5 text-right text-slate-500">{dist.image_pct}%</td>
+                    <td className="py-1.5 pr-3 text-right text-slate-500">{dist.image_pct}%</td>
+                    <td className="py-1.5 text-right text-slate-500">{dist.exhibit_pct != null ? `${dist.exhibit_pct}%` : '—'}</td>
                   </tr>
                 ))}
               </tbody>
@@ -675,8 +681,8 @@ export default function Step1Structure() {
             // Composite key so identical subject names across exams don't collide.
             const subjKey = (s: Subject) => (s.exam ? `${s.exam}::${s.name}` : s.name);
             // Group subjects by exam (preserving structure order) when exams exist.
-            // Once an exam is picked (multi-exam course), show only that exam.
-            const shownExams = exams.length > 1 && selectedExam
+            // Once a specific exam is picked, show only that exam; "All exams" shows all.
+            const shownExams = exams.length > 1 && selectedExam && selectedExam !== ALL_EXAMS
               ? exams.filter((ex) => ex.name === selectedExam)
               : exams;
             const groups = hasExams
@@ -754,6 +760,7 @@ export default function Step1Structure() {
                     className="w-full sm:max-w-md px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
                   >
                     <option value="">Select an exam…</option>
+                    <option value={ALL_EXAMS}>All exams (build the whole course)</option>
                     {exams.map((ex) => (
                       <option key={ex.name} value={ex.name}>
                         {ex.code ? `${ex.code} — ${ex.name}` : ex.name}

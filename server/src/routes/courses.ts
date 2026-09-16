@@ -123,9 +123,11 @@ coursesRouter.post('/:id/select-exam', async (req, res, next) => {
     const structure = { ...(course.structure as Record<string, unknown>) };
     structure.selected_exam = exam || null;
 
+    // Don't pollute exam_type with the "all exams" sentinel.
+    const examType = exam && exam !== '__all__' ? exam : course.exam_type || null;
     const { data, error } = await supabase
       .from('qb_courses')
-      .update({ structure, exam_type: exam || course.exam_type || null })
+      .update({ structure, exam_type: examType })
       .eq('id', req.params.id)
       .select()
       .single();
@@ -188,6 +190,19 @@ coursesRouter.post('/:id/exam-format', async (req, res, next) => {
           dist.image_pct = imgPct;
         }
         totalImgQ += Math.round((dist.questions * dist.image_pct) / 100);
+      }
+
+      // Map per-subject exhibit (markdown) percentages the same way.
+      const phase2ExhPct = (examFormat.exhibit_percentage_by_subject as Record<string, number>) || {};
+      for (const [subjName, dist] of Object.entries(subjectDist as Record<string, { exhibit_pct?: number }>)) {
+        const key = subjName.toLowerCase().trim();
+        let exhPct: number | null = subjName in phase2ExhPct ? phase2ExhPct[subjName] : null;
+        if (exhPct === null) {
+          for (const [k, v] of Object.entries(phase2ExhPct)) {
+            if (k.toLowerCase().trim() === key || k.toLowerCase().includes(key) || key.includes(k.toLowerCase())) { exhPct = v; break; }
+          }
+        }
+        if (exhPct !== null) dist.exhibit_pct = exhPct;
       }
       // Enforce overall image target — scale up per-subject image_pct if weighted average is too low
       const qf = (combinedFormat.question_format as Record<string, number>) || {};
