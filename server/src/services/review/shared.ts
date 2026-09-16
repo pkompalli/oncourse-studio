@@ -13,38 +13,98 @@ const SIMPLE_FORMATS = new Set(['mcq_single', 'mcq_multi', 'sata', 'true_false',
 // Cap the raw-content dump so a huge case narrative can't blow up the batch payload.
 const GROUND_TRUTH_CAP = 8000;
 
-// Deterministic gradability check for case_study / task_based_simulation:
-// every sub-question must carry the machine-readable answer scaffolding for its
-// format. Returns a list of concrete problems (empty = fully gradable). Used as
-// a HARD gate so an ungradable case can never pass QA.
-export function gradabilityIssues(q: Record<string, unknown>): string[] {
-  const ft = (q.format_type as string) || ((q.tags as Record<string, unknown>)?.format_type as string) || '';
-  if (!['case_study', 'task_based_simulation', 'tbs'].includes(ft)) return [];
-  const subs = ((q.content as Record<string, unknown>)?.sub_questions as Array<Record<string, unknown>>) || [];
-  const has = (v: unknown) =>
-    v !== undefined && v !== null && v !== '' &&
-    !(Array.isArray(v) && v.length === 0) &&
-    !(typeof v === 'object' && !Array.isArray(v) && Object.keys(v as object).length === 0);
-  const issues: string[] = [];
-  if (subs.length === 0) { issues.push('Case has no machine-readable sub_questions'); return issues; }
-  subs.forEach((sq, i) => {
-    const n = (sq.number as number) ?? i + 1;
-    const f = (sq.format_type as string) || 'mcq_single';
-    const key = sq.correct_answer ?? sq.keyed_answer ?? sq.answer;
-    const tag = `Sub-Q${n} (${f})`;
-    switch (f) {
-      case 'mcq_single': if (!has(sq.options)) issues.push(`${tag}: missing options`); if (!has(key)) issues.push(`${tag}: missing correct_answer`); break;
-      case 'sata': case 'mcq_multi': if (!has(sq.options)) issues.push(`${tag}: missing options`); if (!has(sq.correct_answers) && !has(key)) issues.push(`${tag}: missing correct_answers`); break;
-      case 'matrix_grid': if (!has(sq.rows)) issues.push(`${tag}: missing rows`); if (!has(sq.columns)) issues.push(`${tag}: missing columns`); if (!has(key)) issues.push(`${tag}: missing correct_answer`); break;
-      case 'cloze_dropdown': if (!has(sq.choices) && !has(sq.blanks)) issues.push(`${tag}: missing choices`); if (!has(key)) issues.push(`${tag}: missing correct_answer`); break;
-      case 'fill_blank': if (!has(key)) issues.push(`${tag}: missing correct_answer (answer only in prose is invalid)`); break;
-      case 'ordered_response': case 'drag_drop': if (!has(sq.items)) issues.push(`${tag}: missing items`); if (!has(sq.correct_order)) issues.push(`${tag}: missing correct_order`); break;
-      case 'emq': if (!has(sq.response_options)) issues.push(`${tag}: missing response_options`); if (!has(key) && !has(sq.items)) issues.push(`${tag}: missing answers`); break;
-      case 'hot_spot': if (!has(sq.stimulus)) issues.push(`${tag}: missing stimulus`); if (!has(sq.answer) && !has(key)) issues.push(`${tag}: missing answer`); break;
-      default: if (!has(key) && !has(sq.correct_answers) && !has(sq.correct_order)) issues.push(`${tag}: missing an answer key`);
+const _has = (v: unknown) =>
+  v !== undefined && v !== null && v !== '' &&
+  !(Array.isArray(v) && v.length === 0) &&
+  !(typeof v === 'object' && !Array.isArray(v) && Object.keys(v as object).length === 0);
+
+/** Structural check for ONE case-study/TBS sub-question (fields live on the sub-q). */
+function subQuestionIssues(sq: Record<string, unknown>, n: number): string[] {
+  const f = (sq.format_type as string) || 'mcq_single';
+  const key = sq.correct_answer ?? sq.keyed_answer ?? sq.answer;
+  const tag = `Sub-Q${n} (${f})`;
+  const out: string[] = [];
+  switch (f) {
+    case 'mcq_single': if (!_has(sq.options)) out.push(`${tag}: missing options`); if (!_has(key)) out.push(`${tag}: missing correct_answer`); break;
+    case 'sata': case 'mcq_multi': if (!_has(sq.options)) out.push(`${tag}: missing options`); if (!_has(sq.correct_answers) && !_has(key)) out.push(`${tag}: missing correct_answers`); break;
+    case 'matrix_grid': if (!_has(sq.rows)) out.push(`${tag}: missing rows`); if (!_has(sq.columns)) out.push(`${tag}: missing columns`); if (!_has(key)) out.push(`${tag}: missing correct_answer`); break;
+    case 'cloze_dropdown': if (!_has(sq.choices) && !_has(sq.blanks)) out.push(`${tag}: missing choices`); if (!_has(key)) out.push(`${tag}: missing correct_answer`); break;
+    case 'fill_blank': if (!_has(key)) out.push(`${tag}: missing correct_answer (answer only in prose is invalid)`); break;
+    case 'ordered_response': case 'drag_drop': if (!_has(sq.items)) out.push(`${tag}: missing items`); if (!_has(sq.correct_order)) out.push(`${tag}: missing correct_order`); break;
+    case 'emq': if (!_has(sq.response_options)) out.push(`${tag}: missing response_options`); if (!_has(key) && !_has(sq.items)) out.push(`${tag}: missing answers`); break;
+    case 'hot_spot': if (!_has(sq.stimulus)) out.push(`${tag}: missing stimulus`); if (!_has(sq.answer) && !_has(key)) out.push(`${tag}: missing answer`); break;
+    default: if (!_has(key) && !_has(sq.correct_answers) && !_has(sq.correct_order)) out.push(`${tag}: missing an answer key`);
+  }
+  return out;
+}
+
+/** Structural check for a STANDALONE question (fields live on content, with
+ *  legacy-column fallbacks so we never false-flag pre-content-migration data). */
+function standaloneIssues(ft: string, c: Record<string, unknown>, q: Record<string, unknown>): string[] {
+  const out: string[] = [];
+  const answer = (c.answer as Record<string, unknown>) || {};
+  switch (ft) {
+    case 'mcq_single':
+      if (!_has(c.options) && !_has(q.options)) out.push('missing options');
+      if (!_has(answer.key) && !_has(q.correct_option)) out.push('missing answer');
+      break;
+    case 'sata': case 'mcq_multi':
+      if (!_has(c.options) && !_has(q.options)) out.push('missing options');
+      if (!_has(answer.keys) && !_has(q.correct_answers) && !_has(q.correct_option)) out.push('missing answers');
+      break;
+    case 'ordered_response': case 'drag_drop':
+      if (!_has(c.items) && !_has(q.items)) out.push('missing items');
+      if (!_has(c.correct_order) && !_has(q.correct_order)) out.push('missing correct_order');
+      break;
+    case 'fill_blank':
+      if (!_has(answer.value) && !_has(answer.text) && !_has(answer.acceptable_range) && !_has(q.correct_answer_value) && !_has(q.correct_answer)) out.push('missing answer');
+      break;
+    case 'matrix_grid':
+      if (!_has(c.row_headers) && !_has(c.rows)) out.push('missing row_headers');
+      if (!_has(c.column_headers) && !_has(c.columns)) out.push('missing column_headers');
+      if (!_has(c.correct_cells) && !_has(c.correct_answer)) out.push('missing correct_cells');
+      break;
+    case 'cloze_dropdown': {
+      const blanks = (c.blanks as Array<Record<string, unknown>>) || [];
+      if (!_has(blanks) && !_has(c.choices)) { out.push('missing blanks/choices'); break; }
+      blanks.forEach((b, i) => {
+        if (!_has(b.options)) out.push(`blank ${i + 1}: missing options`);
+        if (!_has(b.correct) && !_has(b.correct_answer)) out.push(`blank ${i + 1}: missing correct`);
+      });
+      break;
     }
-  });
-  return issues;
+    case 'hot_spot': {
+      const okNew = _has(c.stimulus) && _has(answer.correct_ids);
+      const okLegacy = _has(answer.region) || _has(q.correct_region);
+      if (!okNew && !okLegacy) out.push('missing stimulus/correct_ids');
+      break;
+    }
+    case 'emq':
+      if (!_has(c.option_list)) out.push('missing option_list');
+      if (!_has(c.scenarios) && !_has(c.items)) out.push('missing scenarios');
+      break;
+    default:
+      // Unknown/new format: require at least a recognizable answer somewhere.
+      if (!_has(answer) && !_has(c.correct_answer) && !_has(q.correct_option) && !_has(q.correct_answer)) out.push(`format "${ft}": no recognizable answer key`);
+  }
+  return out.map((s) => `[${ft}] ${s}`);
+}
+
+/**
+ * Deterministic STRUCTURAL gradability check for ANY format — standalone
+ * questions and case_study/TBS sub-questions alike. Returns concrete problems
+ * (empty = fully gradable). Used as a HARD gate so an ungradable question can
+ * never pass QA, regardless of format or course.
+ */
+export function gradabilityIssues(q: Record<string, unknown>): string[] {
+  const ft = (q.format_type as string) || ((q.tags as Record<string, unknown>)?.format_type as string) || 'mcq_single';
+  const c = (q.content as Record<string, unknown>) || {};
+  if (['case_study', 'task_based_simulation', 'tbs'].includes(ft)) {
+    const subs = (c.sub_questions as Array<Record<string, unknown>>) || [];
+    if (subs.length === 0) return ['Case has no machine-readable sub_questions'];
+    return subs.flatMap((sq, i) => subQuestionIssues(sq, (sq.number as number) ?? i + 1));
+  }
+  return standaloneIssues(ft, c, q);
 }
 
 // Normalize difficulty to the labels the reviewer expects. Stored as int 1/2/3

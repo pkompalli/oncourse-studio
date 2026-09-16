@@ -584,10 +584,11 @@ TASK-BASED SIMULATION RULES (MANDATORY):
         schema = `FORMAT: ${alloc.slug} (${alloc.name}) — ${alloc.count} question(s)
 ${alloc.description ? `Description: ${alloc.description}` : ''}
 ${alloc.answer_format ? `Answer format: ${alloc.answer_format}` : ''}
+GRADABILITY IS MANDATORY: include the COMPLETE machine-readable answer scaffolding this format needs — every option/choice/row/column/item the candidate sees, AND the correct answer as a structured value (never only in the explanation). A reader must be able to auto-grade a response from these fields alone.
 {
   "format_type": "${alloc.slug}",
   "question": "<stem>",
-  "answer": "<answer in the format described above>",
+  "answer": "<structured, machine-readable correct answer — not prose>",
   "explanation": "<MUST: justify answer AND explain why alternatives are wrong — 3-5 sentences>",
   "difficulty": "<easy|medium|hard>",
   "bloom_level": "<2_understand|3_apply|4_analyze|5_evaluate>",

@@ -124,9 +124,25 @@ Output ONLY the JSON array. No preamble, no trailing text.`;
   // Determine which format-specific checks to include based on batch contents
   const hasCaseStudy = !formatsInBatch || formatsInBatch.has('case_study');
   const hasHotSpot = !formatsInBatch || formatsInBatch.has('hot_spot');
+  const inBatch = (f: string) => !formatsInBatch || formatsInBatch.has(f);
 
   // Build format-specific check sections
   let formatSpecificChecks = '';
+
+  // Adaptive per-format structural checks — for whatever structured formats are
+  // present in this batch (standalone questions OR case-study sub-questions).
+  const structuralChecks: string[] = [];
+  if (inBatch('matrix_grid')) structuralChecks.push('matrix_grid: needs row_headers[] + column_headers[] + a correct classification for EVERY row; columns must be mutually exclusive & collectively exhaustive.');
+  if (inBatch('cloze_dropdown')) structuralChecks.push('cloze_dropdown: EVERY blank needs a plausible options list that INCLUDES the correct value, and a stated correct value; the stem must mark each blank.');
+  if (inBatch('emq')) structuralChecks.push('emq: needs an option_list and, for each scenario, exactly one correct option drawn from that list.');
+  if (inBatch('ordered_response') || inBatch('drag_drop')) structuralChecks.push('ordered_response: needs items[] + correct_order (1-based indices in the correct sequence); flag if the order is arbitrary or unjustified.');
+  if (inBatch('fill_blank')) structuralChecks.push('fill_blank: needs an explicit correct answer value (with acceptable alternatives if relevant) — NOT only in the explanation.');
+  if (inBatch('sata') || inBatch('mcq_multi')) structuralChecks.push('sata: needs options[] + a set of correct keys (≥1); distractors must be genuinely incorrect.');
+  if (structuralChecks.length > 0) {
+    formatSpecificChecks += `
+12. FORMAT STRUCTURE & GRADABILITY (for the formats in this batch): each question MUST carry the complete machine-readable answer scaffolding for its format. Flag (score ≤ 4, needs_revision) any question whose answer is not auto-gradable:
+${structuralChecks.map((s) => `   • ${s}`).join('\n')}`;
+  }
   if (hasCaseStudy) {
     formatSpecificChecks += `
 8. CASE STUDY COMPLIANCE (for format_type = "case_study"):
