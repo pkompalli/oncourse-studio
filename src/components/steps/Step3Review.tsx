@@ -88,7 +88,7 @@ export default function Step3Review() {
     }
     if (job && ['auditing', 'complete'].includes(job.status) && overallStatus === 'idle') {
       setOverallStatus('done');
-      setProgress((prev) => prev ? { ...prev, phase: 'done', step: 'Review already complete' } : { phase: 'done', step: 'Review already complete', reviewed: 0, fixed: 0, total: 0, batchesTotal: 0, batchesDone: 0, events: [], subjects: [] });
+      setProgress((prev) => prev ? { ...prev, phase: 'done', step: 'Review complete — ready for audit' } : { phase: 'done', step: 'Review complete — ready for audit', reviewed: 0, fixed: 0, total: 0, batchesTotal: 0, batchesDone: 0, events: [], subjects: [] });
       loadQuestions();
       completeStep('review');
     }
@@ -120,6 +120,30 @@ export default function Step3Review() {
         const updated = payload.new as Job;
         setJob(updated);
 
+        // Once the job has advanced past review, freeze the review UI in a stable
+        // "done" state and STOP mirroring the job's progress. Otherwise the audit
+        // pipeline's ongoing progress updates (its own phase + "Audit complete…"
+        // step) would bleed onto the review page and reset the phase cards.
+        if (['auditing', 'replacing', 'complete'].includes(updated.status)) {
+          pollingRef.current = false;
+          if (channelRef.current) { supabase.removeChannel(channelRef.current); channelRef.current = null; }
+          setOverallStatus('done');
+          setProgress((prev) => ({
+            ...(prev || { reviewed: 0, fixed: 0, total: 0, batchesTotal: 0, batchesDone: 0, events: [], subjects: [] }),
+            phase: 'done',
+            step: 'Review complete — ready for audit',
+          }));
+          completeStep('review');
+          loadQuestions();
+          return;
+        }
+        if (updated.status === 'failed') {
+          pollingRef.current = false;
+          setOverallStatus('error');
+          return;
+        }
+
+        // Still in review — mirror live review progress.
         const prog = updated.progress as Record<string, unknown> | undefined;
         if (prog) {
           setProgress({
@@ -133,18 +157,6 @@ export default function Step3Review() {
             events: (prog.events as string[]) || [],
             subjects: (prog.subjects as SubjectStatus[]) || [],
           });
-        }
-
-        if (updated.status === 'auditing') {
-          pollingRef.current = false;
-          setOverallStatus('done');
-          setProgress((prev) => prev ? { ...prev, phase: 'done' } : null);
-          completeStep('review');
-          loadQuestions();
-        }
-        if (updated.status === 'failed') {
-          pollingRef.current = false;
-          setOverallStatus('error');
         }
       })
       .subscribe();
@@ -182,9 +194,12 @@ export default function Step3Review() {
         });
       }
 
-      if (res.status === 'complete' || res.status === 'auditing') {
+      if (['complete', 'auditing', 'replacing'].includes(res.status)) {
         pollingRef.current = false;
         setOverallStatus('done');
+        setProgress((prev) => prev
+          ? { ...prev, phase: 'done', step: 'Review complete — ready for audit' }
+          : { phase: 'done', step: 'Review complete — ready for audit', reviewed: 0, fixed: 0, total: 0, batchesTotal: 0, batchesDone: 0, events: [], subjects: [] });
         completeStep('review');
         loadQuestions();
         return;

@@ -66,6 +66,60 @@ export default function Step2Generate() {
   const { snapshotQuestions, loading: snapshotLoading, availableStages } = useSnapshots(job?.id, viewStage);
   const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
 
+  // Exams: a course may span multiple exams; a generation set targets exactly one.
+  // The exam is normally chosen on the structure page (stored as selected_exam);
+  // if so, it's locked here. The picker only appears for legacy courses that have
+  // multiple exams but no stored choice.
+  const exams = course?.structure?.exams || [];
+  const lockedExam = course?.structure?.selected_exam;
+  const needsExamChoice = exams.length > 1 && !lockedExam;
+  const [selectedExam, setSelectedExam] = useState('');
+  useEffect(() => {
+    if (lockedExam) setSelectedExam(lockedExam);
+    else if (exams.length === 1) setSelectedExam(exams[0].name);
+  }, [lockedExam, exams.length, exams]);
+
+  // ── Topic-wise: pick which subjects/topics to generate (with "select all") ──
+  const isTopicWiseMode = contentMode === 'qbank' && (qbankMode === 'topic_wise' || qbankMode === 'topic_qbank');
+  const scopedSubjects = (course?.structure?.subjects || []).filter((s) => !selectedExam || s.exam === selectedExam);
+  const [topicSel, setTopicSel] = useState<Record<string, string[]>>({});
+  const [expandedSel, setExpandedSel] = useState<Set<string>>(new Set());
+
+  const subjectTopicNames = (s: { topics?: { name: string }[] }) => (s.topics || []).map((t) => t.name);
+  const isTopicPicked = (subj: string, topic: string) => (topicSel[subj] || []).includes(topic);
+  const isSubjectFull = (s: { name: string; topics?: { name: string }[] }) => {
+    const all = subjectTopicNames(s);
+    return all.length > 0 && all.every((t) => (topicSel[s.name] || []).includes(t));
+  };
+  const isSubjectPartial = (s: { name: string; topics?: { name: string }[] }) =>
+    (topicSel[s.name]?.length || 0) > 0 && !isSubjectFull(s);
+  const totalSelectedTopics = Object.values(topicSel).reduce((n, a) => n + a.length, 0);
+
+  const toggleTopic = (subj: string, topic: string) => setTopicSel((prev) => {
+    const cur = new Set(prev[subj] || []);
+    if (cur.has(topic)) cur.delete(topic); else cur.add(topic);
+    const next = { ...prev };
+    if (cur.size) next[subj] = [...cur]; else delete next[subj];
+    return next;
+  });
+  const toggleSubject = (s: { name: string; topics?: { name: string }[] }) => setTopicSel((prev) => {
+    const next = { ...prev };
+    if (isSubjectFull(s)) delete next[s.name];
+    else next[s.name] = subjectTopicNames(s);
+    return next;
+  });
+  const selectAllTopics = () => {
+    const next: Record<string, string[]> = {};
+    for (const s of scopedSubjects) { const ts = subjectTopicNames(s); if (ts.length) next[s.name] = ts; }
+    setTopicSel(next);
+  };
+  const clearAllTopics = () => setTopicSel({});
+  const toggleSelExpand = (name: string) => setExpandedSel((prev) => {
+    const n = new Set(prev); if (n.has(name)) n.delete(name); else n.add(name); return n;
+  });
+  // Reset selection when the exam scope changes.
+  useEffect(() => { setTopicSel({}); setExpandedSel(new Set()); }, [selectedExam]);
+
   // Auto-load recent jobs for this course
   useEffect(() => {
     if (course?.id) loadRecentJobs();
@@ -191,24 +245,38 @@ export default function Step2Generate() {
 
   const startGeneration = async () => {
     if (!course) return;
+    if (needsExamChoice && !selectedExam) {
+      setOverallStatus('error');
+      setStatusMessage('Please select which exam to generate for.');
+      return;
+    }
+    if (isTopicWiseMode && totalSelectedTopics === 0) {
+      setOverallStatus('error');
+      setStatusMessage('Select at least one subject or topic to generate (or use "Select all").');
+      return;
+    }
     setOverallStatus('running');
     setStatusMessage('Starting generation...');
 
-    const subjects = course.structure?.subjects || [];
+    const allSubjects = course.structure?.subjects || [];
+    let subjects = selectedExam ? allSubjects.filter((s) => s.exam === selectedExam) : allSubjects;
+    if (isTopicWiseMode && totalSelectedTopics > 0) {
+      subjects = subjects.filter((s) => (topicSel[s.name] || []).length > 0);
+    }
     setSubjectProgress(
       subjects.map((s) => ({ subject: s.name, status: 'pending' }))
     );
 
     try {
       const jobType = contentMode === 'lessons' ? 'lessons' : qbankMode;
-      const isTopicWise = contentMode === 'qbank' && (qbankMode === 'topic_wise' || qbankMode === 'topic_qbank');
       const res = await jobs.create({
         course_id: course.id,
         type: jobType,
         config: {
           contentMode,
           qbankMode: contentMode === 'qbank' ? qbankMode : undefined,
-          ...(isTopicWise ? { questions_per_topic: questionsPerTopic } : {}),
+          ...(selectedExam ? { exam: selectedExam } : {}),
+          ...(isTopicWiseMode ? { questions_per_topic: questionsPerTopic, topic_selection: topicSel } : {}),
         },
       });
       const newJob = res.job as Job;
@@ -314,10 +382,28 @@ export default function Step2Generate() {
           </h2>
           <p className="text-sm text-slate-500 mt-1">
             {course?.name} &middot; {contentMode === 'qbank' ? (qbankMode === 'mock_exam' ? 'Mock Exam' : 'Topic-wise') : 'Lessons'}
+            {selectedExam && <> &middot; <span className="font-medium text-indigo-600">{selectedExam}</span></>}
           </p>
         </div>
         {overallStatus === 'idle' && !job && (
           <div className="flex items-center gap-4">
+            {needsExamChoice && (
+              <div className="flex items-center gap-2">
+                <label className="text-sm text-slate-600 whitespace-nowrap">Exam</label>
+                <select
+                  value={selectedExam}
+                  onChange={(e) => setSelectedExam(e.target.value)}
+                  className="px-3 py-1.5 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none max-w-[16rem]"
+                >
+                  <option value="">Select exam…</option>
+                  {exams.map((ex) => (
+                    <option key={ex.name} value={ex.name}>
+                      {ex.code ? `${ex.code} — ${ex.name}` : ex.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
             {contentMode === 'qbank' && (qbankMode === 'topic_wise' || qbankMode === 'topic_qbank') && (
               <div className="flex items-center gap-2">
                 <label className="text-sm text-slate-600 whitespace-nowrap">Qs per topic</label>
@@ -333,7 +419,8 @@ export default function Step2Generate() {
             )}
             <button
               onClick={startGeneration}
-              className="flex items-center gap-2 px-6 py-2 bg-indigo-600 text-white rounded-lg font-medium hover:bg-indigo-700 transition-colors"
+              disabled={isTopicWiseMode && totalSelectedTopics === 0}
+              className="flex items-center gap-2 px-6 py-2 bg-indigo-600 text-white rounded-lg font-medium hover:bg-indigo-700 transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-indigo-600"
             >
               <Play className="w-4 h-4" /> Start Generation
             </button>
@@ -348,6 +435,83 @@ export default function Step2Generate() {
           </button>
         )}
       </div>
+
+      {/* Topic-wise subject/topic selector */}
+      {isTopicWiseMode && overallStatus === 'idle' && !job && scopedSubjects.length > 0 && (
+        <div className="bg-white rounded-xl border border-slate-200 p-4">
+          <div className="flex items-center justify-between mb-3 gap-2 flex-wrap">
+            <div>
+              <h3 className="text-sm font-semibold text-slate-700">Select subjects &amp; topics to generate</h3>
+              <p className="text-xs text-slate-500">
+                {totalSelectedTopics > 0
+                  ? `${totalSelectedTopics} topic${totalSelectedTopics === 1 ? '' : 's'} selected across ${Object.keys(topicSel).length} subject${Object.keys(topicSel).length === 1 ? '' : 's'}`
+                  : 'Nothing selected — pick subjects/topics or use "Select all"'}
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={selectAllTopics}
+                className="text-xs px-3 py-1.5 rounded-lg border border-indigo-200 text-indigo-600 hover:bg-indigo-50 font-medium"
+              >
+                Select all
+              </button>
+              <button
+                onClick={clearAllTopics}
+                className="text-xs px-3 py-1.5 rounded-lg border border-slate-200 text-slate-500 hover:bg-slate-50 font-medium"
+              >
+                Clear
+              </button>
+            </div>
+          </div>
+
+          <div className="space-y-1.5 max-h-96 overflow-y-auto pr-1">
+            {scopedSubjects.map((s) => {
+              const topics = s.topics || [];
+              const picked = topicSel[s.name]?.length || 0;
+              const open = expandedSel.has(s.name);
+              return (
+                <div key={s.name} className="border border-slate-100 rounded-lg">
+                  <div className="flex items-center gap-2 px-3 py-2">
+                    <input
+                      type="checkbox"
+                      className="w-4 h-4 accent-indigo-600 shrink-0"
+                      checked={isSubjectFull(s)}
+                      ref={(el) => { if (el) el.indeterminate = isSubjectPartial(s); }}
+                      onChange={() => toggleSubject(s)}
+                    />
+                    <button
+                      onClick={() => toggleSelExpand(s.name)}
+                      className="flex-1 flex items-center justify-between min-w-0"
+                    >
+                      <span className="text-sm font-medium text-slate-700 truncate">{s.name}</span>
+                      <span className="flex items-center gap-2 shrink-0">
+                        <span className="text-xs text-slate-400">{picked}/{topics.length}</span>
+                        {open ? <ChevronUp className="w-4 h-4 text-slate-400" /> : <ChevronDown className="w-4 h-4 text-slate-400" />}
+                      </span>
+                    </button>
+                  </div>
+                  {open && topics.length > 0 && (
+                    <div className="px-3 pb-2 pt-0.5 grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 border-t border-slate-50">
+                      {topics.map((t) => (
+                        <label key={t.name} className="flex items-center gap-2 text-xs text-slate-600 cursor-pointer py-0.5">
+                          <input
+                            type="checkbox"
+                            className="w-3.5 h-3.5 accent-indigo-600 shrink-0"
+                            checked={isTopicPicked(s.name, t.name)}
+                            onChange={() => toggleTopic(s.name, t.name)}
+                          />
+                          <span className="truncate">{t.name}</span>
+                          {(t.high_yield || t.is_high_yield) && <span className="text-amber-500 font-medium shrink-0">HY</span>}
+                        </label>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {/* Recent Jobs — shown when idle and no active job */}
       {overallStatus === 'idle' && !job && recentJobs.length > 0 && (

@@ -9,6 +9,7 @@
  */
 
 import { supabase } from '../../db/supabase.js';
+import { fetchAllRows } from '../../db/pagination.js';
 import { runValidatorBatch } from './validator.js';
 import { runAdversarialBatch } from './adversarial.js';
 import { fixQuestion } from './fixer.js';
@@ -66,21 +67,28 @@ function chunk<T>(arr: T[], size: number): T[][] {
   return chunks;
 }
 
-async function runWithConcurrency<T>(tasks: (() => Promise<T>)[], max: number): Promise<T[]> {
-  const results: T[] = new Array(tasks.length);
+async function runWithConcurrency<T>(tasks: (() => Promise<T>)[], max: number): Promise<(T | undefined)[]> {
+  const results: (T | undefined)[] = new Array(tasks.length);
   let active = 0;
   let idx = 0;
   let completed = 0;
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
     function next() {
       if (completed === tasks.length) { resolve(results); return; }
       while (active < max && idx < tasks.length) {
         const i = idx++;
         active++;
         tasks[i]()
-          .then((r) => { results[i] = r; completed++; })
-          .catch(reject)
-          .finally(() => { active--; next(); });
+          .then((r) => { results[i] = r; })
+          .catch((e) => {
+            // Isolate batch failures: a single batch throwing (Bedrock API error,
+            // network, fixer, image regen) must NOT crash the whole review run and
+            // lose every other question's progress. Log and continue — those
+            // questions fall through to audit / needs_review handling.
+            console.error(`  [review] Batch task ${i} failed (continuing): ${e instanceof Error ? e.message : e}`);
+            results[i] = undefined;
+          })
+          .finally(() => { active--; completed++; next(); });
       }
     }
     if (tasks.length === 0) resolve([]);
@@ -89,13 +97,16 @@ async function runWithConcurrency<T>(tasks: (() => Promise<T>)[], max: number): 
 }
 
 async function fetchJobQuestions(jobId: string, status?: string): Promise<Record<string, unknown>[]> {
-  let query = supabase.from('qb_questions').select('*')
-    .eq('job_id', jobId).is('replaced_by_id', null)
-    .order('question_number', { ascending: true });
-  if (status) query = query.eq('status', status);
-  const { data, error } = await query;
-  if (error) throw new Error(error.message);
-  return (data || []) as Record<string, unknown>[];
+  // Paginate — a job can have >1000 questions; the PostgREST 1000-row cap would
+  // otherwise make review silently skip everything past the first 1000.
+  const data = await fetchAllRows<Record<string, unknown>>((from, to) => {
+    let query = supabase.from('qb_questions').select('*')
+      .eq('job_id', jobId).is('replaced_by_id', null)
+      .order('question_number', { ascending: true });
+    if (status) query = query.eq('status', status);
+    return query.range(from, to);
+  });
+  return data;
 }
 
 async function getCourseInfo(jobId: string): Promise<{ name: string; examFormat: Record<string, unknown>; guidelines: Record<string, unknown> }> {
@@ -196,7 +207,7 @@ async function runValidatorPhase(
     // ── Step: Sending to validator ──
     setStep(jobId, `[Validator] Batch ${batchNum}/${batchesTotal}: sending Q${qStart}–Q${qEnd} to GPT-5.4...`);
 
-    const results = await runValidatorBatch(batch, 'qbank', 'medical education', examFormat, guidelines);
+    const results = await runValidatorBatch(batch, 'qbank', courseName || 'exam preparation', examFormat, guidelines);
 
     // ── Step: Processing scores ──
     setStep(jobId, `[Validator] Batch ${batchNum}/${batchesTotal}: processing scores for Q${qStart}–Q${qEnd}`);
@@ -391,7 +402,7 @@ async function runAdversarialPhase(
 
     setStep(jobId, `[Adversarial] Batch ${batchNum}/${batchesTotal}: sending Q${qStart}–Q${qEnd} to GPT-5.4...`);
 
-    const results = await runAdversarialBatch(batch, 'qbank', 'medical education', examFormat);
+    const results = await runAdversarialBatch(batch, 'qbank', courseName || 'exam preparation', examFormat);
 
     setStep(jobId, `[Adversarial] Batch ${batchNum}/${batchesTotal}: processing scores for Q${qStart}–Q${qEnd}`);
 

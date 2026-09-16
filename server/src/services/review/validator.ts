@@ -9,7 +9,7 @@ import { extractJsonArray, formatQuestionsForReviewWithImages } from './shared.j
 
 // ── Validator Prompt (V1 lines 5803-5857, verbatim) ──
 
-export function getBatchValidatorPrompt(contentType: string, domain = 'medical education', examFormat?: Record<string, unknown>, guidelines?: Record<string, unknown>, formatsInBatch?: Set<string>): string {
+export function getBatchValidatorPrompt(contentType: string, domain = 'exam preparation', examFormat?: Record<string, unknown>, guidelines?: Record<string, unknown>, formatsInBatch?: Set<string>): string {
   if (contentType === 'lesson') {
     return `You are a senior ${domain} content validator. Fix what is genuinely wrong — do not over-correct content that is already accurate and appropriate.
 
@@ -94,7 +94,8 @@ Output ONLY the JSON array. No preamble, no trailing text.`;
       if (stem.style) rules.push(`Style: ${stem.style}`);
       if (stem.vignette_required) rules.push('Vignettes REQUIRED');
       if (stem.min_words || stem.max_words) rules.push(`Stem length: ${stem.min_words || '?'}–${stem.max_words || '?'} words`);
-      if (stem.clinical_scenario_depth) rules.push(`Clinical depth: ${stem.clinical_scenario_depth}`);
+      const scenarioDepth = stem.scenario_depth ?? stem.clinical_scenario_depth;
+      if (scenarioDepth) rules.push(`Scenario depth: ${scenarioDepth}`);
       if (rules.length > 0) gParts.push(`Stem: ${rules.join(', ')}`);
     }
     const dist = guidelines.distractor_guidelines as Record<string, unknown> | undefined;
@@ -132,7 +133,7 @@ Output ONLY the JSON array. No preamble, no trailing text.`;
    a. Does the case have exactly 6 sub-questions? If fewer, flag and set needs_revision true.
    b. Does the case use at least 3 DIFFERENT format_types across sub-questions? If only 1-2, flag.
    c. Does EACH sub-question have its own "rationale" field? If any rationale is missing or empty, flag.
-   d. Does each sub-question have a "cjmm_step" tag? If missing, flag.${hasHotSpot ? `
+   d. Does each sub-question have a "reasoning_step" tag (legacy: "cjmm_step")? If missing, flag. Accept any step taxonomy appropriate to this exam's discipline — do NOT require the nursing Clinical-Judgment labels for non-clinical exams.${hasHotSpot ? `
    e. Hot_spot sub-questions must use the stimulus+correct_ids contract (see check 11).` : ''}`;
   }
   if (hasHotSpot) {
@@ -160,7 +161,7 @@ Output ONLY the JSON array. No preamble, no trailing text.`;
 
   // Build format-specific output fields
   const caseStudyField = hasCaseStudy
-    ? `\n    "case_study_issues": [<flag if: fewer than 6 sub-questions, fewer than 3 format types, missing sub-question rationales, missing cjmm_step tags${hasHotSpot ? ', hot_spot answers are prose' : ''} — empty if none or not a case_study>],`
+    ? `\n    "case_study_issues": [<flag if: fewer than 6 sub-questions, fewer than 3 format types, missing sub-question rationales, missing reasoning_step tags${hasHotSpot ? ', hot_spot answers are prose' : ''} — empty if none or not a case_study>],`
     : '';
   const hotspotField = hasHotSpot
     ? `\n    "hotspot_issues": [<flag if: hot_spot contract violations — HS001-HS011 codes with specific fix instructions — empty if not hot_spot or no violations>],`
@@ -182,10 +183,10 @@ For EACH question ask:
    b. Does the explanation address EACH distractor/wrong option BY NAME and state WHY it is wrong?
    c. If the explanation only defends the correct answer without discussing distractors → flag as "explanation_issues" and set needs_revision true.
    d. Minimum 3 sentences for standalone questions.
-4. Does the vignette contain the minimum data needed to reach the correct answer?
-5. Is the clinical content free of factual inaccuracies?
+4. Does the stem/scenario contain the minimum data needed to reach the correct answer?
+5. Is the content free of factual inaccuracies?
 6. FORMAT COMPLIANCE (if exam format requirements are provided above):
-   a. Does the stem match the expected format (e.g., clinical vignette vs. direct recall)?
+   a. Does the stem match the expected format (e.g., scenario/vignette vs. direct recall)?
    b. Does the option count match (e.g., 4 options vs. 5)?
    c. Are the distractors structured as the exam expects (homogeneous length, parallel construction)?
    d. Is the Bloom's level a valid normalized value (2_understand, 3_apply, 4_analyze, 5_evaluate)? Flag non-standard labels like NCJMM_*, raw text labels, etc.
@@ -199,7 +200,7 @@ For EACH question ask:
 10. IMAGE — relevance only:
    a. Image absent but the stem explicitly references it (e.g. "shown below", "image 1", "radiograph shown") → score ≤ 4 and set needs_revision true. The question is UNUSABLE without its image regardless of how good the text is.
    b. Image present but wrong modality or clearly irrelevant → flag and suggest replacement.
-   c. Image that is imperfect but clinically appropriate → do NOT flag.
+   c. Image that is imperfect but appropriate for the question → do NOT flag.
 
 Scoring (10 = nothing to fix, 1 = unacceptable):
 • 9–10 → factually correct, explanation addresses all options, format compliant — do not change
@@ -218,7 +219,7 @@ Return a JSON ARRAY — one object per question:
     "overall_accuracy_score": <1-10>,
     "correct_answer_verified": <boolean>,
     "needs_revision": <boolean — true if score ≤ 5 OR if image is explicitly referenced but absent>,
-    "factual_errors": [<confirmed wrong clinical facts only — empty if none>],
+    "factual_errors": [<confirmed wrong facts only — empty if none>],
     "distractor_issues": [<only if a distractor is genuinely defensible as correct — empty if none>],
     "vignette_issues": [<only if key data is missing to reach the answer — empty if none>],
     "explanation_issues": [<flag if: explanation only defends correct answer without discussing distractors, too short, or contradicts answer — empty if none>],${caseStudyField}
@@ -231,8 +232,8 @@ Return a JSON ARRAY — one object per question:
     "changes_required": [<NUMBERED list of concrete changes needed. Empty if score > 7.
       Each entry is a complete, self-contained instruction.
       Examples:
-        "1. Replace attached image with a CT abdomen showing appendiceal wall thickening",
-        "2. Fix correct answer from B to A — adenosine is first-line for SVT not metoprolol"
+        "1. Replace the attached image with one that matches what the stem describes",
+        "2. Fix the correct answer from B to A — state the correct fact/rule for this exam"
       Empty array if no real changes needed.>],
     "summary": "<1 sentence: what is wrong, or 'No issues found' if clean>"
   },
@@ -247,7 +248,7 @@ Output ONLY the JSON array. No preamble, no trailing text.`;
 export async function runValidatorBatch(
   questions: Record<string, unknown>[],
   contentType = 'qbank',
-  domain = 'medical education',
+  domain = 'exam preparation',
   examFormat?: Record<string, unknown>,
   guidelines?: Record<string, unknown>
 ): Promise<Record<string, unknown>[]> {
@@ -268,7 +269,7 @@ export async function runValidatorBatch(
   }
 
   const prompt = getBatchValidatorPrompt(contentType, domain, examFormat, guidelines, formatsInBatch);
-  const content = formatQuestionsForReviewWithImages(questions);
+  const content = await formatQuestionsForReviewWithImages(questions);
 
   // Build user message: multimodal if images present, plain text otherwise
   let userMessage: string | ContentPart[];
@@ -281,22 +282,33 @@ export async function runValidatorBatch(
     ];
   }
 
-  const response = await orCall(MODELS.VALIDATOR, '', userMessage, {
-    maxTokens: 8000,
-    temperature: 0.3,
-  });
+  // Never throw: a Bedrock/network failure here would otherwise crash the whole
+  // review pipeline (losing all questions). Return whatever we can parse; empty
+  // results are handled downstream as needs_review.
+  let results: Record<string, unknown>[] = [];
+  try {
+    const response = await orCall(MODELS.VALIDATOR, '', userMessage, {
+      maxTokens: 16000,
+      temperature: 0.3,
+    });
+    results = extractJsonArray(response.content, questions.length);
+  } catch (e) {
+    console.warn(`  [Validator] LLM call failed for batch of ${questions.length}: ${e instanceof Error ? e.message : e}`);
+  }
 
-  let results = extractJsonArray(response.content, questions.length);
-
-  // Retry if too few results (V1 pattern)
+  // Retry if too few results (covers truncation AND a failed first call)
   if (results.length < questions.length) {
     console.log(`  [Validator] Short response (${results.length}/${questions.length}), retrying...`);
-    const response2 = await orCall(MODELS.VALIDATOR, '', userMessage, {
-      maxTokens: 8000,
-      temperature: 0.1,
-    });
-    const results2 = extractJsonArray(response2.content, questions.length);
-    if (results2.length > results.length) results = results2;
+    try {
+      const response2 = await orCall(MODELS.VALIDATOR, '', userMessage, {
+        maxTokens: 16000,
+        temperature: 0.1,
+      });
+      const results2 = extractJsonArray(response2.content, questions.length);
+      if (results2.length > results.length) results = results2;
+    } catch (e) {
+      console.warn(`  [Validator] Retry LLM call failed: ${e instanceof Error ? e.message : e}`);
+    }
   }
 
   return results;

@@ -4,9 +4,19 @@ import { generateBatchForJob } from '../services/generation/questionGeneration.j
 import { reviewBatchForJob } from '../services/review/reviewPipeline.js';
 import { auditBatchForJob } from '../services/audit/auditPipeline.js';
 import { processAllImageQuestions } from '../services/images/imageGeneration.js';
-import { reprocessFlaggedForJob } from '../services/review/reprocessFlagged.js';
+import { reprocessFlaggedForJob, peekReprocess } from '../services/review/reprocessFlagged.js';
+import { orchestrateJob } from '../services/pipeline/orchestrator.js';
+import { fetchAllRows } from '../db/pagination.js';
 
 export const jobsRouter = Router();
+
+// A question counts as approved/validated using the same logic as the UI's displayStatus().
+function isApproved(q: Record<string, any>): boolean {
+  if (q.quality_score != null) return q.quality_score >= 7;
+  if (q.validator_score != null && q.adversarial_score != null) return q.validator_score >= 7 && q.adversarial_score >= 7;
+  if (q.validator_score != null) return q.validator_score >= 7;
+  return false;
+}
 
 // Create a new job
 jobsRouter.post('/', async (req, res, next) => {
@@ -30,7 +40,109 @@ jobsRouter.post('/', async (req, res, next) => {
       .single();
 
     if (error) throw new Error(error.message);
+
+    // Drive the whole pipeline server-side (generation → review → audit) so a
+    // disconnected client can never strand the job. Fire-and-forget.
+    orchestrateJob(data.id as string);
+
     res.json({ job: data });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// Manually (re)start server-side orchestration for a job — unsticks a job that
+// was stranded before this was deployed, or that needs a kick. Optionally pass
+// { status } to reset the job to a specific phase first (e.g. 'reviewing' to
+// re-run review on a job that previously failed there).
+jobsRouter.post('/:id/resume', async (req, res, next) => {
+  try {
+    const { status } = (req.body || {}) as { status?: string };
+    const allowed = ['pending', 'generating', 'reviewing', 'auditing'];
+    if (status) {
+      if (!allowed.includes(status)) {
+        res.status(400).json({ error: `status must be one of ${allowed.join(', ')}` });
+        return;
+      }
+      await supabase.from('qb_jobs').update({ status, error: null }).eq('id', req.params.id);
+    }
+    orchestrateJob(req.params.id);
+    res.json({ ok: true, message: `Orchestration (re)started${status ? ` from status=${status}` : ''}` });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// Top up a job's APPROVED question count to match its exam-format subject
+// distribution by moving already-approved questions in from another job of the
+// same course (avoids regenerating). Dry-run by default; pass { apply: true } to
+// perform the move.
+jobsRouter.post('/:id/topup-from-job', async (req, res, next) => {
+  try {
+    const targetJobId = req.params.id;
+    const { source_job_id, apply } = (req.body || {}) as { source_job_id?: string; apply?: boolean };
+    if (!source_job_id) {
+      res.status(400).json({ error: 'source_job_id is required' });
+      return;
+    }
+
+    // Target job → course → per-subject targets
+    const { data: targetJob, error: tjErr } = await supabase
+      .from('qb_jobs').select('course_id').eq('id', targetJobId).single();
+    if (tjErr || !targetJob) { res.status(404).json({ error: 'target job not found' }); return; }
+    const { data: course } = await supabase
+      .from('qb_courses').select('exam_format').eq('id', targetJob.course_id).single();
+    const sd = ((course?.exam_format as Record<string, any>)?.subject_distribution || {}) as Record<string, any>;
+    const targets: Record<string, number> = {};
+    for (const [k, v] of Object.entries(sd)) targets[k] = Math.round((typeof v === 'object' ? v.questions : v) || 0);
+
+    // Target's current approved-per-subject + max question_number
+    const targetQs = await fetchAllRows<Record<string, any>>((from, to) =>
+      supabase.from('qb_questions')
+        .select('subject, question_number, quality_score, validator_score, adversarial_score')
+        .eq('job_id', targetJobId).is('replaced_by_id', null)
+        .order('question_number', { ascending: true }).range(from, to)
+    );
+    const apprBySubj: Record<string, number> = {};
+    let maxQnum = 0;
+    for (const q of targetQs) {
+      if (isApproved(q)) apprBySubj[q.subject] = (apprBySubj[q.subject] || 0) + 1;
+      maxQnum = Math.max(maxQnum, q.question_number || 0);
+    }
+
+    // Per subject: move the shortfall of approved questions from the source job
+    const plan: Record<string, { shortfall: number; available: number; moved: number }> = {};
+    let nextQnum = maxQnum + 1;
+    for (const [subj, target] of Object.entries(targets)) {
+      const shortfall = Math.max(0, target - (apprBySubj[subj] || 0));
+      const srcQs = await fetchAllRows<Record<string, any>>((from, to) =>
+        supabase.from('qb_questions')
+          .select('*')
+          .eq('job_id', source_job_id).eq('subject', subj).is('replaced_by_id', null)
+          .order('question_number', { ascending: true }).range(from, to)
+      );
+      const donors = srcQs.filter(isApproved).slice(0, shortfall);
+      plan[subj] = { shortfall, available: srcQs.filter(isApproved).length, moved: 0 };
+      if (apply && donors.length > 0) {
+        for (const q of donors) {
+          const { error: upErr } = await supabase.from('qb_questions')
+            .update({ job_id: targetJobId, question_number: nextQnum++ })
+            .eq('id', q.id);
+          if (!upErr) plan[subj].moved++;
+        }
+      }
+    }
+
+    const totalShortfall = Object.values(plan).reduce((a, p) => a + p.shortfall, 0);
+    const totalMoved = Object.values(plan).reduce((a, p) => a + p.moved, 0);
+    res.json({
+      ok: true,
+      applied: !!apply,
+      current_approved: Object.values(apprBySubj).reduce((a, b) => a + b, 0),
+      total_shortfall: totalShortfall,
+      total_moved: totalMoved,
+      plan,
+    });
   } catch (e) {
     next(e);
   }
@@ -108,6 +220,19 @@ jobsRouter.post('/:id/reprocess-flagged', async (req, res, next) => {
   try {
     const result = await reprocessFlaggedForJob(req.params.id);
     res.json(result);
+  } catch (e) {
+    next(e);
+  }
+});
+
+// Read-only reprocess status — returns the in-flight run's progress WITHOUT
+// starting a new one. The UI polls this on mount to re-attach its progress
+// stream after a refresh/disconnect. { running: false } means nothing is active.
+jobsRouter.get('/:id/reprocess-status', (req, res, next) => {
+  try {
+    const state = peekReprocess(req.params.id);
+    if (!state) { res.json({ running: false }); return; }
+    res.json({ running: state.status === 'running', ...state });
   } catch (e) {
     next(e);
   }

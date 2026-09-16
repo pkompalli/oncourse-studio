@@ -225,7 +225,18 @@ async function converseCall(
             messages: [
               { role: 'user' as const, content: userPrompt.map((p) => {
                 if (p.type === 'text') return { type: 'text' as const, text: p.text };
-                if (p.type === 'image_url') return { type: 'image' as const, image: new URL(p.image_url.url) };
+                if (p.type === 'image_url') {
+                  const u = p.image_url.url;
+                  // Decode data URLs to bytes ourselves so the AI SDK never makes a
+                  // network download (which throws AI_DownloadError on a transient
+                  // failure and crashes the whole call). Callers pre-fetch images to
+                  // data URLs; a raw http(s) URL only reaches here as a fallback.
+                  if (u.startsWith('data:')) {
+                    const b64 = u.slice(u.indexOf(',') + 1);
+                    return { type: 'image' as const, image: Buffer.from(b64, 'base64') };
+                  }
+                  return { type: 'image' as const, image: new URL(u) };
+                }
                 return { type: 'text' as const, text: '' };
               }) },
             ],

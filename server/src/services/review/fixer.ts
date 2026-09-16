@@ -31,7 +31,7 @@ export async function fixQuestion(
   const contentJson = JSON.stringify(question, null, 2);
   const changesText = changesRequired.map((c) => `  ${c}`).join('\n');
 
-  const prompt = `You are a medical education question editor. Apply EXACTLY the required changes below to this question — nothing more, nothing less.
+  const prompt = `You are an expert ${courseName || 'exam'} question editor. Apply EXACTLY the required changes below to this question — nothing more, nothing less.
 
 CRITICAL RULES:
 • ONLY change what is specifically listed in REQUIRED CHANGES. Do NOT rewrite, rephrase, or "improve" any text that isn't flagged.

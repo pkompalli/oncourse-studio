@@ -4,6 +4,7 @@ import { generateCourseStructure, parseStructureFromInput } from '../services/ge
 import { refineCourseStructure, refineExamFormat } from '../services/generation/refineStructure.js';
 import { analyzeExamFormat, fetchMockExamSpecs, interpretExamFormatFromText } from '../services/generation/examFormat.js';
 import { generateGuidelines, refineGuidelines } from '../services/generation/guidelines.js';
+import { scopeCourseToExam } from '../services/generation/examScope.js';
 
 export const coursesRouter = Router();
 
@@ -106,6 +107,35 @@ coursesRouter.delete('/:id', async (req, res, next) => {
 });
 
 // Analyze exam format (and optionally fetch mock exam specs)
+// Select which exam (of a multi-exam course) subsequent steps operate on.
+// Non-destructive: stores structure.selected_exam, keeps the full structure.
+coursesRouter.post('/:id/select-exam', async (req, res, next) => {
+  try {
+    const { exam } = req.body || {};
+
+    const { data: course, error: fetchError } = await supabase
+      .from('qb_courses')
+      .select('*')
+      .eq('id', req.params.id)
+      .single();
+    if (fetchError) throw new Error(fetchError.message);
+
+    const structure = { ...(course.structure as Record<string, unknown>) };
+    structure.selected_exam = exam || null;
+
+    const { data, error } = await supabase
+      .from('qb_courses')
+      .update({ structure, exam_type: exam || course.exam_type || null })
+      .eq('id', req.params.id)
+      .select()
+      .single();
+    if (error) throw new Error(error.message);
+    res.json({ course: data });
+  } catch (e) {
+    next(e);
+  }
+});
+
 coursesRouter.post('/:id/exam-format', async (req, res, next) => {
   try {
     const { qbank_mode } = req.body || {};
@@ -119,8 +149,8 @@ coursesRouter.post('/:id/exam-format', async (req, res, next) => {
 
     if (fetchError) throw new Error(fetchError.message);
 
-    const structure = course.structure as Record<string, unknown>;
-    const courseName = course.name as string;
+    // Scope to the selected exam (if the course spans multiple exams).
+    const { courseName, structure } = scopeCourseToExam(course);
 
     // Step 1: Analyze exam format (question type, bloom's, difficulty, image %)
     const examFormat = await analyzeExamFormat(courseName, structure);
@@ -296,9 +326,9 @@ coursesRouter.post('/:id/guidelines', async (req, res, next) => {
 
     if (fetchError) throw new Error(fetchError.message);
 
-    const structure = course.structure as Record<string, unknown>;
+    // Scope to the selected exam (if the course spans multiple exams).
+    const { courseName, structure } = scopeCourseToExam(course);
     const examFormat = (course.exam_format || {}) as Record<string, unknown>;
-    const courseName = course.name as string;
 
     const guidelines = await generateGuidelines(courseName, structure, examFormat);
 

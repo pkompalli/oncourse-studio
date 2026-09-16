@@ -43,7 +43,7 @@ Produce a JSON object with these exact sections:
     "min_words": <number or null>,
     "max_words": <number or null>,
     "vignette_required": <boolean>,
-    "clinical_scenario_depth": "<brief | moderate | detailed — what the exam expects>"
+    "scenario_depth": "<brief | moderate | detailed — what the exam expects>"
   },
 
   "distractor_guidelines": {
@@ -55,8 +55,8 @@ Produce a JSON object with these exact sections:
     ],
     "homogeneity": "<all options same type/category/length>",
     "common_errors_to_use": [
-      "<type 1: e.g., Adjacent drug in same class>",
-      "<type 2: e.g., Condition with similar presentation>",
+      "<type 1: e.g., a closely-related concept the candidate may confuse with the answer>",
+      "<type 2: e.g., a correct-looking option that applies the right idea in the wrong situation>",
       "<type 3+>"
     ]
   },
@@ -113,7 +113,7 @@ IMPORTANT:
 - Format slugs should be: mcq_single, sata, ordered_response, fill_blank, hot_spot, matrix_grid, cloze_dropdown, emq, case_study
 - Be specific and actionable — these rules will be programmatically enforced
 - explanation_guidelines.must_address_distractors MUST be true — every explanation must discuss why EACH wrong option is wrong, not just defend the correct answer
-- If case_study format is present, add custom_rules for: exactly 6 sub-questions per case, at least 3 different format_types per case, per-sub-question rationale required, CJMM step tags required (Recognize Cues, Analyze Cues, Prioritize Hypotheses, Generate Solutions, Take Action, Evaluate Outcomes)
+- If case_study format is present, add custom_rules for: exactly 6 sub-questions per case, at least 3 different format_types per case, per-sub-question rationale required, and a per-sub-question reasoning_step tag using a step taxonomy appropriate to THIS exam's discipline (e.g. nursing/NCLEX: Recognize Cues → Evaluate Outcomes; audit/CPA: Identify Risk → Report; do NOT impose clinical-judgment steps on non-clinical exams)
 - If hot_spot format is present, add custom_rule: hot_spot answers MUST use the stimulus+correct_ids contract — enumerate clickable elements as targets with stable lowercase-slug ids, set answer.correct_ids to the correct target id(s). NEVER use answer.region/label/landmark. Use text_targets type for discrete text elements (medication orders, charting entries, lab values) and image_regions type only for genuine photos/figures. Include ≥2 targets, scoring (dichotomous/plus_minus), and rationale keyed by target id.
 - difficulty_distribution MUST have all three levels (easy/medium/hard) with non-zero percentages
 - bloom_level values must be normalized: 2_understand, 3_apply, 4_analyze, 5_evaluate (no NCJMM_* prefixes, no raw text labels)

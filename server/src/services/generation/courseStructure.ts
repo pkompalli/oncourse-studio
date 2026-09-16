@@ -25,117 +25,50 @@ For each exam/course, base your structure on the authoritative sources:
 🎯 Ensure weightage and coverage matches what's actually tested in the exam.
 🎯 Reference the most current version of the curriculum/syllabus.
 
-🚨 CRITICAL WARNING: You MUST generate AT LEAST 10 subjects! 🚨
-   - Generating only 2-3 subjects is COMPLETELY UNACCEPTABLE
-   - Medical/Professional exams require 10-12 subjects based on official curriculum
-   - This is a professional educational platform - comprehensive coverage is MANDATORY
+🚨 COVERAGE RULE: Match the ACTUAL breadth of the official curriculum for THIS exam. 🚨
+   - Generate as many subjects as the real exam's blueprint has — do NOT collapse a broad exam into 2-3 subjects, and do NOT pad or invent subjects to hit an arbitrary number.
+   - Comprehensive professional exams typically have ~6-12 subjects; use fewer only if the exam is genuinely narrow, more if the blueprint is genuinely broader.
+   - Comprehensive coverage of what is actually tested is MANDATORY.
 
 Analyze the official curriculum and create a full hierarchical structure with:
 
-1. **Course identification** (type: medical/engineering/business/certification/other)
+1. **Course identification** (type: medical/engineering/business/legal/certification/academic/other)
 
-2. **Subjects** (major divisions):
-   🔴 CRITICAL: Generate AT LEAST 10 subjects - THIS IS MANDATORY!
+2. **Subjects** (the major divisions of THIS exam's blueprint)
+   HIERARCHY (all domains): Subject → Topic → Chapter
 
-   - Medical exams (UKMLA, USMLE, NEET PG): EXACTLY 10-12 subjects required
+   Use the official exam's own top-level divisions and terminology. Illustrative shapes across domains (adapt to the actual exam — do NOT copy these):
+   - Medical (USMLE/UKMLA/NEET PG): SUBJECT "Internal Medicine" → TOPIC "Cardiology" → CHAPTER "Heart Failure"
+   - Engineering (FE/PE): SUBJECT "Thermodynamics" → TOPIC "Cycles" → CHAPTER "Rankine Cycle"
+   - Accounting (CPA): SUBJECT "Auditing & Attestation" → TOPIC "Risk Assessment" → CHAPTER "Assessing RMM"
+   - Finance (CFA): SUBJECT "Ethics & Professional Standards" → TOPIC "Standards of Conduct" → CHAPTER "Conflicts of Interest"
+   - Law (LSAT/bar): SUBJECT "Logical Reasoning" → TOPIC "Assumption Questions" → CHAPTER "Necessary vs Sufficient"
 
-     🔴 HIERARCHY FOR MEDICAL COURSES:
-     Subject → Topic → Chapter
-
-     Example for "Internal Medicine - Adult":
-     - SUBJECT: Internal Medicine - Adult
-       - TOPIC: Cardiology
-         - CHAPTER: Hypertension
-         - CHAPTER: Heart Failure
-         - CHAPTER: Arrhythmias
-       - TOPIC: Respiratory Medicine
-         - CHAPTER: Asthma
-         - CHAPTER: COPD
-         - CHAPTER: Pneumonia
-
-     FOR UKMLA AKT - Base structure on GMC/UKMLA official curriculum:
-     Reference: GMC "Outcomes for graduates" and UKMLA syllabus domains
-
-     SUGGESTED SUBJECTS (use official terminology where possible):
-     1. Internal Medicine - Adult (system-based topics: Cardiology, Respiratory, Gastroenterology, Nephrology, Endocrinology, Rheumatology, Neurology)
-     2. Surgery (subspecialties: General Surgery, Trauma & Orthopedics, Urology, ENT, Ophthalmology)
-     3. Pediatrics & Child Health (including neonatology, growth & development)
-     4. Obstetrics & Gynecology (including maternal medicine, reproductive health)
-     5. Psychiatry & Mental Health (including liaison psychiatry, substance misuse)
-     6. General Practice & Primary Care (including chronic disease management, preventive care)
-     7. Emergency Medicine & Acute Care (including resuscitation, trauma)
-     8. Ethics, Law & Communication (including consent, capacity, professionalism)
-     9. Public Health & Epidemiology (including screening, health promotion)
-     10. Clinical Pharmacology & Therapeutics (including prescribing, adverse effects)
-     11. Pathology & Laboratory Medicine (including interpretation of results)
-     12. Microbiology & Infectious Diseases (including antimicrobial stewardship)
-
-     ⚠️ If official curriculum uses different terminology or groupings, PREFER the official structure.
-
-   - Engineering exams (FE, PE): EXACTLY 10-12 subjects required
-     Examples: Mathematics, Physics, Chemistry, Statics, Dynamics, Mechanics of Materials,
-     Thermodynamics, Fluid Mechanics, Electrical Circuits, Materials Science, etc.
-
-   - Business exams (CPA, CFA): EXACTLY 8-10 subjects required
-     Examples: Financial Accounting, Auditing, Tax, Business Law, Ethics, Financial Management, etc.
+   ⚠️ If the official curriculum uses different terminology or groupings, PREFER the official structure.
 
 3. **Topics** (under each subject):
-   - 8-12 topics per subject (comprehensive coverage)
-   - Each topic represents a system-based or area-based division
-   - Medical Example: Under "Internal Medicine - Adult" → Cardiology, Respiratory, Gastroenterology, Nephrology, etc.
-   - Engineering Example: Under "Mechanical Engineering" → Thermodynamics, Fluid Mechanics, Heat Transfer, etc.
-   - Tag each topic with "high_yield": true/false based on exam frequency and importance for THIS specific exam.
+   - Enough topics to cover the subject comprehensively (commonly ~6-12), following the official blueprint.
+   - Each topic is an area-based division within the subject.
+   - Tag each topic with "high_yield": true/false based on how heavily it is tested in THIS specific exam.
      High-yield = consistently heavily tested, high question density in real exams (typically 40-60% of topics per subject).
 
 4. **Chapters** (under each topic):
    - Leave chapters as EMPTY ARRAYS initially: "chapters": []
-   - Chapters will be generated dynamically when lessons are requested for specific topics
-   - This keeps structure generation fast and efficient
-   - When needed, chapters will be: specific conditions, concepts, procedures, or subtopics (8-12 per topic)
+   - Chapters are generated later when lessons are requested for a topic (specific concepts, procedures, rules, or subtopics).
 
 ${refDocContext}
 
 🔴 MANDATORY REQUIREMENTS:
-✓ Generate AT LEAST 10 subjects for medical/professional exams, 8 for technical exams
-✓ NEVER generate less than 6 subjects - that's insufficient for any comprehensive course
-✓ Each subject must have at least 6 topics
-✓ Each topic must have at least 4 chapters
-✓ Use standard, recognized terminology for the domain
-✓ Cover the FULL breadth of the exam/course - don't summarize or abbreviate
-
-DOMAIN-SPECIFIC GUIDELINES:
-
-**Medical Courses (UKMLA, USMLE, NEET PG, MRCP)**:
-HIERARCHY: Subject → Topic → Chapter
-
-SUBJECTS (Major Specialties - 10-12 total):
-- Core Clinical: Internal Medicine - Adult, Surgery, Pediatrics, OB/GYN, Psychiatry
-- Foundation: Pathology, Pharmacology, Microbiology
-- Professional: Ethics/Law/Communication, Public Health, General Practice
-
-TOPICS (System-based divisions under each subject - 8-12 per subject):
-- Under "Internal Medicine - Adult": Cardiology, Respiratory, Gastroenterology, Nephrology, Endocrinology, Rheumatology, Neurology
-- Under "Surgery": General Surgery, Trauma & Orthopedics, Urology, ENT, Ophthalmology
-- Under "Pediatrics": Neonatology, Growth & Development, Pediatric Cardiology, etc.
-
-CHAPTERS (Specific conditions - 8-15 per topic):
-- Under "Cardiology": Hypertension, Heart Failure, Arrhythmias, Ischemic Heart Disease, Valvular Disease, etc.
-- Under "Respiratory": Asthma, COPD, Pneumonia, Tuberculosis, Lung Cancer, etc.
-
-**Engineering Courses (FE, PE)**:
-- Include: Core sciences (Math, Physics, Chemistry)
-- Include: Engineering fundamentals (Statics, Dynamics, Thermodynamics)
-- Include: Discipline-specific topics (Electrical, Mechanical, Civil, etc.)
-
-**Business/Finance Courses (CPA, CFA, MBA)**:
-- Include: Functional areas (Accounting, Finance, Marketing, Operations)
-- Include: Specializations (Auditing, Tax, Investment, Strategy)
+✓ Cover the FULL breadth of the exam's official blueprint — don't summarize or abbreviate.
+✓ Use the standard, recognized terminology for the exam's discipline.
+✓ Every subject has multiple topics; the depth should reflect the real exam, not a fixed quota.
+✓ Do not force a medical (or any single-discipline) framing onto a non-matching exam.
 
 OUTPUT FORMAT (strict JSON):
 {
     "course": "${courseName}",
-    "exam_type": "medical|engineering|business|certification|academic",
-    "domain_characteristics": "detailed description of learning patterns and exam focus",
+    "exam_type": "medical|engineering|business|legal|certification|academic|other",
+    "domain_characteristics": "detailed description of learning patterns and exam focus for THIS exam",
     "subjects": [
         {
             "name": "Subject Name",
@@ -153,12 +86,9 @@ OUTPUT FORMAT (strict JSON):
 
 ⭐ HIGH-YIELD TAGGING (MANDATORY):
    - Set "high_yield": true for topics that are HEAVILY and CONSISTENTLY tested in real ${courseName} exams.
-   - Use your knowledge of past exam patterns, question banks, and official blueprints.
+   - Use your knowledge of past exam patterns, question banks, and official blueprints for THIS exam's discipline.
    - Aim for 40-60% of topics per subject to be high-yield — not all, not too few.
-   - Examples for NEET PG: Cardiology (HY), General Surgery (HY), Pharmacology of Antibiotics (HY), Embryology (not HY)
-   - Examples for USMLE Step 1: Cell Biology (HY), Cardiac Physiology (HY), Rare Genetic Disorders (not HY)
-
-🔴 IMPORTANT: Generate a COMPLETE structure - minimum 10 subjects for professional exams!
+   - The high-yield topics must be the ones that matter for ${courseName} specifically (e.g. an accounting exam's revenue-recognition, a law exam's logical-reasoning core, a medical exam's cardiology) — do not default to medical topics.
 
 Generate ONLY the JSON, no other text.`;
 }
@@ -248,15 +178,13 @@ export async function generateCourseStructure(
   if (numSubjects < 6) {
     console.warn(`⚠️ Generated structure has only ${numSubjects} subjects - retrying with stronger prompt`);
 
-    const retryPrompt = `CRITICAL: The previous attempt generated only ${numSubjects} subjects, which is INSUFFICIENT.
+    const retryPrompt = `CRITICAL: The previous attempt generated only ${numSubjects} subjects, which is too few to comprehensively cover this exam.
 
-For ${courseName}, generate a COMPLETE course structure with AT LEAST 10 subjects.
-
-This is a professional educational platform - we need COMPREHENSIVE coverage.
+For ${courseName}, generate a COMPLETE structure that matches the FULL breadth of the exam's official blueprint — include every major subject/division the real exam actually tests. Do not pad with invented subjects, but do not omit real ones.
 
 ${prompt}
 
-REMEMBER: Minimum 10 subjects for medical/professional exams, 8 for technical exams!`;
+REMEMBER: Cover the exam's actual blueprint in full — a broad professional exam usually has well more than ${numSubjects} subjects.`;
 
     const retryResponse = await orCall(
       MODELS.STRUCTURE,
@@ -291,9 +219,28 @@ export function parseStructureFromInput(content: string, courseName?: string): R
     throw new Error('NEEDS_AI_PROCESSING');
   }
 
-  // If it already has our canonical shape, return it
-  if (isObj(parsed) && (parsed as Record<string, unknown>).subjects) {
-    return parsed as Record<string, unknown>;
+  // First, try to detect an Exam tier (Course > Exam > Subject > Topic > Chapter).
+  // Returns a flat subjects[] (each tagged with its `exam`) plus exams[] metadata.
+  const examResult = discoverExams(parsed, courseName);
+  if (examResult) {
+    console.log(`[parseStructure] Detected ${(examResult.exams as unknown[]).length} exam(s), ${(examResult.subjects as unknown[]).length} subjects`);
+    return examResult;
+  }
+
+  // If it has an explicit subjects array, normalize it into our canonical
+  // shape. We can't return it verbatim: uploads may key names as
+  // "subject"/"topic"/"chapter" (not "name"), which the UI reads as blank.
+  if (isObj(parsed) && Array.isArray((parsed as Record<string, unknown>).subjects)) {
+    const obj = parsed as Record<string, unknown>;
+    const normalized = discoverFromArray(obj.subjects as unknown[]);
+    if (normalized.length > 0) {
+      const merged = deduplicateSubjects(normalized);
+      console.log(`[parseStructure] Normalized ${merged.length} subjects from uploaded JSON`);
+      return {
+        course: courseName || (pick(obj, 'course', 'courseName', 'exam', 'title', 'name') as string) || 'Imported Course',
+        subjects: merged,
+      };
+    }
   }
 
   // Try to discover subjects from whatever shape we got
@@ -339,6 +286,148 @@ function isTopicsKey(k: string): boolean {
 /** Does this key look like a grouping/container (step, year, phase, etc.)? */
 function isGroupingKey(k: string): boolean {
   return /^(step|phase|part|section|block|year|semester|module|unit|level|category|group|domain|area)\b/i.test(k.trim());
+}
+
+/** Normalize a key for case/separator-insensitive comparison. */
+function norm(k: string): string {
+  return k.toLowerCase().replace(/[_\- ]/g, '');
+}
+
+/** Does this key hold a list of exams/sections/papers? */
+function isExamKey(k: string): boolean {
+  return ['exams', 'exam', 'sections', 'section', 'papers', 'paper', 'parts'].includes(norm(k));
+}
+
+/** Fields inside a topic that indicate a subject-level grouping. */
+const SUBJECT_GROUP_KEYS = ['area', 'group', 'subject', 'discipline', 'module', 'domain'];
+
+function topicGroupField(topic: Record<string, unknown>): string | undefined {
+  return Object.keys(topic).find((k) => SUBJECT_GROUP_KEYS.includes(norm(k)));
+}
+
+/** Keys that hold a nested subject-tier list directly under an exam. */
+const SUBJECT_LIST_KEYS = ['subjects', 'areas', 'disciplines', 'modules'];
+
+/**
+ * Does this object look like an exam/section (as opposed to a plain subject)?
+ * Signals (any one): an explicit node_type of exam/section/paper; a nested
+ * subjects/areas list; a code + type pair; or nested topics that carry a
+ * subject-grouping field (area/group/subject).
+ */
+function looksLikeExam(obj: Record<string, unknown>): boolean {
+  const keys = Object.keys(obj);
+  const hasNestedSubjects = keys.some((k) => SUBJECT_LIST_KEYS.includes(norm(k)) && Array.isArray(obj[k]));
+  const topicsField = keys.find(isTopicsKey);
+  const hasTopics = !!topicsField && Array.isArray(obj[topicsField as string]);
+  if (!hasNestedSubjects && !hasTopics) return false;
+
+  // Explicit tier marker (e.g. "node_type": "exam").
+  const nodeType = pick(obj, 'node_type', 'nodeType', 'level', 'tier');
+  if (typeof nodeType === 'string' && ['exam', 'section', 'paper'].includes(norm(nodeType))) return true;
+
+  // An object that directly parents a subjects list is an exam.
+  if (hasNestedSubjects) return true;
+
+  const hasCode = keys.some((k) => norm(k) === 'code');
+  const hasType = keys.some((k) => ['type', 'category', 'kind'].includes(norm(k)));
+  if (hasCode && hasType) return true;
+
+  const firstTopic = topicsField ? ((obj[topicsField] as unknown[]).find(isObj) as Record<string, unknown> | undefined) : undefined;
+  if (firstTopic && topicGroupField(firstTopic)) return true;
+
+  return false;
+}
+
+/** Extract the subject tier for a single exam, tolerating missing levels. */
+function extractSubjectsForExam(exam: Record<string, unknown>, examName: string): Array<Record<string, unknown>> {
+  const keys = Object.keys(exam);
+
+  // 1. Explicit nested subjects array (objects that each hold a topics list).
+  const subjKey = keys.find((k) => SUBJECT_LIST_KEYS.includes(norm(k)) && Array.isArray(exam[k]));
+  if (subjKey) {
+    const arr = (exam[subjKey] as unknown[]).filter(isObj) as Array<Record<string, unknown>>;
+    if (arr.length > 0 && arr.some((a) => Object.keys(a).some(isTopicsKey))) {
+      return arr.map(normalizeSubject);
+    }
+  }
+
+  // 2. A flat topics list — group by area/group/subject if present, else one implicit subject.
+  const topicsField = keys.find(isTopicsKey);
+  if (topicsField && Array.isArray(exam[topicsField])) {
+    const topics = (exam[topicsField] as unknown[]).filter(isObj) as Array<Record<string, unknown>>;
+    if (topics.length === 0) return [];
+    const groupField = topicGroupField(topics[0]);
+    if (groupField) {
+      const groups = new Map<string, Array<Record<string, unknown>>>();
+      const order: string[] = [];
+      for (const t of topics) {
+        const g = ((t[groupField] as string) || examName).trim() || examName;
+        if (!groups.has(g)) { groups.set(g, []); order.push(g); }
+        groups.get(g)!.push(t);
+      }
+      return order.map((g) => ({ name: g, topics: groups.get(g)!.map(normalizeTopicObj) }));
+    }
+    // No grouping field — one implicit subject named after the exam.
+    return [{ name: examName, topics: topics.map(normalizeTopicItem) }];
+  }
+
+  return [];
+}
+
+/**
+ * Detect a Course > Exam > Subject > Topic > Chapter hierarchy.
+ * Returns a canonical structure with a flat `subjects[]` (each tagged with its
+ * `exam`) plus `exams[]` metadata for the UI/picker — or null if no exam tier
+ * is present (caller falls back to plain subject parsing).
+ */
+function discoverExams(parsed: unknown, courseName?: string): Record<string, unknown> | null {
+  if (!isObj(parsed)) return null;
+  const obj = parsed as Record<string, unknown>;
+
+  // Find the array holding exam-like items: an explicit exams/sections key,
+  // or any array of objects where items look like exams.
+  let examKey = Object.keys(obj).find((k) => isExamKey(k) && Array.isArray(obj[k]));
+  if (!examKey) {
+    examKey = Object.keys(obj).find(
+      (k) => Array.isArray(obj[k]) && (obj[k] as unknown[]).some((it) => isObj(it) && looksLikeExam(it as Record<string, unknown>))
+    );
+  }
+  if (!examKey) return null;
+
+  const items = (obj[examKey] as unknown[]).filter(isObj) as Array<Record<string, unknown>>;
+  if (items.length === 0 || !items.some(looksLikeExam)) return null;
+
+  const exams: Array<Record<string, unknown>> = [];
+  const flatSubjects: Array<Record<string, unknown>> = [];
+
+  for (const it of items) {
+    const examName = String(pick(it, 'name', 'exam', 'section', 'paper', 'title', 'code', 'subject') || 'Exam').trim() || 'Exam';
+    const code = pick(it, 'code', 'abbrev', 'abbreviation') as string | undefined;
+    const type = pick(it, 'type', 'category', 'kind') as string | undefined;
+
+    const subjects = extractSubjectsForExam(it, examName);
+    for (const s of subjects) {
+      s.exam = examName;
+      flatSubjects.push(s);
+    }
+
+    exams.push({
+      name: examName,
+      ...(code ? { code: String(code) } : {}),
+      ...(type ? { type: String(type) } : {}),
+      subject_count: subjects.length,
+      topic_count: subjects.reduce((sum, s) => sum + ((s.topics as unknown[])?.length || 0), 0),
+    });
+  }
+
+  if (flatSubjects.length === 0) return null;
+
+  return {
+    course: courseName || (pick(obj, 'course', 'exam', 'title', 'name') as string) || 'Imported Course',
+    exam_type: pick(obj, 'exam_type', 'examType') as string | undefined,
+    exams,
+    subjects: flatSubjects,
+  };
 }
 
 /**
@@ -463,7 +552,7 @@ function normalizeSubject(s: Record<string, unknown>): Record<string, unknown> {
 
 function normalizeTopicObj(t: Record<string, unknown>): Record<string, unknown> {
   const name = (pick(t, 'name', 'topic', 'topicName', 'title', 'unit', 'section') || 'Unknown') as string;
-  const highYield = (pick(t, 'high_yield', 'highYield', 'is_high_yield', 'isHighYield') || false) as boolean;
+  const highYield = (pick(t, 'high_yield', 'highYield', 'is_high_yield', 'isHighYield', 'hyt') || false) as boolean;
 
   let chapters: unknown[] = [];
   const chaptersField = Object.keys(t).find(k => {
@@ -472,7 +561,9 @@ function normalizeTopicObj(t: Record<string, unknown>): Record<string, unknown> 
   });
   if (chaptersField && Array.isArray(t[chaptersField])) {
     chapters = (t[chaptersField] as unknown[]).map(ch =>
-      typeof ch === 'string' ? { name: ch } : ch
+      typeof ch === 'string'
+        ? { name: ch }
+        : { name: (pick(ch as Record<string, unknown>, 'name', 'chapter', 'chapterName', 'title') || '') as string }
     );
   }
 

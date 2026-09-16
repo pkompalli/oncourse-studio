@@ -51,7 +51,9 @@ Output ONLY valid JSON.`;
     MODELS.STRUCTURE,
     '',
     refinePrompt,
-    { temperature: 0.3, maxTokens: 4000 }
+    // The model must echo back the ENTIRE structure; 4000 tokens truncates large
+    // courses (many subjects) mid-JSON, causing an unrecoverable parse failure.
+    { temperature: 0.3, maxTokens: 16000 }
   );
 
   let text = responseText.content.trim();
@@ -164,7 +166,9 @@ Rules:
     MODELS.VALIDATOR,
     '',
     prompt,
-    { temperature: 0.1, maxTokens: 4000 }
+    // The model must echo back the ENTIRE specs object (all subject distributions
+    // etc.); 4000 tokens truncates it mid-JSON → "Unterminated string" parse error.
+    { temperature: 0.1, maxTokens: 16000 }
   );
 
   let text = responseText.content.trim();

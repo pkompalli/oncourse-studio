@@ -3,7 +3,7 @@
  *
  * V1 flow (app.py lines 2327-2400):
  *   - _build_openai_safe_prompt() — safety-filter-aware prompt
- *   - generate_image_with_openrouter() — direct OpenAI images API (gpt-image-2)
+ *   - generate_image_with_openrouter() — direct OpenAI images API (gpt-image-2.5-flare)
  *
  * Uses direct OpenAI API (not OpenRouter) because OpenRouter doesn't
  * expose /v1/images/generations.
@@ -11,10 +11,11 @@
 
 import OpenAI from 'openai';
 import { supabase } from '../../db/supabase.js';
+import { fetchAllRows } from '../../db/pagination.js';
 import crypto from 'crypto';
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
-const OPENAI_IMAGE_MODEL = process.env.OPENAI_IMAGE_MODEL || 'gpt-image-2';
+const OPENAI_IMAGE_MODEL = process.env.OPENAI_IMAGE_MODEL || 'gpt-image-2.5-flare';
 
 const openaiClient = OPENAI_API_KEY ? new OpenAI({ apiKey: OPENAI_API_KEY }) : null;
 
@@ -44,24 +45,50 @@ async function ensureBucket() {
 
 // ── Prompt builder (V1 app.py lines 2327-2353) ──
 
-function buildImagePrompt(questionData: Record<string, unknown>, fixInstructions?: string): string {
+// Diagram-type images (flowcharts, graphs, tables, pathways…) are useless
+// without labels; clinical/photographic images (x-ray, histology, rash) render
+// garbled text and should stay label-free. Decide per image.
+function imageNeedsLabels(imageType: string, description: string): boolean {
+  return /flow[\s_-]?chart|diagram|graph|chart|algorithm|pathway|cycle|process|schematic|table|timeline|tree\b|flow|circuit|network|hierarchy|matrix|plot|axis|ladder|map\b/i
+    .test(`${imageType} ${description}`);
+}
+
+export function buildImagePrompt(questionData: Record<string, unknown>, fixInstructions?: string): string {
   const imageType = (questionData.image_type as string) || '';
   const imageDesc = (questionData.image_description as string) || '';
-  const courseName = (questionData.course as string) || 'medical board';
+  const courseName = (questionData.course as string) || 'the exam';
 
-  // Use image_description if available, otherwise fall back to image_type
-  const subject = imageDesc || imageType || 'clinical image';
+  // Pull the actual scenario from the question so the image depicts THIS
+  // question, not a generic template. Prefer explicit description, then the
+  // search terms, then the type as a last resort.
+  const stem = (questionData.question as string)
+    || ((questionData.content as Record<string, unknown> | undefined)?.stem as string)
+    || '';
+  const searchTerms = (questionData.image_search_terms as string[]) || [];
+  const descParts = [imageDesc, searchTerms.join('; ')].filter(Boolean);
+  const subject = descParts.join(' — ') || imageType || 'illustration';
+  const needsLabels = imageNeedsLabels(imageType, subject);
 
-  let prompt = `Create a medical educational illustration for a ${courseName} examination question.
+  let prompt = `Create a clear ${needsLabels ? 'fully-labeled ' : ''}educational illustration for a ${courseName} examination question.
 
-IMAGE NEEDED: ${subject}${imageType && imageType !== subject ? `\nIMAGE TYPE: ${imageType}` : ''}
+IMAGE NEEDED: ${subject}${imageType && imageType !== subject ? `\nIMAGE TYPE: ${imageType}` : ''}`;
 
-This is a professional medical education image. Create a clean, clinical illustration suitable for a medical exam.
-- Educational/textbook style
-- Professional medical illustration
-- No patient photos — use diagrams, illustrations, or schematic representations
-- Do not include any text or labels on the image
-- Generate ONLY the precise image needed — no infographic, no decorative borders, no extra surrounding elements. The image must carry the information needed to complete the question, nothing more.`;
+  if (stem) {
+    prompt += `\n\nQUESTION CONTEXT (the image must accurately depict the SPECIFIC scenario below — not a generic placeholder):\n${stem.slice(0, 1000)}`;
+    prompt += `\n\nIMPORTANT: Depict only the SCENARIO/SETUP. Do NOT draw, name, or hint at the correct answer, the solution, or the recommended procedure — the image sets up the question and must not give the answer away. Do not render the answer options.`;
+  }
+
+  prompt += `\n\nStyle: clean, professional, textbook-quality. Generate ONLY the precise image needed — no decorative borders, no surrounding infographic elements.`;
+
+  if (needsLabels) {
+    prompt += `
+- This is a ${imageType || 'diagram'}: EVERY node, box, arrow, axis, column, and step MUST carry concise, correct, legible text taken from the question context above. Empty or unlabeled shapes are unacceptable.
+- Spell all labels correctly in clear English; keep each label short (a few words). The reader must be able to follow the logic from the labels alone.`;
+  } else {
+    prompt += `
+- Do not depict identifiable real people — use diagrams, illustrations, or schematic representations.
+- Avoid captions, watermarks, or decorative text; include only the structural/labelling text genuinely needed to answer.`;
+  }
 
   if (fixInstructions) {
     prompt += `\n\nADDITIONAL REQUIREMENTS FROM REVIEW:\n${fixInstructions}`;
@@ -84,13 +111,19 @@ async function generateImageWithOpenAI(
   try {
     console.log(`    [openai-img] Generating with ${OPENAI_IMAGE_MODEL}: ${imageType.slice(0, 80)}`);
 
-    const response = await openaiClient.images.generate({
-      model: OPENAI_IMAGE_MODEL,
-      prompt,
-      n: 1,
-      size: '1024x1024',
-      ...({ output_format: 'png' } as Record<string, unknown>),
-    });
+    // Bound each image call — without this a single hung request stalls its whole
+    // concurrency slot indefinitely (a major reason the pipeline never finished).
+    const IMAGE_CALL_TIMEOUT_MS = 120_000;
+    const response = await openaiClient.images.generate(
+      {
+        model: OPENAI_IMAGE_MODEL,
+        prompt,
+        n: 1,
+        size: '1024x1024',
+        ...({ output_format: 'png' } as Record<string, unknown>),
+      },
+      { timeout: IMAGE_CALL_TIMEOUT_MS, maxRetries: 1 }
+    );
 
     const b64Data = (response.data?.[0] as Record<string, unknown>)?.b64_json as string | undefined;
     if (!b64Data) {
@@ -220,16 +253,21 @@ export async function processAllImageQuestions(jobId: string): Promise<{
     return { totalProcessed: 0, totalSuccess: 0, totalFailed: 0 };
   }
 
-  // Fetch image questions that don't have images yet
-  const { data: imageQuestions, error } = await supabase
-    .from('qb_questions')
-    .select('*')
-    .eq('job_id', jobId)
-    .eq('is_image_question', true)
-    .is('image_url', null)
-    .is('replaced_by_id', null);
+  // Fetch image questions that don't have images yet (paginated — a large job can
+  // have >1000 image questions).
+  const imageQuestions = await fetchAllRows<Record<string, unknown>>((from, to) =>
+    supabase
+      .from('qb_questions')
+      .select('*')
+      .eq('job_id', jobId)
+      .eq('is_image_question', true)
+      .is('image_url', null)
+      .is('replaced_by_id', null)
+      .order('id', { ascending: true })
+      .range(from, to)
+  );
 
-  if (error || !imageQuestions || imageQuestions.length === 0) {
+  if (!imageQuestions || imageQuestions.length === 0) {
     return { totalProcessed: 0, totalSuccess: 0, totalFailed: 0 };
   }
 
@@ -240,7 +278,7 @@ export async function processAllImageQuestions(jobId: string): Promise<{
   let totalFailed = 0;
 
   // Process 3 at a time to avoid rate limits
-  const CONCURRENCY = 3;
+  const CONCURRENCY = Number(process.env.IMAGE_CONCURRENCY) || 8;
   for (let i = 0; i < totalImages; i += CONCURRENCY) {
     const batch = imageQuestions.slice(i, i + CONCURRENCY);
     const results = await Promise.allSettled(

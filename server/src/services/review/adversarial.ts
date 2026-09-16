@@ -9,7 +9,7 @@ import { extractJsonArray, formatQuestionsForReviewWithImages } from './shared.j
 
 // ── Adversarial Prompt (V1 lines 5915-5966) ──
 
-export function getBatchAdversarialPrompt(contentType: string, domain = 'medical education', examFormat?: Record<string, unknown>): string {
+export function getBatchAdversarialPrompt(contentType: string, domain = 'exam preparation', examFormat?: Record<string, unknown>): string {
   if (contentType === 'lesson') {
     return `You are an adversarial ${domain} content reviewer. Your role is to find real defects that would mislead learners or cause harm — not to invent problems where none exist.
 
@@ -87,10 +87,10 @@ You are NOT a fact-checker (the validator handles accuracy). Your lens is: could
 You will receive multiple questions numbered Q1, Q2, etc.
 
 Flag only if one of these is true:
-1. Something critical is missing from the vignette or explanation such that a student can't build the right clinical reasoning — not just "could be more complete"
-2. The question is misleading in a way that would teach a wrong mental model (e.g., explanation implies a false rule, distractor wording implies wrong pathophysiology)
+1. Something critical is missing from the stem/scenario or explanation such that a student can't build the correct reasoning — not just "could be more complete"
+2. The question is misleading in a way that would teach a wrong mental model (e.g., explanation implies a false rule, distractor wording implies a wrong underlying principle)
 3. An alternative answer is so defensible that a well-prepared student would reasonably choose it — not a far-fetched edge case
-4. A triviality clue bypasses clinical reasoning entirely, making the question educationally worthless
+4. A triviality clue bypasses reasoning entirely, making the question educationally worthless
 5. EXPLANATION COMPLETENESS — the explanation MUST:
    a. Justify WHY the correct answer is right
    b. Address EACH wrong option BY NAME and explain WHY it is wrong
@@ -100,11 +100,11 @@ Flag only if one of these is true:
    a. Must have exactly 6 sub-questions (flag if fewer)
    b. Must use at least 3 different format_types across sub-questions
    c. Each sub-question MUST have its own "rationale" explaining correct answer + why distractors are wrong
-   d. Each sub-question MUST have a "cjmm_step" tag (Recognize Cues, Analyze Cues, Prioritize Hypotheses, Generate Solutions, Take Action, Evaluate Outcomes)
+   d. Each sub-question MUST have a "reasoning_step" tag (legacy: "cjmm_step") using a step taxonomy appropriate to this exam's discipline — do NOT require the nursing Clinical-Judgment labels for non-clinical exams
    e. Hot-spot answers must be structured objects, not prose strings
 8. CONCEPT DIVERSITY — look across the entire batch:
    a. Flag questions that test the EXACT same concept/fact as another question in the batch (conceptual duplicate even if worded differently)
-   b. Flag questions that are too similar in clinical presentation (e.g., 3 questions all presenting with chest pain → suggest varying the presentation)
+   b. Flag questions that are too similar in scenario/presentation (e.g., 3 questions built on the same fact pattern → suggest varying it)
 9. ANSWER KEY BALANCE — check correct answer distribution across the batch:
    a. If correct answer keys are heavily skewed (e.g., 6 out of 10 are "B"), flag the ones that should change to achieve better balance
    b. A well-designed exam has roughly equal distribution across answer keys
@@ -118,7 +118,7 @@ Do NOT flag:
 Scoring (10 = high educational value, no confusion risk; 1 = misleading or educationally harmful):
 • 9–10 → clear, sound, good learning value, explanation covers all options — no changes needed
 • 7–8 → trivial gap or very minor risk of confusion
-• 5–6 → explanation only defends correct answer without addressing distractors, OR case study missing rationales/cjmm_step, OR genuine concern affecting learning
+• 5–6 → explanation only defends correct answer without addressing distractors, OR case study missing rationales/reasoning_step, OR genuine concern affecting learning
 • 1–4  → seriously misleading, reinforces wrong reasoning, case study structurally broken, OR image explicitly referenced in stem but absent
 
 If nothing meets the bar above, score 9–10, leave all arrays empty, and say "No significant defects found."
@@ -135,7 +135,7 @@ Return a JSON ARRAY — one object per question:
     "ambiguities": [<genuine confusion that would lead most candidates astray — empty if none>],
     "distractor_defenses": [<only if a distractor is actually defensible as correct — empty if none>],
     "explanation_contradictions": [<if explanation only defends the correct answer without discussing distractors, or logically fails to justify — empty if none>],
-    "case_study_issues": [<if case_study: missing sub-question rationales, too few sub-questions, too few formats, missing cjmm_step, prose hot_spot answers — empty if none or not case_study>],
+    "case_study_issues": [<if case_study: missing sub-question rationales, too few sub-questions, too few formats, missing reasoning_step, prose hot_spot answers — empty if none or not case_study>],
     "triviality_clues": [<only if answer is obvious without clinical reasoning — empty if none>],
     "concept_overlap": "<if this question tests the same concept as another Q in the batch, state which Q and suggest differentiation — null if unique>",
     "answer_key_issue": "<if this question contributes to skewed answer distribution, suggest changing to a different key — null if fine>",
@@ -156,11 +156,11 @@ Output ONLY the JSON array. No preamble, no trailing text.`;
 export async function runAdversarialBatch(
   questions: Record<string, unknown>[],
   contentType = 'qbank',
-  domain = 'medical education',
+  domain = 'exam preparation',
   examFormat?: Record<string, unknown>
 ): Promise<Record<string, unknown>[]> {
   const prompt = getBatchAdversarialPrompt(contentType, domain, examFormat);
-  const content = formatQuestionsForReviewWithImages(questions);
+  const content = await formatQuestionsForReviewWithImages(questions);
 
   let userMessage: string | ContentPart[];
   if (typeof content === 'string') {
@@ -172,22 +172,32 @@ export async function runAdversarialBatch(
     ];
   }
 
-  const response = await orCall(MODELS.ADVERSARIAL, '', userMessage, {
-    maxTokens: 8000,
-    temperature: 0.5,
-  });
+  // Never throw: a Bedrock/network failure here would otherwise crash the whole
+  // review pipeline. Return whatever we can parse; empty is handled downstream.
+  let results: Record<string, unknown>[] = [];
+  try {
+    const response = await orCall(MODELS.ADVERSARIAL, '', userMessage, {
+      maxTokens: 16000,
+      temperature: 0.5,
+    });
+    results = extractJsonArray(response.content, questions.length);
+  } catch (e) {
+    console.warn(`  [Adversarial] LLM call failed for batch of ${questions.length}: ${e instanceof Error ? e.message : e}`);
+  }
 
-  let results = extractJsonArray(response.content, questions.length);
-
-  // Retry if too few results
+  // Retry if too few results (covers truncation AND a failed first call)
   if (results.length < questions.length) {
     console.log(`  [Adversarial] Short response (${results.length}/${questions.length}), retrying...`);
-    const response2 = await orCall(MODELS.ADVERSARIAL, '', userMessage, {
-      maxTokens: 8000,
-      temperature: 0.3,
-    });
-    const results2 = extractJsonArray(response2.content, questions.length);
-    if (results2.length > results.length) results = results2;
+    try {
+      const response2 = await orCall(MODELS.ADVERSARIAL, '', userMessage, {
+        maxTokens: 16000,
+        temperature: 0.3,
+      });
+      const results2 = extractJsonArray(response2.content, questions.length);
+      if (results2.length > results.length) results = results2;
+    } catch (e) {
+      console.warn(`  [Adversarial] Retry LLM call failed: ${e instanceof Error ? e.message : e}`);
+    }
   }
 
   return results;

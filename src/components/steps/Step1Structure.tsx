@@ -100,7 +100,7 @@ function ExamFormatDisplay({ examFormat }: { examFormat: Record<string, unknown>
           <div className="text-xs font-medium text-slate-500 mb-2">Question Format</div>
           <div className="flex flex-wrap gap-2 text-xs">
             <span className="px-2 py-1 bg-indigo-50 text-indigo-700 rounded">{(qf.type as string || '').replace(/_/g, ' ')}</span>
-            {qf.uses_vignettes && <span className="px-2 py-1 bg-amber-50 text-amber-700 rounded">Clinical Vignettes</span>}
+            {qf.uses_vignettes && <span className="px-2 py-1 bg-amber-50 text-amber-700 rounded">Vignettes</span>}
             {qf.avg_stem_words && <span className="px-2 py-1 bg-slate-100 text-slate-600 rounded">~{qf.avg_stem_words as number} words/stem</span>}
             {qf.image_questions_percentage != null && <span className="px-2 py-1 bg-emerald-50 text-emerald-700 rounded">{qf.image_questions_percentage as number}% image Qs</span>}
           </div>
@@ -114,7 +114,7 @@ function ExamFormatDisplay({ examFormat }: { examFormat: Record<string, unknown>
           <div className="text-xs font-medium text-slate-500 mb-2">Primary Format Details</div>
           <div className="flex flex-wrap gap-2 text-xs">
             <span className="px-2 py-1 bg-indigo-50 text-indigo-700 rounded">{(qf.primary_format_name as string || qf.type as string || '').replace(/_/g, ' ')}</span>
-            {qf.uses_vignettes && <span className="px-2 py-1 bg-amber-50 text-amber-700 rounded">Clinical Vignettes</span>}
+            {qf.uses_vignettes && <span className="px-2 py-1 bg-amber-50 text-amber-700 rounded">Vignettes</span>}
             {qf.avg_stem_words && <span className="px-2 py-1 bg-slate-100 text-slate-600 rounded">~{qf.avg_stem_words as number} words/stem</span>}
             {qf.image_questions_percentage != null && <span className="px-2 py-1 bg-emerald-50 text-emerald-700 rounded">{qf.image_questions_percentage as number}% image Qs</span>}
           </div>
@@ -211,6 +211,7 @@ export default function Step1Structure() {
   const [error, setError] = useState('');
   const [structurePreview, setStructurePreview] = useState<CourseStructure | null>(null);
   const [expandedSubjects, setExpandedSubjects] = useState<Set<string>>(new Set());
+  const [selectedExam, setSelectedExam] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Recent courses (auto-loaded)
@@ -230,6 +231,16 @@ export default function Step1Structure() {
       setRecentCourses(res.courses as Course[]);
     }).catch(() => { /* silently fail */ });
   }, []);
+
+  // ── Sync exam selection with the previewed structure ──
+  const previewExams = structurePreview?.exams || [];
+  useEffect(() => {
+    const exams = structurePreview?.exams || [];
+    const existing = structurePreview?.selected_exam;
+    if (existing) setSelectedExam(existing);
+    else if (exams.length === 1) setSelectedExam(exams[0].name);
+    else setSelectedExam('');
+  }, [structurePreview]);
 
   const selectRecentCourse = (c: Course) => {
     setCourse(c);
@@ -304,12 +315,34 @@ export default function Step1Structure() {
   };
 
   // ── Approve structure ──
-  const approveStructure = () => {
+  const approveStructure = async () => {
     if (!course) return;
+
+    // Multi-exam course: require an exam choice and persist it so downstream
+    // steps (exam format, guidelines, generation) only run for that exam.
+    if (previewExams.length > 1) {
+      if (!selectedExam) {
+        setError('Please select which exam to build.');
+        return;
+      }
+      try {
+        setLoading(true);
+        const res = await courses.selectExam(course.id, selectedExam);
+        const updated = res.course as Course;
+        setCourse(updated);
+        setStructurePreview(updated.structure);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : 'Failed to select exam');
+        return;
+      } finally {
+        setLoading(false);
+      }
+    }
+
+    setError('');
     if (needsExamFormat) {
       // Move to exam format phase
       setPhase('exam_format');
-      setError('');
     } else {
       // Skip exam format, go to guidelines
       setJob(null);
@@ -636,57 +669,128 @@ export default function Step1Structure() {
           </section>
 
           {/* Structure Preview */}
-          {structurePreview && structurePreview.subjects?.length > 0 && (
+          {structurePreview && structurePreview.subjects?.length > 0 && (() => {
+            const exams = structurePreview.exams || [];
+            const hasExams = exams.length > 0;
+            // Composite key so identical subject names across exams don't collide.
+            const subjKey = (s: Subject) => (s.exam ? `${s.exam}::${s.name}` : s.name);
+            // Group subjects by exam (preserving structure order) when exams exist.
+            // Once an exam is picked (multi-exam course), show only that exam.
+            const shownExams = exams.length > 1 && selectedExam
+              ? exams.filter((ex) => ex.name === selectedExam)
+              : exams;
+            const groups = hasExams
+              ? shownExams.map((ex) => ({
+                  exam: ex,
+                  subjects: structurePreview.subjects.filter((s) => s.exam === ex.name),
+                }))
+              : [{ exam: null, subjects: structurePreview.subjects }];
+
+            const renderSubject = (subject: Subject) => (
+              <div key={subjKey(subject)}>
+                <button
+                  onClick={() => toggleSubject(subjKey(subject))}
+                  className="w-full px-5 py-3 flex items-center justify-between hover:bg-slate-50 transition-colors"
+                >
+                  <div className="flex items-center gap-3">
+                    <span className="text-sm font-semibold text-slate-800">{subject.name}</span>
+                    <span className="text-xs text-slate-400">{subject.topics?.length || 0} topics</span>
+                    {subject.description && (
+                      <span className="text-xs text-slate-400 hidden lg:inline">— {subject.description}</span>
+                    )}
+                  </div>
+                  {expandedSubjects.has(subjKey(subject))
+                    ? <ChevronUp className="w-4 h-4 text-slate-400" />
+                    : <ChevronDown className="w-4 h-4 text-slate-400" />
+                  }
+                </button>
+                {expandedSubjects.has(subjKey(subject)) && subject.topics && (
+                  <div className="px-5 pb-3 grid grid-cols-2 lg:grid-cols-3 gap-2">
+                    {subject.topics.map((topic) => (
+                      <div
+                        key={topic.name}
+                        className={`text-xs px-3 py-2 rounded-lg ${
+                          (topic.high_yield || topic.is_high_yield)
+                            ? 'bg-amber-50 border border-amber-200 text-amber-800'
+                            : 'bg-slate-50 text-slate-600'
+                        }`}
+                      >
+                        {topic.name}
+                        {(topic.high_yield || topic.is_high_yield) && (
+                          <span className="ml-1 text-amber-500 font-medium">HY</span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+
+            return (
             <section>
               <div className="flex items-center justify-between mb-4">
                 <h2 className="text-lg font-semibold text-slate-800">Course Structure Preview</h2>
                 <div className="text-sm text-slate-500">
+                  {hasExams && <>{exams.length} exams &middot;{' '}</>}
                   {structurePreview.subjects.length} subjects &middot;{' '}
                   {structurePreview.subjects.reduce((sum, s) => sum + (s.topics?.length || 0), 0)} topics
                 </div>
               </div>
 
-              <div className="bg-white rounded-xl border border-slate-200 divide-y divide-slate-100">
-                {structurePreview.subjects.map((subject: Subject) => (
-                  <div key={subject.name}>
-                    <button
-                      onClick={() => toggleSubject(subject.name)}
-                      className="w-full px-5 py-3 flex items-center justify-between hover:bg-slate-50 transition-colors"
-                    >
-                      <div className="flex items-center gap-3">
-                        <span className="text-sm font-semibold text-slate-800">{subject.name}</span>
-                        <span className="text-xs text-slate-400">{subject.topics?.length || 0} topics</span>
-                        {subject.description && (
-                          <span className="text-xs text-slate-400 hidden lg:inline">— {subject.description}</span>
+              {/* Exam selector — build one exam at a time so exam-format
+                  analysis, guidelines, and generation only run for it. */}
+              {exams.length > 1 && (
+                <div className="mb-4 p-4 rounded-xl border border-indigo-200 bg-indigo-50/60">
+                  <label className="block text-sm font-semibold text-slate-700 mb-1">
+                    Which exam are you building?
+                  </label>
+                  <p className="text-xs text-slate-500 mb-2">
+                    This course spans {exams.length} exams. Pick one — exam-format analysis,
+                    guidelines, and generation will run only for the exam you choose.
+                  </p>
+                  <select
+                    value={selectedExam}
+                    onChange={(e) => setSelectedExam(e.target.value)}
+                    className="w-full sm:max-w-md px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+                  >
+                    <option value="">Select an exam…</option>
+                    {exams.map((ex) => (
+                      <option key={ex.name} value={ex.name}>
+                        {ex.code ? `${ex.code} — ${ex.name}` : ex.name}
+                        {ex.subject_count != null ? ` (${ex.subject_count} subjects)` : ''}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              {hasExams ? (
+                <div className="space-y-4">
+                  {groups.map(({ exam, subjects }) => (
+                    <div key={exam!.name}>
+                      <div className="flex items-center gap-2 mb-2 px-1">
+                        <span className="text-sm font-bold text-slate-700">{exam!.name}</span>
+                        {exam!.code && (
+                          <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-slate-200 text-slate-600">{exam!.code}</span>
                         )}
+                        {exam!.type && (
+                          <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-600">{exam!.type}</span>
+                        )}
+                        <span className="text-xs text-slate-400">
+                          {subjects.length} subjects &middot; {subjects.reduce((sum, s) => sum + (s.topics?.length || 0), 0)} topics
+                        </span>
                       </div>
-                      {expandedSubjects.has(subject.name)
-                        ? <ChevronUp className="w-4 h-4 text-slate-400" />
-                        : <ChevronDown className="w-4 h-4 text-slate-400" />
-                      }
-                    </button>
-                    {expandedSubjects.has(subject.name) && subject.topics && (
-                      <div className="px-5 pb-3 grid grid-cols-2 lg:grid-cols-3 gap-2">
-                        {subject.topics.map((topic) => (
-                          <div
-                            key={topic.name}
-                            className={`text-xs px-3 py-2 rounded-lg ${
-                              (topic.high_yield || topic.is_high_yield)
-                                ? 'bg-amber-50 border border-amber-200 text-amber-800'
-                                : 'bg-slate-50 text-slate-600'
-                            }`}
-                          >
-                            {topic.name}
-                            {(topic.high_yield || topic.is_high_yield) && (
-                              <span className="ml-1 text-amber-500 font-medium">HY</span>
-                            )}
-                          </div>
-                        ))}
+                      <div className="bg-white rounded-xl border border-slate-200 divide-y divide-slate-100">
+                        {subjects.map(renderSubject)}
                       </div>
-                    )}
-                  </div>
-                ))}
-              </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="bg-white rounded-xl border border-slate-200 divide-y divide-slate-100">
+                  {structurePreview.subjects.map(renderSubject)}
+                </div>
+              )}
 
               {/* Chat Refinement — Course Structure */}
               {course && (
@@ -720,7 +824,8 @@ export default function Step1Structure() {
                 </button>
               </div>
             </section>
-          )}
+            );
+          })()}
         </>
       )}
 

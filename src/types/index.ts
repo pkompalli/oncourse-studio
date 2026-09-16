@@ -15,13 +15,28 @@ export interface Topic {
 export interface Subject {
   name: string;
   description?: string;
+  /** The exam this subject belongs to, when the course spans multiple exams. */
+  exam?: string;
   topics: Topic[];
+}
+
+/** Metadata for one exam within a course (Course > Exam > Subject > Topic > Chapter). */
+export interface Exam {
+  name: string;
+  code?: string;
+  type?: string;
+  subject_count?: number;
+  topic_count?: number;
 }
 
 export interface CourseStructure {
   course: string;
   exam_type?: string;
   domain_characteristics?: string;
+  /** Present when the course spans multiple exams. Subjects are tagged with `exam`. */
+  exams?: Exam[];
+  /** The exam chosen on the structure page; scopes exam-format, guidelines, and generation. */
+  selected_exam?: string;
   subjects: Subject[];
 }
 
@@ -47,7 +62,9 @@ export interface GenerationGuidelines {
     min_words?: number;
     max_words?: number;
     vignette_required: boolean;
-    clinical_scenario_depth: string;
+    scenario_depth?: string;
+    /** @deprecated legacy field name — read scenario_depth; kept for older stored guidelines */
+    clinical_scenario_depth?: string;
   };
   distractor_guidelines: {
     quality_rules: string[];
@@ -162,7 +179,7 @@ export interface QuestionFormat {
 
 // ── Question ────────────────────────────────────────────────
 
-export type QuestionStatus = 'generated' | 'reviewed' | 'audited' | 'approved' | 'flagged' | 'replaced' | 'manual_review';
+export type QuestionStatus = 'generated' | 'reviewed' | 'audited' | 'approved' | 'flagged' | 'replaced' | 'manual_review' | 'needs_review';
 
 export interface AuditEntry {
   phase: string;
@@ -173,7 +190,7 @@ export interface AuditEntry {
 }
 
 export interface MediaItem {
-  type: string;       // "image", "xray", "ct", "histology", etc.
+  type: string;       // "image", "diagram", "chart", "figure", "exhibit", etc.
   url: string;
   description?: string;
   source?: string;
@@ -233,7 +250,7 @@ export interface Question {
 
 // ── Lesson ──────────────────────────────────────────────────
 
-export type LessonStatus = 'generated' | 'reviewed' | 'audited' | 'approved' | 'flagged' | 'replaced' | 'manual_review';
+export type LessonStatus = 'generated' | 'reviewed' | 'audited' | 'approved' | 'flagged' | 'replaced' | 'manual_review' | 'needs_review';
 
 export interface Lesson {
   id: string;

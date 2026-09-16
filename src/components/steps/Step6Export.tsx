@@ -25,6 +25,25 @@ export default function Step6Export() {
   }).length;
   const flaggedCount = questions.filter((q) => displayStatus(q as Record<string, unknown>) === 'flagged').length;
 
+  // Everything the "Reprocess" action actually re-runs — mirrors the backend
+  // candidate filter (reprocessFlagged.ts): strictly flagged, questions still
+  // awaiting a valid score (needs_review), and any low/un-scored reviewed ones.
+  // This is why the run touches more than the "flagged" number: show the true total.
+  const isNotApproved = (raw: Record<string, unknown>): boolean => {
+    const status = raw.status as string;
+    if (status === 'flagged') return true;
+    if (status === 'needs_review') return true;
+    if (raw.quality_score != null) return (raw.quality_score as number) < 7;
+    if (raw.validator_score != null && raw.adversarial_score != null) {
+      return (raw.validator_score as number) < 7 || (raw.adversarial_score as number) < 7;
+    }
+    if (raw.validator_score != null) return (raw.validator_score as number) < 7;
+    if (status === 'reviewed') return true;
+    return false;
+  };
+  const notApprovedCount = questions.filter((q) => isNotApproved(q as Record<string, unknown>)).length;
+  const needsReviewCount = questions.filter((q) => (q as Record<string, unknown>).status === 'needs_review').length;
+
   // ── Reprocess flagged state ──
   const [reprocessing, setReprocessing] = useState(false);
   const [reprocessStatus, setReprocessStatus] = useState<{
@@ -84,10 +103,36 @@ export default function Step6Export() {
     }
   };
 
-  // Cleanup on unmount
+  // On mount, re-attach to any reprocess already running server-side (survives a
+  // page refresh or dropped connection — the browser poll loop doesn't otherwise
+  // restart itself, which is why the progress stream "stopped"). Also cleans up
+  // the poll on unmount.
   useEffect(() => {
-    return () => { reprocessPollingRef.current = false; };
-  }, []);
+    if (!job) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const st = await jobs.reprocessStatus(job.id);
+        if (cancelled || !st.running || reprocessPollingRef.current) return;
+        setReprocessing(true);
+        setReprocessStatus({
+          status: st.status || 'running',
+          phase: st.phase || '',
+          step: st.step || '',
+          total: st.total || 0,
+          reApproved: st.reApproved || 0,
+          stillFlagged: st.stillFlagged || 0,
+          events: st.events || [],
+        });
+        reprocessPollingRef.current = true;
+        pollReprocess(job.id);
+      } catch {
+        // no running reprocess to re-attach to — ignore
+      }
+    })();
+    return () => { cancelled = true; reprocessPollingRef.current = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [job?.id]);
 
   const [exporting, setExporting] = useState(false);
 
@@ -130,20 +175,28 @@ export default function Step6Export() {
           <div className="text-sm text-green-600">Approved</div>
         </div>
         <div className="bg-amber-50 p-4 rounded-xl border border-amber-200 text-center">
-          <div className="text-2xl font-bold text-amber-700">{flaggedCount}</div>
-          <div className="text-sm text-amber-600">Flagged</div>
+          <div className="text-2xl font-bold text-amber-700">{notApprovedCount}</div>
+          <div className="text-sm text-amber-600">
+            Not approved
+            {needsReviewCount > 0 && (
+              <span className="block text-[11px] text-amber-500">
+                {flaggedCount} flagged · {needsReviewCount} need re-review
+              </span>
+            )}
+          </div>
         </div>
       </div>
 
-      {/* Reprocess Flagged */}
-      {flaggedCount > 0 && !reprocessing && !reprocessStatus && (
+      {/* Reprocess not-approved (flagged + needs re-review + unscored) */}
+      {notApprovedCount > 0 && !reprocessing && !reprocessStatus && (
         <div className="flex items-center justify-between p-4 rounded-xl border border-amber-200 bg-amber-50">
           <div>
             <p className="text-sm font-medium text-amber-800">
-              {flaggedCount} questions flagged — fixable issues detected
+              {notApprovedCount} questions not approved — will be re-validated
             </p>
             <p className="text-xs text-amber-600 mt-0.5">
-              Automatically fix using audit feedback, retry missing images, then re-validate and re-audit
+              Includes {flaggedCount} flagged{needsReviewCount > 0 ? ` and ${needsReviewCount} awaiting re-review` : ''}.
+              Automatically fix using audit feedback, retry missing images, then re-validate and re-audit.
             </p>
           </div>
           <button
@@ -151,7 +204,7 @@ export default function Step6Export() {
             className="flex items-center gap-2 px-4 py-2 bg-amber-600 text-white rounded-lg font-medium hover:bg-amber-700 transition-colors shrink-0"
           >
             <RefreshCw className="w-4 h-4" />
-            Reprocess {flaggedCount} Flagged
+            Reprocess {notApprovedCount}
           </button>
         </div>
       )}
