@@ -113,6 +113,15 @@ IMPORTANT:
 - Format slugs should be: mcq_single, sata, ordered_response, fill_blank, hot_spot, matrix_grid, cloze_dropdown, emq, case_study
 - Be specific and actionable — these rules will be programmatically enforced
 - explanation_guidelines.must_address_distractors MUST be true — every explanation must discuss why EACH wrong option is wrong, not just defend the correct answer
+- For EVERY format in format_distribution, add a custom_rule stating its REQUIRED machine-readable structure so questions are auto-gradable:
+    • mcq_single: options[] + single correct answer; sata: options[] + correct answer set
+    • matrix_grid: row_headers[] + column_headers[] + correct_cells (each row classified)
+    • cloze_dropdown: each blank has an options list AND a correct value
+    • emq: an option_list + scenarios each with a correct option from the list
+    • ordered_response: items[] + correct_order (1-based indices in the correct sequence)
+    • fill_blank: an explicit correct answer value (never only in the explanation)
+    • hot_spot: stimulus with target ids + answer.correct_ids
+  The correct answer must ALWAYS be a structured value, not prose. Ungradable questions are rejected.
 - If case_study format is present, add custom_rules for: exactly 6 sub-questions per case, at least 3 different format_types per case, per-sub-question rationale required, and a per-sub-question reasoning_step tag using a step taxonomy appropriate to THIS exam's discipline (e.g. nursing/NCLEX: Recognize Cues → Evaluate Outcomes; audit/CPA: Identify Risk → Report; do NOT impose clinical-judgment steps on non-clinical exams)
 - If hot_spot format is present, add custom_rule: hot_spot answers MUST use the stimulus+correct_ids contract — enumerate clickable elements as targets with stable lowercase-slug ids, set answer.correct_ids to the correct target id(s). NEVER use answer.region/label/landmark. Use text_targets type for discrete text elements (medication orders, charting entries, lab values) and image_regions type only for genuine photos/figures. Include ≥2 targets, scoring (dichotomous/plus_minus), and rationale keyed by target id.
 - difficulty_distribution MUST have all three levels (easy/medium/hard) with non-zero percentages
