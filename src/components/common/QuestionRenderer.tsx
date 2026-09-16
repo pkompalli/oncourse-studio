@@ -17,6 +17,24 @@ interface Props {
 
 // ── Helpers to extract content (flexible or legacy) ─────────
 
+/**
+ * Coerce a list item to a display string. Generators sometimes emit list
+ * items as objects ({id, text}, {label}, …) where a plain string is expected;
+ * rendering such an object directly crashes React ("Objects are not valid as
+ * a React child"). This normalizes both shapes.
+ */
+function toText(v: unknown): string {
+  if (v == null) return '';
+  if (typeof v === 'string') return v;
+  if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+  if (typeof v === 'object') {
+    const o = v as Record<string, unknown>;
+    const s = o.text ?? o.label ?? o.name ?? o.value ?? o.statement;
+    return s == null ? '' : String(s);
+  }
+  return String(v);
+}
+
 function getStem(q: Question): string {
   if (q.content?.stem) return q.content.stem as string;
   if (q.content?.case_narrative) return q.content.case_narrative as string;
@@ -253,7 +271,7 @@ function SortableItemsBlock({ items, correctOrder, showAnswer }: {
           <span className={`font-semibold shrink-0 w-5 h-5 rounded-full flex items-center justify-center text-[10px] ${
             showAnswer ? 'bg-green-200 text-green-800' : 'bg-slate-200 text-slate-600'
           }`}>{i + 1}</span>
-          <span className="text-slate-700">{item}</span>
+          <span className="text-slate-700">{toText(item)}</span>
         </div>
       ))}
     </div>
@@ -359,14 +377,14 @@ function MatrixGridBlock({ rowHeaders, columnHeaders, correctCells, showAnswer }
           <tr>
             <th className="p-1.5 border border-slate-200 bg-slate-50" />
             {columnHeaders.map((col, ci) => (
-              <th key={ci} className="p-1.5 border border-slate-200 bg-slate-50 text-slate-600 font-semibold">{col}</th>
+              <th key={ci} className="p-1.5 border border-slate-200 bg-slate-50 text-slate-600 font-semibold">{toText(col)}</th>
             ))}
           </tr>
         </thead>
         <tbody>
           {rowHeaders.map((row, ri) => (
             <tr key={ri}>
-              <td className="p-1.5 border border-slate-200 bg-slate-50 font-semibold text-slate-600">{row}</td>
+              <td className="p-1.5 border border-slate-200 bg-slate-50 font-semibold text-slate-600">{toText(row)}</td>
               {columnHeaders.map((_, ci) => {
                 const correct = isCorrect(ri, ci);
                 return (
@@ -442,7 +460,7 @@ function SubQuestionAnswer({ sq, showAnswer }: { sq: Record<string, unknown>; sh
             <span className={`w-4 h-4 rounded-full flex items-center justify-center text-[9px] font-semibold ${
               showAnswer ? 'bg-green-200 text-green-800' : 'bg-slate-200 text-slate-600'
             }`}>{i + 1}</span>
-            <span>{item}</span>
+            <span>{toText(item)}</span>
           </div>
         ))}
       </div>
@@ -542,14 +560,14 @@ function SubQuestionAnswer({ sq, showAnswer }: { sq: Record<string, unknown>; sh
             <tr>
               <th className="p-1 border border-slate-200 bg-slate-50" />
               {columnHeaders.map((col, ci) => (
-                <th key={ci} className="p-1 border border-slate-200 bg-slate-50 text-slate-600">{col}</th>
+                <th key={ci} className="p-1 border border-slate-200 bg-slate-50 text-slate-600">{toText(col)}</th>
               ))}
             </tr>
           </thead>
           <tbody>
             {rowHeaders.map((row, ri) => (
               <tr key={ri}>
-                <td className="p-1 border border-slate-200 bg-slate-50 font-semibold text-slate-600">{row}</td>
+                <td className="p-1 border border-slate-200 bg-slate-50 font-semibold text-slate-600">{toText(row)}</td>
                 {columnHeaders.map((_, ci) => (
                   <td key={ci} className={`p-1 border border-slate-200 text-center ${
                     showAnswer && isCorrect(ri, ci) ? 'bg-green-100 text-green-700 font-bold' : 'bg-white'
@@ -636,9 +654,9 @@ function TextAnswerBlock({ answer, showAnswer }: { answer: Record<string, unknow
   const value = answer.value as string | undefined;
   const unit = answer.unit as string | undefined;
   const acceptableRange = answer.acceptable_range as string | undefined;
-  const text = value ? `${value}${unit ? ` ${unit}` : ''}` : (answer.text as string);
-  const keyPoints = answer.key_points as string[] | undefined;
-  const alternatives = answer.alternatives as string[] | undefined;
+  const text = value ? `${value}${unit ? ` ${unit}` : ''}` : toText(answer.text);
+  const keyPoints = answer.key_points as unknown[] | undefined;
+  const alternatives = answer.alternatives as unknown[] | undefined;
 
   return (
     <div className="mt-2 p-2 bg-green-50 border border-green-100 rounded">
@@ -651,13 +669,13 @@ function TextAnswerBlock({ answer, showAnswer }: { answer: Record<string, unknow
         <div className="mt-1.5">
           <div className="text-xs font-semibold text-green-600">Key Points:</div>
           <ul className="text-xs text-slate-600 list-disc list-inside">
-            {keyPoints.map((kp, i) => <li key={i}>{kp}</li>)}
+            {keyPoints.map((kp, i) => <li key={i}>{toText(kp)}</li>)}
           </ul>
         </div>
       )}
       {alternatives && alternatives.length > 0 && (
         <div className="text-xs text-slate-400 mt-1">
-          Also accepted: {alternatives.join(', ')}
+          Also accepted: {alternatives.map(toText).join(', ')}
         </div>
       )}
     </div>

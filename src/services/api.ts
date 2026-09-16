@@ -28,6 +28,12 @@ export const courses = {
   delete: (id: string) =>
     request<{ success: boolean }>(`/courses/${id}`, { method: 'DELETE' }),
 
+  selectExam: (id: string, exam: string | null) =>
+    request<{ course: unknown }>(`/courses/${id}/select-exam`, {
+      method: 'POST',
+      body: JSON.stringify({ exam }),
+    }),
+
   analyzeExamFormat: (id: string, qbankMode?: string) =>
     request<{ course: unknown }>(`/courses/${id}/exam-format`, {
       method: 'POST',
@@ -83,6 +89,17 @@ export const jobs = {
       imageRetried: number; reApproved: number; stillFlagged: number;
       events: string[];
     }>(`/jobs/${id}/reprocess-flagged`, { method: 'POST' }),
+
+  // Read-only status — does NOT start a run. Used to re-attach the progress
+  // stream after a page refresh/disconnect.
+  reprocessStatus: (id: string) =>
+    request<{
+      running: boolean;
+      status?: string; phase?: string; step?: string;
+      total?: number; processed?: number; fixed?: number;
+      imageRetried?: number; reApproved?: number; stillFlagged?: number;
+      events?: string[];
+    }>(`/jobs/${id}/reprocess-status`, { method: 'GET' }),
 };
 
 // ── Questions ───────────────────────────────────────────────

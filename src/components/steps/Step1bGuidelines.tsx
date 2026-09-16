@@ -189,7 +189,7 @@ export default function Step1bGuidelines() {
           <div className="grid grid-cols-2 gap-3">
             <KVItem label="Style" value={guidelines.stem_guidelines?.style} />
             <KVItem label="Vignette Required" value={guidelines.stem_guidelines?.vignette_required ? 'Yes' : 'No'} />
-            <KVItem label="Clinical Depth" value={guidelines.stem_guidelines?.clinical_scenario_depth} />
+            <KVItem label="Scenario Depth" value={guidelines.stem_guidelines?.scenario_depth ?? guidelines.stem_guidelines?.clinical_scenario_depth} />
             <KVItem label="Word Range" value={
               guidelines.stem_guidelines?.min_words && guidelines.stem_guidelines?.max_words
                 ? `${guidelines.stem_guidelines.min_words}–${guidelines.stem_guidelines.max_words}`

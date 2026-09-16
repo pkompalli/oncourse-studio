@@ -10,6 +10,7 @@
  */
 
 import { supabase } from '../../db/supabase.js';
+import { fetchAllRows } from '../../db/pagination.js';
 import { fixQuestion } from './fixer.js';
 import { runValidatorBatch } from './validator.js';
 import { runAdversarialBatch } from './adversarial.js';
@@ -33,6 +34,7 @@ interface ReprocessState {
   imageRetried: number;
   reApproved: number;
   stillFlagged: number;
+  needsReview?: number;
   events: string[];
 }
 
@@ -175,7 +177,7 @@ Score each question 1-10 based on:
 1. Factual accuracy of the correct answer and explanation
 2. For choice-based formats: quality and plausibility of distractors/options
 3. For non-choice formats: appropriateness and accuracy of the expected answer
-4. Clinical/educational relevance and value
+4. Educational relevance and value
 5. Clarity and unambiguity of the question stem
 6. Image completeness — if marked as IMAGE: MISSING, the question is UNUSABLE and must score <= 4
 7. Overall exam-readiness
@@ -210,7 +212,7 @@ Output ONLY the JSON array. No preamble, no trailing text.`;
 
 async function runAuditBatch(questions: Record<string, unknown>[]): Promise<Record<string, unknown>[]> {
   const prompt = getAuditPrompt();
-  const content = formatQuestionsForReviewWithImages(questions);
+  const content = await formatQuestionsForReviewWithImages(questions);
 
   let userMessage: string | ContentPart[];
   if (typeof content === 'string') {
@@ -251,19 +253,23 @@ async function runReprocessPipeline(jobId: string): Promise<void> {
     // 1. status = 'flagged' (explicitly flagged)
     // 2. status = 'reviewed'/'approved' but scores indicate flagged
     //    (matches displayStatus() logic in the UI)
-    const { data: candidateQuestions, error } = await supabase
-      .from('qb_questions')
-      .select('*')
-      .eq('job_id', jobId)
-      .in('status', ['flagged', 'reviewed', 'approved'])
-      .is('replaced_by_id', null)
-      .order('question_number', { ascending: true });
-
-    if (error) throw new Error(error.message);
+    // Paginate — a job can have >1000 candidate questions.
+    const candidateQuestions = await fetchAllRows<Record<string, any>>((from, to) =>
+      supabase
+        .from('qb_questions')
+        .select('*')
+        .eq('job_id', jobId)
+        .in('status', ['flagged', 'reviewed', 'approved', 'needs_review'])
+        .is('replaced_by_id', null)
+        .order('question_number', { ascending: true })
+        .range(from, to)
+    );
 
     // Apply the same flagging logic as the UI's displayStatus()
     const flaggedQuestions = (candidateQuestions || []).filter((q) => {
       if (q.status === 'flagged') return true;
+      // review call previously failed (empty/truncated response) — retry it
+      if (q.status === 'needs_review') return true;
       // quality_score (from audit) is the primary indicator
       if (q.quality_score != null) return (q.quality_score as number) < 7;
       // validator + adversarial scores
@@ -312,7 +318,7 @@ async function runReprocessPipeline(jobId: string): Promise<void> {
 
       for (const q of imageQsToRetry) {
         const feedback = getAuditIssues(q as Record<string, unknown>);
-        const success = await regenerateQuestionImage(q.id, jobId, feedback.length > 0 ? feedback : ['Generate appropriate medical image']);
+        const success = await regenerateQuestionImage(q.id, jobId, feedback.length > 0 ? feedback : ['Generate an appropriate image for this question']);
         if (success) imageRetried++;
         setStep(jobId, `Image retry: ${imageRetried}/${imageQsToRetry.length} succeeded`);
       }
@@ -411,12 +417,28 @@ async function runReprocessPipeline(jobId: string): Promise<void> {
     const vTasks = vBatches.map((batch, bi) => async () => {
       setStep(jobId, `[Validator] Batch ${bi + 1}/${vBatches.length}: scoring ${batch.length} questions...`);
 
-      const results = await runValidatorBatch(batch, 'qbank', 'medical education', examFormat, guidelines);
+      const results = await runValidatorBatch(batch, 'qbank', courseName || 'exam preparation', examFormat, guidelines);
 
       for (let i = 0; i < batch.length; i++) {
         const q = batch[i];
-        const result = results[i] || {};
-        const score = (result.overall_accuracy_score as number) || 5;
+        const result = results[i];
+        const rawScore = result?.overall_accuracy_score;
+
+        // Empty/truncated validator response — don't fabricate a score-5. Record
+        // the failure and leave the prior validator_score untouched; the audit
+        // phase makes the final needs_review/flag decision.
+        if (rawScore == null) {
+          const failTrail = Array.isArray(q.audit_trail) ? [...(q.audit_trail as unknown[])] : [];
+          failTrail.push({
+            phase: 'reprocess_validator_failed',
+            reason: 'No score returned (empty or truncated review response)',
+            timestamp: new Date().toISOString(),
+          });
+          await supabase.from('qb_questions').update({ audit_trail: failTrail }).eq('id', q.id);
+          continue;
+        }
+
+        const score = rawScore as number;
         const changes = (result.changes_required as string[]) || [];
 
         const trail = Array.isArray(q.audit_trail) ? [...(q.audit_trail as unknown[])] : [];
@@ -486,12 +508,27 @@ async function runReprocessPipeline(jobId: string): Promise<void> {
     const aTasks = aBatches.map((batch, bi) => async () => {
       setStep(jobId, `[Adversarial] Batch ${bi + 1}/${aBatches.length}: scoring ${batch.length} questions...`);
 
-      const results = await runAdversarialBatch(batch, 'qbank', 'medical education', examFormat);
+      const results = await runAdversarialBatch(batch, 'qbank', courseName || 'exam preparation', examFormat);
 
       for (let i = 0; i < batch.length; i++) {
         const q = batch[i];
-        const result = results[i] || {};
-        const score = (result.adversarial_score as number) || 5;
+        const result = results[i];
+        const rawScore = result?.adversarial_score;
+
+        // Empty/truncated adversarial response — don't fabricate a score-5. Record
+        // the failure and leave the prior adversarial_score untouched.
+        if (rawScore == null) {
+          const failTrail = Array.isArray(q.audit_trail) ? [...(q.audit_trail as unknown[])] : [];
+          failTrail.push({
+            phase: 'reprocess_adversarial_failed',
+            reason: 'No score returned (empty or truncated review response)',
+            timestamp: new Date().toISOString(),
+          });
+          await supabase.from('qb_questions').update({ audit_trail: failTrail }).eq('id', q.id);
+          continue;
+        }
+
+        const score = rawScore as number;
         const changes = (result.changes_required as string[]) || [];
 
         const trail = Array.isArray(q.audit_trail) ? [...(q.audit_trail as unknown[])] : [];
@@ -554,6 +591,7 @@ async function runReprocessPipeline(jobId: string): Promise<void> {
     const auditBatches = chunk(toAudit, BATCH_SIZE);
     let reApproved = 0;
     let stillFlagged = 0;
+    let needsReview = 0;
     let auditDone = 0;
 
     const auditTasks = auditBatches.map((batch, bi) => async () => {
@@ -563,8 +601,29 @@ async function runReprocessPipeline(jobId: string): Promise<void> {
 
       for (let i = 0; i < batch.length; i++) {
         const q = batch[i];
-        const result = results[i] || {};
-        const auditScore = (result.quality_score as number) || 5;
+        const result = results[i];
+        const rawScore = result?.quality_score;
+
+        // Audit returned no usable score — empty/truncated review, not a real
+        // quality problem. Don't fabricate a score-5 flag (the false-flag loop
+        // that could never clear). Mark 'needs_review' so it's excluded from the
+        // flagged count but retried on the next reprocess pass.
+        if (rawScore == null) {
+          const nrTrail = Array.isArray(q.audit_trail) ? [...(q.audit_trail as unknown[])] : [];
+          nrTrail.push({
+            phase: 'reprocess_audit_failed',
+            reason: 'No score returned (empty or truncated review response)',
+            timestamp: new Date().toISOString(),
+          });
+          await supabase.from('qb_questions').update({
+            status: 'needs_review',
+            audit_trail: nrTrail,
+          }).eq('id', q.id);
+          needsReview++;
+          continue;
+        }
+
+        const auditScore = rawScore as number;
         const newStatus = auditScore >= 7 ? 'approved' : 'flagged';
 
         const vScore = (q.validator_score as number) || 0;
@@ -595,17 +654,18 @@ async function runReprocessPipeline(jobId: string): Promise<void> {
       }
 
       auditDone++;
-      setState(jobId, { reApproved, stillFlagged });
-      setStep(jobId, `Audit: ${auditDone}/${auditBatches.length} batches — ${reApproved} approved, ${stillFlagged} still flagged`);
+      setState(jobId, { reApproved, stillFlagged, needsReview });
+      setStep(jobId, `Audit: ${auditDone}/${auditBatches.length} batches — ${reApproved} approved, ${stillFlagged} still flagged${needsReview ? `, ${needsReview} need re-review` : ''}`);
       await pushProgress(jobId);
     });
 
     await runWithConcurrency(auditTasks, MAX_CONCURRENT);
 
     // ── Finalize ──
-    const finalMsg = `Reprocess complete — ${reApproved}/${total} recovered (approved), ${stillFlagged} still flagged`;
+    const nrSuffix = needsReview ? `, ${needsReview} need re-review (review call failed)` : '';
+    const finalMsg = `Reprocess complete — ${reApproved}/${total} recovered (approved), ${stillFlagged} still flagged${nrSuffix}`;
     setStep(jobId, finalMsg);
-    setState(jobId, { status: 'complete', phase: 'done', reApproved, stillFlagged });
+    setState(jobId, { status: 'complete', phase: 'done', reApproved, stillFlagged, needsReview });
 
     // Update job — keep status as 'complete', update progress
     await supabase.from('qb_jobs').update({
@@ -619,11 +679,12 @@ async function runReprocessPipeline(jobId: string): Promise<void> {
         image_retried: imageRetried,
         re_approved: reApproved,
         still_flagged: stillFlagged,
+        needs_review: needsReview,
         events: runningReprocesses.get(jobId)?.events.slice(-10) || [],
       },
     }).eq('id', jobId);
 
-    console.log(`\n✅ Reprocess complete: ${reApproved}/${total} recovered, ${stillFlagged} still flagged\n`);
+    console.log(`\n✅ Reprocess complete: ${reApproved}/${total} recovered, ${stillFlagged} still flagged, ${needsReview} need re-review\n`);
   } catch (e) {
     console.error(`Reprocess pipeline failed for job ${jobId}:`, e);
     const errMsg = e instanceof Error ? e.message : 'Reprocess failed';
@@ -648,6 +709,7 @@ export async function reprocessFlaggedForJob(jobId: string): Promise<{
   imageRetried: number;
   reApproved: number;
   stillFlagged: number;
+  needsReview?: number;
   events: string[];
 }> {
   const cached = runningReprocesses.get(jobId);
@@ -669,13 +731,18 @@ export async function reprocessFlaggedForJob(jobId: string): Promise<{
     };
   }
 
-  // Count effectively flagged questions (same logic as displayStatus in UI)
-  const { data: candidates } = await supabase
-    .from('qb_questions')
-    .select('status, quality_score, validator_score, adversarial_score')
-    .eq('job_id', jobId)
-    .in('status', ['flagged', 'reviewed', 'approved'])
-    .is('replaced_by_id', null);
+  // Count effectively flagged questions (same logic as displayStatus in UI).
+  // Paginate so the count is correct on jobs with >1000 questions.
+  const candidates = await fetchAllRows<Record<string, any>>((from, to) =>
+    supabase
+      .from('qb_questions')
+      .select('status, quality_score, validator_score, adversarial_score')
+      .eq('job_id', jobId)
+      .in('status', ['flagged', 'reviewed', 'approved'])
+      .is('replaced_by_id', null)
+      .order('id', { ascending: true })
+      .range(from, to)
+  );
 
   const total = (candidates || []).filter((q) => {
     if (q.status === 'flagged') return true;
@@ -726,5 +793,24 @@ export async function reprocessFlaggedForJob(jobId: string): Promise<{
     reApproved: 0,
     stillFlagged: 0,
     events: [],
+  };
+}
+
+// Read-only peek at an in-flight reprocess — returns current state WITHOUT
+// starting a new run (unlike reprocessFlaggedForJob, which triggers one when
+// nothing is cached). Lets the UI re-attach its progress stream after a refresh
+// or a dropped connection. Returns null when no reprocess is running for the job.
+export function peekReprocess(jobId: string): {
+  status: string; phase: string; step: string; total: number;
+  processed: number; fixed: number; imageRetried: number;
+  reApproved: number; stillFlagged: number; needsReview?: number; events: string[];
+} | null {
+  const s = runningReprocesses.get(jobId);
+  if (!s) return null;
+  return {
+    status: s.status, phase: s.phase, step: s.step, total: s.total,
+    processed: s.processed, fixed: s.fixed, imageRetried: s.imageRetried,
+    reApproved: s.reApproved, stillFlagged: s.stillFlagged, needsReview: s.needsReview,
+    events: s.events.slice(-15),
   };
 }

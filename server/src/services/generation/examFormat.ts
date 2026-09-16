@@ -30,15 +30,13 @@ async function discoverQuestionTypes(
 ): Promise<QuestionTypeInfo[]> {
   const prompt = `You are an expert psychometrician. Analyze the OFFICIAL exam format for: ${courseName}
 
-IMPORTANT: Many exams use MULTIPLE question types, not just standard MCQs.
-For example:
-- NCLEX-RN uses: Multiple Choice, Select All That Apply (SATA), Ordered Response (drag-and-drop), Fill-in-the-Blank (dosage calculation), Hot Spot (click on image), Matrix/Grid, Graphic/Exhibit, Audio, Cloze (dropdown)
-- USMLE uses: Single Best Answer MCQ, Extended Matching Questions (EMQ), Sequential Item Sets
-- NEET PG uses: Single Best Answer MCQ (predominantly)
-- PLAB uses: Single Best Answer MCQ, Extended Matching Questions
-- UKMLA AKT uses: Single Best Answer, Very Short Answer (free text)
-- AMC CAT uses: MCQ, Clinical Reasoning problems
-- Many nursing/allied health exams use: MCQ, SATA, prioritization/ordering, fill-in-blank, hot-spot, case studies
+IMPORTANT: Many exams use MULTIPLE question types, not just standard MCQs. Examples across disciplines (do NOT assume ${courseName} matches any of these — research the real exam):
+- CPA (accounting): Multiple-Choice Questions + Task-Based Simulations (document review, journal entries, form completion)
+- CFA (finance): Single Best Answer MCQ; constructed-response essays (Level III)
+- LSAT / bar (law): Logical Reasoning sets, Reading Comprehension, Logic Games; essay/MPT
+- NCLEX-RN (nursing): MCQ, Select All That Apply (SATA), Ordered Response, Fill-in-the-Blank, Hot Spot, Matrix/Grid, Cloze, case studies
+- USMLE / UKMLA (medical): Single Best Answer MCQ, Extended Matching Questions (EMQ), Sequential Item Sets, Very Short Answer
+- Engineering (FE/PE): MCQ, numeric-entry, multiple-correct
 
 Research ${courseName} specifically. What question types does it ACTUALLY use?
 
@@ -121,7 +119,7 @@ Return ONLY a JSON object:
   "primary_format": {
     "slug": "${primaryType.slug}",
     "stem_style": {
-      "typical_format": "<e.g. 'clinical vignette', 'direct question', 'scenario-based'>",
+      "typical_format": "<e.g. 'scenario/vignette', 'direct question', 'exhibit/document-based'>",
       "avg_stem_words": <integer>,
       "lead_in_patterns": ["<typical question endings>"],
       "what_the_stem_tests": "<1-2 sentences>",
@@ -243,20 +241,12 @@ CRITICAL: These numbers must reflect ${courseName} SPECIFICALLY.
 - A recall-heavy exam should have high 1_remember + 2_understand.
 - A reasoning-heavy exam should have high 3_apply + 4_analyze.
 
-IMAGE PERCENTAGE GUIDANCE — BE ACCURATE:
-- image_questions_percentage is the OVERALL % of the entire paper that contains image/visual-based questions.
-- Recent trends show INCREASING image percentages.
-- Known benchmarks (adjust for ${courseName}):
-  * Medical exams: 15-40% overall
-  * Nursing exams: 10-25% overall
-- Per-subject benchmarks for medical/health exams (adjust for this specific exam):
-  * Radiology/Imaging: 70-85%
-  * Dermatology: 55-75%
-  * Ophthalmology: 45-65%
-  * Pathology: 40-55%
-  * Anatomy: 35-50%
-  * Clinical subjects: 20-35%
-  * Basic science subjects: 5-20%
+IMAGE PERCENTAGE GUIDANCE — BE ACCURATE and SPECIFIC TO ${courseName}:
+- image_questions_percentage is the OVERALL % of the entire paper that contains image/visual/exhibit-based questions.
+- Determine this from how ${courseName} ACTUALLY uses visuals — do NOT apply another discipline's benchmarks.
+  * Some exams are highly visual (e.g. radiology-heavy medical subjects, engineering diagrams, accounting exhibits/financial statements, charts/graphs).
+  * Others are almost entirely text (e.g. law reasoning, ethics, pure-recall subjects) → a low or near-zero image percentage is correct.
+- Set per-subject image percentages from the nature of each subject in THIS exam (a subject that hinges on interpreting figures/exhibits is high; a text-only subject is low).
 - The weighted average across all subjects MUST approximately equal the overall image_questions_percentage.
 
 Generate ONLY the JSON, no other text.`;

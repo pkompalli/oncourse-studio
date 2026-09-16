@@ -1,5 +1,6 @@
 import { orCall, MODELS } from '../llm/openrouter.js';
 import { supabase } from '../../db/supabase.js';
+import { fetchAllRows } from '../../db/pagination.js';
 import { startTracking, getStepTokens } from '../llm/tokenTracker.js';
 
 /**
@@ -44,7 +45,7 @@ ${antiPatterns.slice(0, 3).map((p) => `  • ${p}`).join('\n')}
 
 Your subject profile MUST align with these exam-specific patterns. For example:
 - If the exam is recall-heavy, your question_style should emphasise direct factual testing
-- If the exam uses long vignettes, your question_style should describe clinical scenario construction
+- If the exam uses long vignettes, your question_style should describe scenario/stimulus construction appropriate to the exam
 - Distractor archetypes must match how THIS exam designs wrong options\n`;
   }
 
@@ -88,9 +89,9 @@ Return ONLY a JSON object with these exact keys:
   } catch {
     return {
       question_style: `Questions specific to ${subjectName} as tested in ${courseName}.`,
-      image_types: [`${subjectName} clinical photograph`, `${subjectName} diagnostic image`, 'histology slide', 'radiograph', 'diagram'],
-      image_question_focus: `Identifying key diagnostic findings in ${subjectName}`,
-      distractor_archetypes: ['related condition with similar presentation', 'correct diagnosis wrong management', 'partial knowledge trap', 'common misconception'],
+      image_types: [`${subjectName} diagram`, `${subjectName} figure`, 'chart', 'table', 'illustration'],
+      image_question_focus: `Interpreting the key information shown for ${subjectName}`,
+      distractor_archetypes: ['closely related concept', 'correct concept applied incorrectly', 'partial knowledge trap', 'common misconception'],
       bloom_guidance: 'Distribution follows the typical pattern for this exam.',
       special_instructions: `Use current standard guidelines relevant to ${courseName}. Test high-yield concepts in ${subjectName}.`,
     };
@@ -361,8 +362,8 @@ function buildFormatSchema(allocations: QuestionTypeAllocation[]): string {
 CRITICAL HOT_SPOT RULES:
 - The answer is the SET OF TARGET IDS that are correct — NEVER a text description.
 - Enumerate all clickable elements as targets with stable lowercase-slug ids.
-- Use "text_targets" type (default) when the candidate clicks a discrete text element (an order line, a charting entry, a lab value, a medication record row).
-- Use "image_regions" type ONLY for genuine photos/figures with no discrete text elements (wound, ECG strip, anatomy diagram).
+- Use "text_targets" type (default) when the candidate clicks a discrete text element (a line in a document, a table row, a figure/statement, a value in a record — e.g. an audit exhibit line, a contract clause, a lab value).
+- Use "image_regions" type ONLY for genuine photos/figures with no discrete text elements (a chart region, a diagram area, a photograph).
 - FORBIDDEN: answer.region, answer.label, answer.landmark — these are rejected by the contract.
 
 Schema for text_targets (default, covers majority of hot-spots):
@@ -370,7 +371,7 @@ Schema for text_targets (default, covers majority of hot-spots):
   "format_type": "hot_spot",
   "question": "<stem asking the candidate to click/select the correct item>",
   "stimulus_type": "text_targets",
-  "stimulus_title": "<title of the displayed record/table — e.g. 'Medication Administration Record'>",
+  "stimulus_title": "<title of the displayed record/table — e.g. 'Nonaudit Services Schedule' or 'Medication Administration Record'>",
   "targets": [
     { "id": "<lowercase-slug, e.g. mar-1>", "text": "<full text of clickable element 1>" },
     { "id": "<lowercase-slug, e.g. mar-2>", "text": "<full text of clickable element 2>" },
@@ -456,11 +457,11 @@ Self-check before returning: correct_ids non-empty, every id in correct_ids exis
         schema = `FORMAT: emq (${alloc.name}) — ${alloc.count} question(s)
 {
   "format_type": "emq",
-  "theme": "<the theme/category — e.g. 'Diagnosis', 'Drug mechanism'>",
+  "theme": "<the theme/category the shared options belong to — e.g. 'Applicable accounting standard', 'Most likely diagnosis', 'Governing legal rule'>",
   "option_list": ["A. <option 1>", "B. <option 2>", "C. <option 3>", "D. <option 4>", "E. <option 5>"],
   "scenarios": [
-    {"stem": "<clinical scenario 1>", "correct_answer": "C"},
-    {"stem": "<clinical scenario 2>", "correct_answer": "A"}
+    {"stem": "<scenario 1>", "correct_answer": "C"},
+    {"stem": "<scenario 2>", "correct_answer": "A"}
   ],
   "explanation": "<rationale for EACH scenario's answer AND why other options are wrong for that scenario — 3-5 sentences>",
   "difficulty": "<easy|medium|hard>",
@@ -476,19 +477,22 @@ CASE STUDY RULES (MANDATORY):
   • Each case MUST have EXACTLY 6 sub-questions
   • Sub-questions MUST use at LEAST 3 DIFFERENT format_types (e.g., mcq_single, sata, ordered_response, hot_spot, fill_blank, cloze_dropdown)
   • Each sub-question MUST have its own "rationale" field explaining why the answer is correct AND why each distractor is wrong
-  • Each sub-question MUST have a "cjmm_step" tag indicating which Clinical Judgment step it tests
-  • The overall "explanation" covers the clinical reasoning thread across the full case
+  • Each sub-question MUST have a "reasoning_step" tag naming the step in THIS exam's analytical/decision workflow it tests. Use the step taxonomy natural to the exam's discipline — do NOT use clinical-judgment labels for non-clinical exams. Examples:
+      – Nursing / clinical-judgment (NCLEX): Recognize Cues, Analyze Cues, Prioritize Hypotheses, Generate Solutions, Take Action, Evaluate Outcomes
+      – Audit / accounting (CPA): Identify Risk, Gather Evidence, Evaluate Evidence, Determine Response, Form Conclusion, Report
+      – Law / other: use that field's own reasoning progression (issue → rule → analysis → conclusion, etc.)
+  • The overall "explanation" covers the reasoning thread across the full case
 {
   "format_type": "case_study",
-  "case_narrative": "<detailed patient/scenario unfolding across time — include vitals, labs, history, and evolving clinical data>",
+  "case_narrative": "<detailed scenario unfolding across time — include the specific data, documents, figures, or evidence a candidate must analyze (clinical: vitals/labs/history; accounting: financials/exhibits/schedules; law: facts/filings; etc.)>",
   "sub_questions": [
     {
-      "question": "<sub-question 1 — e.g. 'Which assessment finding requires immediate follow-up?'>",
+      "question": "<sub-question 1 — a decision the candidate must make from the scenario>",
       "format_type": "mcq_single",
       "options": ["A. ...", "B. ...", "C. ...", "D. ..."],
       "correct_answer": "B",
       "rationale": "<Why B is correct AND why A, C, D are wrong — 2-4 sentences>",
-      "cjmm_step": "<Recognize Cues | Analyze Cues | Prioritize Hypotheses | Generate Solutions | Take Action | Evaluate Outcomes>",
+      "reasoning_step": "<a step in this exam's reasoning workflow — see taxonomy guidance above>",
       "difficulty": "<easy|medium|hard>"
     },
     {
@@ -497,7 +501,7 @@ CASE STUDY RULES (MANDATORY):
       "options": ["A. ...", "B. ...", "C. ...", "D. ...", "E. ..."],
       "correct_answers": ["A", "C"],
       "rationale": "<Why A and C are correct AND why B, D, E are wrong>",
-      "cjmm_step": "<step>",
+      "reasoning_step": "<step>",
       "difficulty": "<easy|medium|hard>"
     },
     {
@@ -506,11 +510,11 @@ CASE STUDY RULES (MANDATORY):
       "items": ["<step 1>", "<step 2>", "<step 3>", "<step 4>"],
       "correct_order": [3, 1, 4, 2],
       "rationale": "<Why this order is correct>",
-      "cjmm_step": "<step>",
+      "reasoning_step": "<step>",
       "difficulty": "<easy|medium|hard>"
     },
     {
-      "question": "<sub-question 4 — e.g. 'Click the medication order the nurse should question'>",
+      "question": "<sub-question 4 — a 'click the relevant item' task on the exhibit/record>",
       "format_type": "hot_spot",
       "stimulus": {
         "type": "text_targets",
@@ -524,11 +528,11 @@ CASE STUDY RULES (MANDATORY):
       "answer": { "correct_ids": ["item-2"] },
       "scoring": "dichotomous",
       "rationale": "<Why item-2 is correct AND why others are wrong>",
-      "cjmm_step": "<step>",
+      "reasoning_step": "<step>",
       "difficulty": "<easy|medium|hard>"
     }
   ],
-  "explanation": "<overall clinical reasoning thread tying the case together — 3-5 sentences>",
+  "explanation": "<overall reasoning thread tying the case together — 3-5 sentences>",
   "bloom_level": "<4_analyze|5_evaluate>",
   "difficulty": "<medium|hard>",
   "is_image_question": <true|false>,
@@ -571,7 +575,8 @@ function buildGuidelinesSection(guidelines?: Record<string, unknown>): string {
     const stemRules: string[] = [];
     if (stem.style) stemRules.push(`Style: ${stem.style}`);
     if (stem.vignette_required) stemRules.push('Vignettes are REQUIRED for each question');
-    if (stem.clinical_scenario_depth) stemRules.push(`Clinical depth: ${stem.clinical_scenario_depth}`);
+    const stemScenarioDepth = stem.scenario_depth ?? stem.clinical_scenario_depth;
+    if (stemScenarioDepth) stemRules.push(`Scenario depth: ${stemScenarioDepth}`);
     if (stem.min_words || stem.max_words) {
       stemRules.push(`Stem length: ${stem.min_words || ''}–${stem.max_words || ''} words`);
     }
@@ -727,8 +732,8 @@ function buildProfessorPrompt(subjectTask: SubjectTask, courseName: string): str
 EXISTING QUESTIONS — DO NOT DUPLICATE
 ──────────────────────────────────────
 ${totalExisting} questions already exist in the question bank for ${subject}, grouped by topic.
-You MUST NOT create questions that test the same clinical fact, scenario, or concept.
-Each of your questions must cover a DIFFERENT clinical fact.
+You MUST NOT create questions that test the same fact, scenario, or concept.
+Each of your questions must cover a DIFFERENT fact or concept.
 
 ${topicBlocks.join('\n\n')}
 `;
@@ -777,14 +782,14 @@ ${buildGuidelinesSection(subjectTask.guidelines)}
 EXPLANATION / RATIONALE — MANDATORY RULES
 ──────────────────────────────────────────
 Every explanation MUST:
-1. Justify WHY the correct answer is right (clinical reasoning, mechanism, evidence)
+1. Justify WHY the correct answer is right (reasoning, mechanism, or evidence appropriate to the discipline)
 2. Explain WHY EACH distractor/wrong option is wrong (name each option and state the specific reason)
 3. Be 3-5 sentences minimum for standalone questions
-4. For case_study: each sub_question MUST have its own "rationale" field — the overall "explanation" is for the clinical thread only
+4. For case_study: each sub_question MUST have its own "rationale" field — the overall "explanation" is for the reasoning thread only
 
 ANSWER INTEGRITY — MANDATORY RULES
 ────────────────────────────────────
-1. STEM MUST NOT NAME THE DIAGNOSIS (for choice-based formats)
+1. STEM MUST NOT NAME OR GIVE AWAY THE ANSWER (e.g. the diagnosis, the governing rule/standard, the final figure) — for choice-based formats
 2. For MCQ/SATA: OPTIONS MUST NOT BETRAY THE ANSWER — all options plausible, parallel, similar length
 3. No "All of the above" or "None of the above"
 4. NO ANSWER CLUES IN STEM WORDING
@@ -1176,7 +1181,8 @@ function buildContentFromQuestion(q: Record<string, unknown>): Record<string, un
         explanation: (q.explanation as string) || '',
       };
     case 'case_study': {
-      // Ensure sub_questions preserve rationale and cjmm_step fields
+      // Ensure sub_questions preserve rationale and reasoning_step fields.
+      // Accept legacy `cjmm_step` from older generations for backward compatibility.
       const subs = (q.sub_questions as Array<Record<string, unknown>>) || [];
       const enrichedSubs = subs.map((sq) => {
         const base: Record<string, unknown> = {
@@ -1189,7 +1195,7 @@ function buildContentFromQuestion(q: Record<string, unknown>): Record<string, un
           correct_order: sq.correct_order,
           blanks: sq.blanks,
           rationale: sq.rationale || sq.explanation || '',
-          cjmm_step: sq.cjmm_step || null,
+          reasoning_step: sq.reasoning_step || sq.cjmm_step || null,
           difficulty: sq.difficulty || null,
         };
         // Preserve hot_spot stimulus contract fields
@@ -1319,12 +1325,17 @@ async function runAllProfessors(
   let totalQuestionsGenerated = 0;
 
   // Fetch existing questions for this course (from previous jobs) to avoid duplicates
-  // Grouped by subject+topic for precise deduplication
-  const { data: existingQs } = await supabase
-    .from('qb_questions')
-    .select('subject, topic, question')
-    .eq('course_id', courseId)
-    .neq('job_id', jobId);
+  // Grouped by subject+topic for precise deduplication. Paginate — a course can
+  // easily have >1000 prior questions, and missing some weakens dedup.
+  const existingQs = await fetchAllRows<Record<string, any>>((from, to) =>
+    supabase
+      .from('qb_questions')
+      .select('subject, topic, question')
+      .eq('course_id', courseId)
+      .neq('job_id', jobId)
+      .order('id', { ascending: true })
+      .range(from, to)
+  );
 
   const stemsBySubjectTopic = new Map<string, string[]>();
   if (existingQs && existingQs.length > 0) {
@@ -1456,7 +1467,13 @@ async function runAllProfessors(
     console.error('Failed to save generated snapshots:', e);
   }
 
-  // Image pipeline: generate images for image questions (with timeout)
+  // Image pipeline: generate images for image questions.
+  // This runs to COMPLETION as part of the orchestrated generation phase — no
+  // 5-minute race cutoff. The old race abandoned most images (100+ images at
+  // concurrency 3 can't finish in 5 min), which is why images "failed" during
+  // generation and only appeared after a manual retry. Each image call is now
+  // individually timeout-bounded and errors are non-fatal, so the pipeline can't
+  // hang; it just proceeds past any image that fails.
   try {
     const { processAllImageQuestions, isImageGenerationAvailable } = await import('../images/imageGeneration.js');
     if (isImageGenerationAvailable()) {
@@ -1467,23 +1484,14 @@ async function runAllProfessors(
             completed: totalSubjects,
             total: totalSubjects,
             completed_subjects: completedSubjects,
+            phase: 'images',
             message: `Generating images for image-based questions...`,
           },
         })
         .eq('id', jobId);
 
-      // 5-minute timeout for image pipeline to prevent job getting stuck
-      const IMAGE_TIMEOUT_MS = 5 * 60 * 1000;
-      const imgPromise = processAllImageQuestions(jobId);
-      const timeoutPromise = new Promise<{ totalProcessed: number; totalSuccess: number; totalFailed: number }>((resolve) =>
-        setTimeout(() => resolve({ totalProcessed: 0, totalSuccess: 0, totalFailed: -1 }), IMAGE_TIMEOUT_MS)
-      );
-      const imgResult = await Promise.race([imgPromise, timeoutPromise]);
-      if (imgResult.totalFailed === -1) {
-        console.warn('Image pipeline timed out after 5 minutes — proceeding to review');
-      } else {
-        console.log(`🎨 Image pipeline: ${imgResult.totalSuccess}/${imgResult.totalProcessed} images generated`);
-      }
+      const imgResult = await processAllImageQuestions(jobId);
+      console.log(`🎨 Image pipeline: ${imgResult.totalSuccess}/${imgResult.totalProcessed} images generated (${imgResult.totalFailed} failed)`);
     }
   } catch (e) {
     console.error('Image pipeline error (non-fatal):', e);
@@ -1621,15 +1629,26 @@ export async function generateBatchForJob(
     return cached;
   }
 
+  // Atomically claim this job BEFORE any await. Both the browser (pollNextBatch)
+  // and the server orchestrator call this; without a synchronous claim they both
+  // pass the empty-cache guard above, both build tasks, and both fire professors —
+  // generating ~2× the intended questions. Setting the flag here (no await between
+  // the get() above and this set()) guarantees the second caller returns early.
+  runningJobs.set(jobId, { status: 'generating', completed: 0, total: 0 });
+
   // Check DB status
   const { data: job, error: jobErr } = await supabase
     .from('qb_jobs')
     .select('*')
     .eq('id', jobId)
     .single();
-  if (jobErr) throw new Error(jobErr.message);
+  if (jobErr) {
+    runningJobs.delete(jobId); // release claim so a later retry can proceed
+    throw new Error(jobErr.message);
+  }
 
   if (job.status === 'reviewing' || job.status === 'complete') {
+    runningJobs.delete(jobId); // not actually generating — release the claim
     const progress = (job.progress || {}) as Record<string, unknown>;
     return {
       status: 'complete',
@@ -1641,6 +1660,12 @@ export async function generateBatchForJob(
   // Already generating (e.g. server restarted mid-run) — report current progress, don't re-trigger
   if (job.status === 'generating') {
     const progress = (job.progress || {}) as Record<string, unknown>;
+    // Sync our in-memory claim to the DB snapshot so cached returns aren't stuck at 0.
+    runningJobs.set(jobId, {
+      status: 'generating',
+      completed: (progress.completed as number) || 0,
+      total: (progress.total as number) || 0,
+    });
     return {
       status: 'generating',
       completed: (progress.completed as number) || 0,
@@ -1660,14 +1685,49 @@ export async function generateBatchForJob(
   if (courseErr) throw new Error(courseErr.message);
 
   const courseName = course.name as string;
-  const structure = course.structure as Record<string, unknown>;
+  let structure = course.structure as Record<string, unknown>;
   const examFormat = (course.exam_format || {}) as Record<string, unknown>;
   const guidelines = (course.generation_guidelines || {}) as Record<string, unknown>;
   const jobType = (job.type as string) || '';
+  const jobConfig = (job.config || {}) as Record<string, unknown>;
+
+  // Scope generation to a single exam when the job is labeled with one, or when
+  // the course has a selected exam (chosen on the structure page).
+  // Subjects are tagged with `exam` at parse time, so we just filter the flat list.
+  const selectedExam = (jobConfig.exam as string) || (structure.selected_exam as string) || '';
+  if (selectedExam) {
+    const allSubjects = (structure.subjects as Array<Record<string, unknown>>) || [];
+    const scoped = allSubjects.filter((s) => (s.exam as string) === selectedExam);
+    if (scoped.length === 0) {
+      throw new Error(`No subjects found for exam "${selectedExam}" in course structure.`);
+    }
+    structure = { ...structure, subjects: scoped };
+    console.log(`[generation] Scoped to exam "${selectedExam}": ${scoped.length} subjects`);
+  }
+
+  // Topic-wise: scope to the subjects/topics the user picked (config.topic_selection
+  // is a map of subject name -> selected topic names). Empty/absent means "all".
+  const topicSelection = jobConfig.topic_selection as Record<string, string[]> | undefined;
+  if (topicSelection && Object.keys(topicSelection).length > 0) {
+    const allSubjects = (structure.subjects as Array<Record<string, unknown>>) || [];
+    const filtered = allSubjects
+      .filter((s) => topicSelection[s.name as string]?.length)
+      .map((s) => {
+        const picked = topicSelection[s.name as string];
+        const topics = ((s.topics as Array<Record<string, unknown>>) || []).filter((t) => picked.includes(t.name as string));
+        return { ...s, topics };
+      })
+      .filter((s) => (s.topics as unknown[]).length > 0);
+    if (filtered.length === 0) {
+      throw new Error('No matching subjects/topics found for the selected scope.');
+    }
+    structure = { ...structure, subjects: filtered };
+    const topicCount = filtered.reduce((n, s) => n + (s.topics as unknown[]).length, 0);
+    console.log(`[generation] Scoped to selection: ${filtered.length} subjects, ${topicCount} topics`);
+  }
 
   // Step 1: Build subject tasks — topic-wise uses course structure directly, mock exam uses exam format
   console.log(`Building subject tasks for ${courseName} (${jobType})...`);
-  const jobConfig = (job.config || {}) as Record<string, unknown>;
   const tasks = jobType === 'topic_wise' || jobType === 'topic_qbank'
     ? await buildTopicWiseTasks(structure, examFormat, courseName, (jobConfig.questions_per_topic as number) || 5)
     : await buildSubjectTasks(examFormat, structure, examFormat, courseName);

@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { supabase } from '../db/supabase.js';
+import { fetchAllRows } from '../db/pagination.js';
 
 export const exportRouter = Router();
 
@@ -8,15 +9,17 @@ exportRouter.get('/json/:jobId', async (req, res, next) => {
   try {
     const { jobId } = req.params;
 
-    const { data: questions, error } = await supabase
-      .from('qb_questions')
-      .select('*')
-      .eq('job_id', jobId)
-      .is('replaced_by_id', null)
-      .in('status', ['approved', 'reviewed', 'generated'])
-      .order('question_number', { ascending: true });
+    const questions = await fetchAllRows<Record<string, any>>((from, to) =>
+      supabase
+        .from('qb_questions')
+        .select('*')
+        .eq('job_id', jobId)
+        .is('replaced_by_id', null)
+        .in('status', ['approved', 'reviewed', 'generated'])
+        .order('question_number', { ascending: true })
+        .range(from, to)
+    );
 
-    if (error) throw new Error(error.message);
     if (!questions || questions.length === 0) {
       res.json({ questions: [], exported_at: new Date().toISOString() });
       return;
@@ -97,15 +100,16 @@ exportRouter.post('/', async (req, res, next) => {
       return;
     }
 
-    const { data: questions, error: qError } = await supabase
-      .from('qb_questions')
-      .select('*')
-      .eq('job_id', job_id)
-      .is('replaced_by_id', null)
-      .in('status', ['approved', 'reviewed'])
-      .order('question_number', { ascending: true });
-
-    if (qError) throw new Error(qError.message);
+    const questions = await fetchAllRows<Record<string, any>>((from, to) =>
+      supabase
+        .from('qb_questions')
+        .select('*')
+        .eq('job_id', job_id)
+        .is('replaced_by_id', null)
+        .in('status', ['approved', 'reviewed'])
+        .order('question_number', { ascending: true })
+        .range(from, to)
+    );
 
     const exportData = {
       format,

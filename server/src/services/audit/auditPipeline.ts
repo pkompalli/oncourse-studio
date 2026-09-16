@@ -7,6 +7,7 @@
  */
 
 import { supabase } from '../../db/supabase.js';
+import { fetchAllRows } from '../../db/pagination.js';
 import { orCall, MODELS } from '../llm/openrouter.js';
 import type { ContentPart } from '../llm/openrouter.js';
 import { formatQuestionsForReviewWithImages, extractJsonArray } from '../review/shared.js';
@@ -129,7 +130,7 @@ Score each question 1-10 based on:
 1. Factual accuracy of the correct answer and explanation
 2. For choice-based formats: quality and plausibility of distractors/options
 3. For non-choice formats: appropriateness and accuracy of the expected answer
-4. Clinical/educational relevance and value
+4. Educational relevance and value
 5. Clarity and unambiguity of the question stem
 6. Image completeness — if marked as IMAGE: MISSING, the question is UNUSABLE and must score ≤ 4
 7. Overall exam-readiness
@@ -166,7 +167,7 @@ Output ONLY the JSON array. No preamble, no trailing text.`;
 
 async function runAuditBatch(questions: Record<string, unknown>[]): Promise<Record<string, unknown>[]> {
   const prompt = getAuditPrompt();
-  const content = formatQuestionsForReviewWithImages(questions);
+  const content = await formatQuestionsForReviewWithImages(questions);
 
   let userMessage: string | ContentPart[];
   if (typeof content === 'string') {
@@ -178,21 +179,32 @@ async function runAuditBatch(questions: Record<string, unknown>[]): Promise<Reco
     ];
   }
 
-  const response = await orCall(MODELS.AUDITOR, '', userMessage, {
-    maxTokens: 4000,
-    temperature: 0.2,
-  });
-
-  let results = extractJsonArray(response.content, questions.length);
+  // Never throw: a Bedrock/network failure here would otherwise crash the whole
+  // audit pipeline. Return whatever we can parse; empty is handled downstream as
+  // needs_review (not a fabricated score-5 flag).
+  let results: Record<string, unknown>[] = [];
+  try {
+    const response = await orCall(MODELS.AUDITOR, '', userMessage, {
+      maxTokens: 12000,
+      temperature: 0.2,
+    });
+    results = extractJsonArray(response.content, questions.length);
+  } catch (e) {
+    console.warn(`  [Audit] LLM call failed for batch of ${questions.length}: ${e instanceof Error ? e.message : e}`);
+  }
 
   if (results.length < questions.length) {
     console.log(`  [Audit] Short response (${results.length}/${questions.length}), retrying...`);
-    const response2 = await orCall(MODELS.AUDITOR, '', userMessage, {
-      maxTokens: 4000,
-      temperature: 0.1,
-    });
-    const results2 = extractJsonArray(response2.content, questions.length);
-    if (results2.length > results.length) results = results2;
+    try {
+      const response2 = await orCall(MODELS.AUDITOR, '', userMessage, {
+        maxTokens: 12000,
+        temperature: 0.1,
+      });
+      const results2 = extractJsonArray(response2.content, questions.length);
+      if (results2.length > results.length) results = results2;
+    } catch (e) {
+      console.warn(`  [Audit] Retry LLM call failed: ${e instanceof Error ? e.message : e}`);
+    }
   }
 
   return results;
@@ -205,13 +217,16 @@ async function runAuditPipeline(jobId: string): Promise<void> {
     startTracking(jobId, 'audit');
     setStep(jobId, 'Fetching reviewed questions...');
 
-    const { data: questions, error } = await supabase
-      .from('qb_questions').select('*')
-      .eq('job_id', jobId).eq('status', 'reviewed')
-      .is('replaced_by_id', null)
-      .order('question_number', { ascending: true });
+    // Paginate — audit must see every reviewed question, not just the first 1000.
+    const questions = await fetchAllRows<Record<string, unknown>>((from, to) =>
+      supabase
+        .from('qb_questions').select('*')
+        .eq('job_id', jobId).eq('status', 'reviewed')
+        .is('replaced_by_id', null)
+        .order('question_number', { ascending: true })
+        .range(from, to)
+    );
 
-    if (error) throw new Error(error.message);
     if (!questions || questions.length === 0) {
       setStep(jobId, 'No reviewed questions found — skipping to complete');
       await supabase.from('qb_jobs').update({
@@ -232,6 +247,7 @@ async function runAuditPipeline(jobId: string): Promise<void> {
     let totalAudited = 0;
     let totalApproved = 0;
     let totalFlagged = 0;
+    let totalNeedsReview = 0;
     let batchesDone = 0;
 
     setState(jobId, { batchesTotal, batchesDone: 0 });
@@ -251,8 +267,36 @@ async function runAuditPipeline(jobId: string): Promise<void> {
 
       for (let i = 0; i < batch.length; i++) {
         const q = batch[i];
-        const result = results[i] || {};
-        const auditScore = (result.quality_score as number) || 5;
+        const result = results[i];
+        const rawScore = result?.quality_score;
+
+        // Review returned no usable score for this question — almost always a
+        // truncated/empty LLM response, not a genuine quality problem. Do NOT
+        // fabricate a score-5 flag (that produced permanent false-flags that no
+        // amount of reprocessing could clear). Keep the prior status, mark it
+        // 'needs_review' so it's excluded from the flagged count but picked up
+        // for a real re-review on the next reprocess pass.
+        if (rawScore == null) {
+          const nrTrail = Array.isArray(q.audit_trail) ? [...(q.audit_trail as unknown[])] : [];
+          nrTrail.push({
+            phase: 'audit_failed',
+            reason: 'No score returned (empty or truncated review response)',
+            timestamp: new Date().toISOString(),
+          });
+          const { error: nrErr } = await supabase.from('qb_questions').update({
+            status: 'needs_review',
+            audit_trail: nrTrail,
+          }).eq('id', q.id);
+          if (nrErr) console.error(`    [audit] Failed to update Q${qStart + i}: ${nrErr.message}`);
+
+          totalAudited++;
+          totalNeedsReview++;
+          const subjNR = runningAudits.get(jobId)?.subjects.find((x) => x.subject === ((q.subject as string) || 'Unknown'));
+          if (subjNR) { subjNR.audited++; subjNR.status = 'auditing'; }
+          continue;
+        }
+
+        const auditScore = rawScore as number;
 
         // Combined score: average of validator + adversarial + audit, or just audit if others missing
         const vScore = (q.validator_score as number) || 0;
@@ -299,7 +343,7 @@ async function runAuditPipeline(jobId: string): Promise<void> {
       }
 
       const scoresSummary = results.map((r, i) => {
-        const sc = (r?.quality_score as number) || 5;
+        const sc = r?.quality_score == null ? 'NR' : (r.quality_score as number);
         return `Q${qStart + i}:${sc}`;
       }).join(' ');
       setStep(jobId, `[Audit] Batch ${batchNum}: scores — ${scoresSummary}`);
@@ -324,7 +368,8 @@ async function runAuditPipeline(jobId: string): Promise<void> {
 
     // Determine next status
     const nextStatus = 'complete';
-    const finalMsg = `Audit complete — ${totalApproved} approved, ${totalFlagged} flagged out of ${total}.`;
+    const nrSuffix = totalNeedsReview ? `, ${totalNeedsReview} need re-review (review call failed)` : '';
+    const finalMsg = `Audit complete — ${totalApproved} approved, ${totalFlagged} flagged${nrSuffix} out of ${total}.`;
     setStep(jobId, finalMsg);
 
     // Merge token usage from all steps
@@ -336,7 +381,7 @@ async function runAuditPipeline(jobId: string): Promise<void> {
       status: nextStatus,
       progress: {
         step: finalMsg,
-        audited: totalAudited, approved: totalApproved, flagged: totalFlagged, total,
+        audited: totalAudited, approved: totalApproved, flagged: totalFlagged, needs_review: totalNeedsReview, total,
         events: runningAudits.get(jobId)?.events.slice(-10) || [],
         subjects: runningAudits.get(jobId)?.subjects || [],
         token_usage: { ...existingTokens, audit: auditTokens },

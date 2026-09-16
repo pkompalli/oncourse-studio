@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { supabase } from '../db/supabase.js';
+import { fetchAllRows } from '../db/pagination.js';
 import { getSnapshots, getAvailableStages } from '../services/snapshots.js';
 
 export const questionsRouter = Router();
@@ -13,14 +14,18 @@ questionsRouter.get('/', async (req, res, next) => {
       return;
     }
 
-    const { data, error } = await supabase
-      .from('qb_questions')
-      .select('*')
-      .eq('job_id', jobId)
-      .is('replaced_by_id', null) // Only show latest version
-      .order('question_number', { ascending: true });
+    // Paginate: a job can have >1000 questions and PostgREST caps a single query
+    // at 1000 rows, which was hiding whole subjects.
+    const data = await fetchAllRows((from, to) =>
+      supabase
+        .from('qb_questions')
+        .select('*')
+        .eq('job_id', jobId)
+        .is('replaced_by_id', null) // Only show latest version
+        .order('question_number', { ascending: true })
+        .range(from, to)
+    );
 
-    if (error) throw new Error(error.message);
     res.json({ questions: data });
   } catch (e) {
     next(e);
