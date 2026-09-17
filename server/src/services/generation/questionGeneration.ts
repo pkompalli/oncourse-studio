@@ -273,6 +273,7 @@ function buildFormatSchema(allocations: QuestionTypeAllocation[]): string {
     const optLetters = 'ABCDEFGH'.slice(0, numOpts).split('').map((l) => `"${l}. ..."`).join(', ');
     return `{
   "format_type":    "mcq_single",
+  "passage":        "<REQUIRED whenever the stem refers to 'the passage', an excerpt, or any reading text the candidate must read — put the FULL passage text here; omit only for self-contained questions>",
   "question":       "<stem>",
   "options":        [${optLetters}],
   "correct_answer": "A",
@@ -282,7 +283,8 @@ function buildFormatSchema(allocations: QuestionTypeAllocation[]): string {
   "is_image_question": <true|false>,
   "image_type":         "<modality string if image question, else null>",
   "image_search_terms": ["<3-5 specific search terms if image question, else empty array>"]
-}`;
+}
+RULE: A question is only answerable if everything it references is present. If the stem mentions "the passage"/"the excerpt"/a reading text, the "passage" field is MANDATORY and must contain the full text the answer depends on — never reference a passage you don't include. Same for "shown above" figures: set is_image_question:true or describe the data inline.`;
   }
 
   // Multi-format — build schema descriptions for each type
@@ -297,6 +299,7 @@ function buildFormatSchema(allocations: QuestionTypeAllocation[]): string {
         schema = `FORMAT: mcq_single (${alloc.name}) — ${alloc.count} question(s)
 {
   "format_type": "mcq_single",
+  "passage": "<REQUIRED if the stem refers to 'the passage'/an excerpt/reading text — full text here; omit for self-contained questions>",
   "question": "<stem>",
   "options": [${optLetters}],
   "correct_answer": "<letter>",
@@ -306,7 +309,8 @@ function buildFormatSchema(allocations: QuestionTypeAllocation[]): string {
   "is_image_question": <true|false>,
   "image_type": "<if image, else null>",
   "image_search_terms": [<if image, else []>]
-}`;
+}
+RULE: never reference a passage/excerpt/figure you don't include — a passage-based stem without its "passage" text is ungradable.`;
         break;
       }
       case 'sata':
@@ -314,6 +318,7 @@ function buildFormatSchema(allocations: QuestionTypeAllocation[]): string {
         schema = `FORMAT: ${alloc.slug} (${alloc.name}) — ${alloc.count} question(s)
 {
   "format_type": "${alloc.slug}",
+  "passage": "<REQUIRED if the stem refers to 'the passage'/an excerpt/reading text — full text here; omit for self-contained questions>",
   "question": "<stem — must clearly state 'Select all that apply'>",
   "options": ["A. ...", "B. ...", "C. ...", "D. ...", "E. ...", "F. ..."],
   "correct_answers": ["A", "C", "E"],
@@ -1233,6 +1238,7 @@ function buildContentFromQuestion(q: Record<string, unknown>): Record<string, un
       }
       return {
         stem: q.question as string,
+        ...(q.passage ? { passage: q.passage as string } : {}),
         options: optionsArray,
         answer: { key: (q.correct_option as string) || 'A' },
         explanation: (q.explanation as string) || '',
@@ -1249,6 +1255,7 @@ function buildContentFromQuestion(q: Record<string, unknown>): Record<string, un
       }
       return {
         stem: q.question as string,
+        ...(q.passage ? { passage: q.passage as string } : {}),
         options: optionsArray,
         answer: { keys: (q.correct_answers as string[]) || [q.correct_option as string || 'A'] },
         explanation: (q.explanation as string) || '',
