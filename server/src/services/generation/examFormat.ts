@@ -44,7 +44,7 @@ SUBJECTS: ${subjectsStr}
 
 Return ONLY a JSON array. Each element:
 {
-  "slug": "<machine_name — e.g. mcq_single, sata, ordered_response, fill_blank, hot_spot, emq, assertion_reason, match, short_answer, case_study, drag_drop, matrix_grid, audio, cloze_dropdown>",
+  "slug": "<machine_name — e.g. mcq_single, sata, ordered_response, fill_blank, hot_spot, emq, assertion_reason, match, short_answer, case_study, task_based_simulation, passage_set, drag_drop, matrix_grid, audio, cloze_dropdown>",
   "name": "<human-readable name — e.g. 'Select All That Apply (SATA)'>",
   "percentage": <integer — approximate % of total exam questions using this type>,
   "description": "<1-2 sentences: how this question type works in ${courseName} specifically>",
@@ -116,6 +116,16 @@ Return ONLY a JSON object:
   "examiner_role": "<how to roleplay the question-setter>",
   "testing_philosophy": "<3-4 sentences: What does this exam fundamentally test? How do the different question types serve this philosophy?>",
   "question_types_summary": "<1-2 sentences summarizing the mix of question types and why the exam uses this combination>",
+  "structure_overview": "<2-4 sentences describing HOW the exam's questions are ORGANIZED: which are standalone vs GROUPED under a shared stimulus (a reading passage, a case scenario, a set of exhibits/documents, a data set, an image), and the typical size of each group. Be concrete about grouping — this is the exam's structure in words.>",
+  "question_groups": [
+    {
+      "stimulus_type": "<reading_passage | case_scenario | exhibit_set | data_set | image>",
+      "members_per_group": [<min int>, <max int>],
+      "member_formats": ["<format slugs used inside the group, e.g. mcq_single, sata>"],
+      "shared_stimulus_words": [<min int>, <max int>],
+      "description": "<1-2 sentences: what the shared stimulus is and how its questions relate to it>"
+    }
+  ],
   "primary_format": {
     "slug": "${primaryType.slug}",
     "stem_style": {
@@ -164,6 +174,8 @@ ${questionTypes.filter((t) => t.slug !== primaryType.slug).map((t) => `    {
     "<template 3>"
   ]
 }
+
+"question_groups" MUST be an EMPTY array [] if this exam has NO shared-stimulus grouping (every question standalone). Only include a group entry for a stimulus genuinely shared by MULTIPLE sibling questions (e.g. LSAT/GRE/GMAT reading passages, an accounting case, a set of exhibits). Do NOT list standalone formats here.
 
 Be HIGHLY specific to ${courseName}. Do NOT give generic advice.`;
 
@@ -331,6 +343,8 @@ function buildSchemaForType(qt: QuestionTypeInfo): Record<string, unknown> {
       return { ...base, answer: { type: 'object', properties: { text: 'string', keywords: 'string[]' }, required: true } };
     case 'case_study':
       return { ...base, case_narrative: { type: 'string', required: true }, sub_questions: { type: 'array', items: { type: 'string', stem: 'string', answer: 'object' }, required: true } };
+    case 'passage_set':
+      return { ...base, passage: { type: 'string', required: true }, sub_questions: { type: 'array', items: { type: 'string', stem: 'string', answer: 'object' }, required: true } };
     default:
       return { ...base, answer_format: { type: 'string', value: qt.answer_format }, answer: { type: 'object', required: true } };
   }
@@ -353,6 +367,8 @@ function buildDisplayForType(qt: QuestionTypeInfo): Record<string, unknown> {
     matrix_grid: 'stem_then_grid',
     cloze_dropdown: 'inline_dropdowns',
     case_study: 'case_with_sub_questions',
+    task_based_simulation: 'case_with_sub_questions',
+    passage_set: 'case_with_sub_questions',
     audio: 'media_then_choices',
   };
 
@@ -397,11 +413,14 @@ export async function analyzeExamFormat(
   console.log(`[examFormat] Phase 3: Extracting structured numbers...`);
   const formatData = await extractStructuredNumbers(courseName, subjectsStr, subjectsList, examPattern, questionTypes);
 
-  // Merge everything
+  // Merge everything. Lift the grouping description to the top level so the
+  // guidelines step (and generation) can read it without digging into exam_pattern.
   return {
     ...formatData,
     question_types: questionTypes,
     exam_pattern: examPattern,
+    question_groups: (examPattern as Record<string, unknown>).question_groups || [],
+    structure_overview: (examPattern as Record<string, unknown>).structure_overview || '',
   };
 }
 

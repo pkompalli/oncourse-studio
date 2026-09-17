@@ -4,7 +4,26 @@
  */
 
 import { orCall, MODELS } from '../llm/openrouter.js';
-import { extractFormatSlugs, renderContractsForPrompt } from './formatContracts.js';
+import { extractFormatSlugs, renderContractsForPrompt, buildContentSchema, normalizeSchemaParams } from './formatContracts.js';
+
+/**
+ * Materialize a deterministic JSON Schema for each format in format_specs,
+ * seeded from the canonical contract and tightened by the exam-specific
+ * schema_params the model supplied. This is the authoritative structural
+ * contract both generation and validation enforce — always valid JSON Schema,
+ * regardless of what the model wrote in prose.
+ */
+function attachContentSchemas(guidelines: Record<string, unknown>): Record<string, unknown> {
+  const specs = guidelines.format_specs as Record<string, Record<string, unknown>> | undefined;
+  if (!specs || typeof specs !== 'object') return guidelines;
+  for (const [fmt, spec] of Object.entries(specs)) {
+    if (!spec || typeof spec !== 'object') continue;
+    try {
+      spec.content_schema = buildContentSchema(fmt, normalizeSchemaParams(spec.schema_params));
+    } catch { /* leave this format without a schema rather than fail the whole doc */ }
+  }
+  return guidelines;
+}
 
 export async function generateGuidelines(
   courseName: string,
@@ -19,6 +38,15 @@ export async function generateGuidelines(
   // contracts instead of re-inventing structure as prose.
   const slugs = extractFormatSlugs(examFormat);
   const contractsBlock = renderContractsForPrompt(slugs);
+
+  // Turn the analysis's described question-grouping into an explicit instruction:
+  // map each shared-stimulus group onto a concrete grouped machine format.
+  const groups = Array.isArray(examFormat.question_groups) ? (examFormat.question_groups as Array<Record<string, unknown>>) : [];
+  const groupingBlock = groups.length > 0
+    ? `The exam groups some questions under a shared stimulus. For EACH group, add a format_specs entry for the mapped machine format AND a format_distribution entry:\n` +
+      groups.map((g, i) => `  Group ${i + 1}: stimulus_type=${g.stimulus_type}, ${JSON.stringify(g.members_per_group)} questions/group, member formats ${JSON.stringify(g.member_formats)} — ${g.description || ''}`).join('\n') +
+      `\nMAPPING: reading_passage → passage_set (ONE shared "passage" + sub_questions[]); case_scenario → case_study; exhibit_set/data_set → task_based_simulation (markdown exhibits); image → keep the member formats with is_image_question=true.\nFor a grouped format: set schema_params.sub_question_min/max from members_per_group; structure_requirements MUST require the shared stimulus embedded IN the question; each sub-question fully gradable.`
+    : `This exam has no shared-stimulus grouping — all questions are standalone.${(examFormat.structure_overview ? ` Structure: ${examFormat.structure_overview}` : '')}`;
 
   const prompt = `You are a senior exam design architect for the ${courseName} exam. Given a course structure and exam format specification, produce a comprehensive GENERATION GUIDELINES document that INTERPRETS this specific exam into concrete, enforceable requirements.
 
@@ -39,6 +67,9 @@ ${examFormatJson}
 ─── CANONICAL FORMAT CONTRACTS (authoritative structure + gradability — do NOT contradict; your job is to LAYER exam-specific interpretation on top of these) ───
 ${contractsBlock}
 
+─── QUESTION GROUPING (from the analysis — turn described grouping into concrete grouped formats) ───
+${groupingBlock}
+
 Produce a JSON object with these exact sections:
 
 {
@@ -58,7 +89,16 @@ Produce a JSON object with these exact sections:
       "content_rules": ["<exam-specific content quality rules — realism, data sourcing, rule-grounding, distractor construction for this format>"],
       "gradability": "<the machine-readable answer-key requirement for this format (from the canonical contract), restated concretely>",
       "validation_checks": ["<what the validator must verify for a question of this format to pass — concrete, checkable assertions>"],
-      "difficulty_target": "<typical difficulty/Bloom for this format on this exam>"
+      "difficulty_target": "<typical difficulty/Bloom for this format on this exam>",
+      "generation_template": { "<a CONCRETE example object showing the EXACT JSON the generator must emit for ONE question of this format on this exam — filled with a realistic (short) example, not placeholders>": "" },
+      "schema_params": {
+        "num_options": <exact number of options this exam fixes for this format, e.g. 5 for LSAT; null if variable>,
+        "option_keys": <array of exact option keys if fixed, e.g. ["A","B","C","D","E"]; null otherwise>,
+        "sub_question_count": <exact sub-question count for case_study (e.g. 6); null if N/A>,
+        "sub_question_min": <min sub-questions/tasks for TBS; null if N/A>,
+        "sub_question_max": <max sub-questions/tasks for TBS; null if N/A>,
+        "exhibits_as_markdown": <true if TBS/case exhibits must be markdown; null if N/A>
+      }
     }
   },
 
@@ -134,9 +174,20 @@ IMPORTANT:
 - Base ALL numbers on the exam format specification (total questions, subject distribution, format percentages, etc.)
 - If the exam format has subject_distribution with specific question counts, use those EXACTLY
 - If the exam format has bloom's or difficulty distributions, use those EXACTLY
-- Format slugs should be: mcq_single, mcq_multi, sata, ordered_response, drag_drop, fill_blank, hot_spot, matrix_grid, cloze_dropdown, emq, case_study, task_based_simulation
+- Format slugs should be: mcq_single, mcq_multi, sata, ordered_response, drag_drop, fill_blank, hot_spot, matrix_grid, cloze_dropdown, emq, case_study, task_based_simulation, passage_set
 - Be specific and actionable — these rules will be programmatically enforced
 - format_specs is MANDATORY and must contain one entry for EVERY format that appears in format_distribution. Each entry must interpret THIS exam onto the canonical contract above: concrete syntax_rules, structure_requirements (including any required stimulus — reading passage, exhibit, image, sub-questions), gradability, and validation_checks. This is the section the generator and validator rely on most — make it precise and course-specific.
+- generation_template is MANDATORY per format and DRIVES generation: it is a concrete, realistic (keep it short) example object of EXACTLY the JSON the generator must output for ONE question of that format. Follow these output conventions:
+    • Common meta fields on every top-level object: "format_type", "question" (the stem), "explanation", "difficulty", "bloom_level", and "is_image_question" (+ "image_type"/"image_search_terms" only if an image is needed).
+    • mcq_single: "options": ["A. …","B. …",…], "correct_answer": "<letter>". Include "passage": "<full text>" ONLY for reading/comprehension items.
+    • sata/mcq_multi: "options": [...], "correct_answers": ["A","C"].
+    • ordered_response/drag_drop: "items": [...], "correct_order": [2,1,3].
+    • fill_blank: "correct_answer_value", "correct_answer_unit", "acceptable_range".
+    • matrix_grid: "row_headers": [...], "column_headers": [...], "correct_cells": [{"row":0,"col":1}].
+    • cloze_dropdown: "blanks": [{"id","options":[...],"correct"}].
+    • hot_spot: "stimulus_type", "targets"/"regions" with slug ids, "correct_ids": [...].
+    • emq: "theme", "option_list": [...], "scenarios": [{"stem","correct_answer"}].
+    • GROUPED formats (case_study, task_based_simulation, passage_set, or any shared-stimulus set): ONE object with the shared stimulus + a "sub_questions" array. Shared stimulus field: passage_set → "passage"; case_study → "case_narrative"; task_based_simulation → "exhibits":[{label,title,type,content(markdown)}]. Each sub-question: {"number","format_type","question", <that sub-format's answer scaffolding as above>, "rationale","difficulty"}.
 - STIMULUS COMPLETENESS: for any format whose questions can reference a passage/excerpt/figure/exhibit, structure_requirements MUST state that the stimulus is embedded in the question (reading passage in content.passage; TBS/case exhibits as markdown; figures as images) and validation_checks MUST include "a question that references a passage/figure/exhibit not present is ungradable — reject it".
 - explanation_guidelines.must_address_distractors MUST be true — every explanation must discuss why EACH wrong option is wrong, not just defend the correct answer
 - The correct answer must ALWAYS be a structured value, not prose. Ungradable questions are rejected.
@@ -148,7 +199,7 @@ IMPORTANT:
 Return ONLY the JSON object. No preamble, no markdown fences.`;
 
   const guidelines = await callAndParseJson(prompt, 0.3);
-  return guidelines;
+  return attachContentSchemas(guidelines);
 }
 
 /** Extract a JSON object from an LLM response, tolerating markdown fences. */
@@ -213,8 +264,11 @@ If the request doesn't require changes (just a question), return:
 Return ONLY valid JSON. No preamble, no markdown fences.`;
 
   const result = await callAndParseJson(prompt, 0.3);
+  const updated = (result.updated_guidelines as Record<string, unknown>) || null;
   return {
-    updated_guidelines: (result.updated_guidelines as Record<string, unknown>) || null,
+    // Re-materialize schemas so an edit to num_options / sub-question counts /
+    // exhibit rules updates the deterministic contract too.
+    updated_guidelines: updated ? attachContentSchemas(updated) : null,
     response: (result.response as string) || 'Guidelines updated.',
   };
 }

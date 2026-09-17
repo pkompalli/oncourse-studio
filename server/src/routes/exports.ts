@@ -95,6 +95,7 @@ exportRouter.get('/json/:jobId', async (req, res, next) => {
           quality_status: q.status,
           quality_score: q.quality_score,
           ...(gradIssues.length ? { gradability_issues: gradIssues } : {}),
+          ...(q.tags?.schema_valid === false && Array.isArray(q.tags?.schema_errors) ? { schema_errors: q.tags.schema_errors } : {}),
           ...(q.tags?.content_review_status ? { content_review_status: q.tags.content_review_status } : {}),
         };
       })

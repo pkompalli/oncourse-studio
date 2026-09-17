@@ -118,6 +118,18 @@ export const FORMAT_CONTRACTS: Record<string, FormatContract> = {
     ],
     stimulusRule: 'The narrative (and any exhibits) is the shared stimulus; every sub-question must be answerable from it.',
   },
+  passage_set: {
+    slug: 'passage_set',
+    label: 'Reading Passage Set (shared passage + questions)',
+    structure: 'passage (the full shared reading text — a single passage, or a comparative pair labeled "Passage A"/"Passage B"); sub_questions[] (each a fully-formed, gradable question of its own format_type — usually mcq_single — about the passage, with its own answer key, rationale, and topic); overall explanation.',
+    gradability: 'EVERY sub-question must carry the COMPLETE machine-readable answer scaffolding for ITS format (options + a structured answer key). A sub-answer that exists only in rationale prose is INVALID. The shared passage must be present.',
+    syntax: [
+      'One shared passage feeds ALL sub-questions; each sub-question is answerable ONLY from the passage.',
+      'Typically 5–8 sub-questions per passage; use standard exam lead-ins.',
+      'Comparative sets label the two texts "Passage A" and "Passage B" within the passage.',
+    ],
+    stimulusRule: 'The passage is the shared stimulus and is REQUIRED — never a sub-question referencing a passage that is not present.',
+  },
   task_based_simulation: {
     slug: 'task_based_simulation',
     label: 'Task-Based Simulation (TBS)',
@@ -167,6 +179,141 @@ export function renderContractsForPrompt(slugs: Iterable<string>): string {
   let contracts = contractsFor(slugs);
   if (contracts.length === 0) contracts = contractsFor(['mcq_single', 'sata', 'case_study']);
   return contracts.map(renderContract).join('\n\n');
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// JSON Schema builders — the DETERMINISTIC contract.
+//
+// buildContentSchema(format, params) returns a draft-07 JSON Schema describing the
+// NORMALIZED `content` object the generator persists for a format (the shape that
+// buildContentFromQuestion produces). The guidelines step materializes one of these
+// per format — seeded from the canonical contract, tightened by exam-specific
+// params — and stores it. Generation validates its output against it; the validator
+// runs it as a deterministic pre-pass. Conditional rules that a static schema can't
+// express (e.g. "IF the stem cites a passage THEN content.passage must exist") stay
+// in the semantic gradability gate (review/shared.ts).
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type SchemaParams = {
+  numOptions?: number;        // exact option count (e.g. 5 for LSAT A–E)
+  optionKeys?: string[];      // exact option keys, if the exam fixes them
+  subQuestionCount?: number;  // exact sub-question count (case_study: 6)
+  subQuestionMin?: number;    // TBS lower bound
+  subQuestionMax?: number;    // TBS upper bound
+  exhibitsAsMarkdown?: boolean; // TBS/case exhibits carry markdown content (default true)
+};
+
+type JsonSchema = Record<string, unknown>;
+const NON_EMPTY_STR: JsonSchema = { type: 'string', minLength: 1 };
+const STR: JsonSchema = { type: 'string' };
+
+function optionsArraySchema(p: SchemaParams): JsonSchema {
+  const item: JsonSchema = { type: 'object', required: ['key', 'text'], properties: { key: NON_EMPTY_STR, text: NON_EMPTY_STR } };
+  const s: JsonSchema = { type: 'array', items: item };
+  if (p.numOptions && p.numOptions > 0) { s.minItems = p.numOptions; s.maxItems = p.numOptions; }
+  else s.minItems = 2;
+  return s;
+}
+
+/** Map the LLM's snake_case schema_params onto the typed SchemaParams. */
+export function normalizeSchemaParams(raw: unknown): SchemaParams {
+  const r = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+  const num = (v: unknown) => (typeof v === 'number' && v > 0 ? v : undefined);
+  return {
+    numOptions: num(r.num_options),
+    optionKeys: Array.isArray(r.option_keys) ? (r.option_keys as unknown[]).map(String) : undefined,
+    subQuestionCount: num(r.sub_question_count),
+    subQuestionMin: num(r.sub_question_min),
+    subQuestionMax: num(r.sub_question_max),
+    exhibitsAsMarkdown: typeof r.exhibits_as_markdown === 'boolean' ? (r.exhibits_as_markdown as boolean) : undefined,
+  };
+}
+
+export function buildContentSchema(format: string, p: SchemaParams = {}): JsonSchema {
+  const base: JsonSchema = { $schema: 'http://json-schema.org/draft-07/schema#', type: 'object', additionalProperties: true };
+  switch (format) {
+    case 'mcq_single':
+      return { ...base, required: ['stem', 'options', 'answer', 'explanation'], properties: {
+        stem: NON_EMPTY_STR, passage: STR, options: optionsArraySchema(p),
+        answer: { type: 'object', required: ['key'], properties: { key: NON_EMPTY_STR } },
+        explanation: STR } };
+    case 'mcq_multi':
+    case 'sata':
+      return { ...base, required: ['stem', 'options', 'answer', 'explanation'], properties: {
+        stem: NON_EMPTY_STR, passage: STR, options: optionsArraySchema(p),
+        answer: { type: 'object', required: ['keys'], properties: { keys: { type: 'array', minItems: 1, items: NON_EMPTY_STR } } },
+        explanation: STR } };
+    case 'ordered_response':
+    case 'drag_drop':
+      return { ...base, required: ['stem', 'items', 'correct_order', 'explanation'], properties: {
+        stem: NON_EMPTY_STR,
+        items: { type: 'array', minItems: 2, items: NON_EMPTY_STR },
+        correct_order: { type: 'array', minItems: 2, items: { type: 'integer', minimum: 1 } },
+        explanation: STR } };
+    case 'fill_blank':
+      return { ...base, required: ['stem', 'answer', 'explanation'], properties: {
+        stem: NON_EMPTY_STR,
+        answer: { type: 'object', required: ['value'], properties: {
+          value: { anyOf: [{ type: 'string', minLength: 1 }, { type: 'number' }] }, unit: STR, acceptable_range: STR } },
+        explanation: STR } };
+    case 'hot_spot':
+      return { ...base, required: ['stem', 'answer'], properties: {
+        stem: NON_EMPTY_STR,
+        stimulus: { type: 'object', properties: { type: { enum: ['text_targets', 'image_regions'] } } },
+        answer: { type: 'object', anyOf: [
+          { required: ['correct_ids'], properties: { correct_ids: { type: 'array', minItems: 1, items: NON_EMPTY_STR } } },
+          { required: ['region'] } ] },
+        explanation: STR } };
+    case 'matrix_grid':
+      return { ...base, required: ['stem', 'row_headers', 'column_headers'], properties: {
+        stem: NON_EMPTY_STR,
+        row_headers: { type: 'array', minItems: 1, items: NON_EMPTY_STR },
+        column_headers: { type: 'array', minItems: 1, items: NON_EMPTY_STR },
+        correct_cells: { type: 'array', items: { type: 'object', required: ['row', 'col'], properties: { row: { type: 'integer' }, col: { type: 'integer' } } } },
+        correct_answer: { type: 'object' },
+        explanation: STR },
+        anyOf: [{ required: ['correct_cells'], properties: { correct_cells: { minItems: 1 } } }, { required: ['correct_answer'] }] };
+    case 'cloze_dropdown':
+      return { ...base, required: ['stem', 'blanks'], properties: {
+        stem: NON_EMPTY_STR,
+        blanks: { type: 'array', minItems: 1, items: { type: 'object', required: ['options', 'correct'],
+          properties: { options: { type: 'array', minItems: 2, items: NON_EMPTY_STR }, correct: NON_EMPTY_STR } } },
+        explanation: STR } };
+    case 'emq':
+      return { ...base, required: ['option_list', 'scenarios'], properties: {
+        theme: STR,
+        option_list: { type: 'array', minItems: 2, items: NON_EMPTY_STR },
+        scenarios: { type: 'array', minItems: 1, items: { type: 'object', required: ['stem', 'correct_answer'],
+          properties: { stem: NON_EMPTY_STR, correct_answer: NON_EMPTY_STR } } },
+        explanation: STR } };
+    case 'case_study': {
+      const sub: JsonSchema = { type: 'array', items: { type: 'object', required: ['format_type'], properties: { format_type: NON_EMPTY_STR } } };
+      if (p.subQuestionCount) { sub.minItems = p.subQuestionCount; sub.maxItems = p.subQuestionCount; } else sub.minItems = 1;
+      return { ...base, required: ['case_narrative', 'sub_questions'], properties: {
+        case_narrative: NON_EMPTY_STR, topics: { type: 'array' }, sub_questions: sub, response_instructions: STR, explanation: STR } };
+    }
+    case 'passage_set': {
+      const sub: JsonSchema = { type: 'array', minItems: p.subQuestionMin || 2,
+        items: { type: 'object', required: ['format_type'], properties: { format_type: NON_EMPTY_STR } } };
+      if (p.subQuestionMax) sub.maxItems = p.subQuestionMax;
+      return { ...base, required: ['passage', 'sub_questions'], properties: {
+        passage: NON_EMPTY_STR, topics: { type: 'array' }, sub_questions: sub, explanation: STR } };
+    }
+    case 'task_based_simulation':
+    case 'tbs': {
+      const exhibitContent: JsonSchema = p.exhibitsAsMarkdown === false ? STR : NON_EMPTY_STR;
+      const sub: JsonSchema = { type: 'array', minItems: p.subQuestionMin || 1,
+        items: { type: 'object', required: ['format_type'], properties: { format_type: NON_EMPTY_STR } } };
+      if (p.subQuestionMax) sub.maxItems = p.subQuestionMax;
+      return { ...base, required: ['exhibits', 'sub_questions'], properties: {
+        scenario: STR, question: STR,
+        exhibits: { type: 'array', minItems: 1, items: { type: 'object', required: ['label', 'content'],
+          properties: { label: NON_EMPTY_STR, title: STR, type: STR, content: exhibitContent } } },
+        sub_questions: sub, response_instructions: STR, explanation: STR } };
+    }
+    default:
+      return base; // unknown/new format — no structural constraints (gate still applies)
+  }
 }
 
 /**

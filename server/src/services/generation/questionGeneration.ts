@@ -3,6 +3,7 @@ import { supabase } from '../../db/supabase.js';
 import { fetchAllRows } from '../../db/pagination.js';
 import { startTracking, getStepTokens } from '../llm/tokenTracker.js';
 import { classifyQuestionType } from '../questionType.js';
+import { schemaErrorsFor } from './schemaValidate.js';
 
 /**
  * Faithful port of V1's generation pipeline:
@@ -168,6 +169,39 @@ function allocateQuestionTypes(
   return allocations.filter((a) => a.count > 0);
 }
 
+// Guidelines are authoritative on the format MIX (per the describe→derive→generate
+// design): when generation_guidelines carry a format_distribution, derive the
+// per-subject allocations from it — so grouped formats the guidelines introduced
+// (e.g. passage_set) are actually generated. Falls back to null (→ keep the
+// exam_format-derived allocation) when no format_distribution is present.
+function allocationsFromGuidelines(numQ: number, guidelines: Record<string, unknown>): QuestionTypeAllocation[] | null {
+  const fd = guidelines?.format_distribution as Array<{ format?: string; slug?: string; percentage?: number; description?: string }> | undefined;
+  if (!Array.isArray(fd) || fd.length === 0) return null;
+  const specs = guidelines?.format_specs as Record<string, Record<string, unknown>> | undefined;
+  const raw = fd
+    .map((f) => ({ slug: String(f.format || f.slug || '').trim(), percentage: typeof f.percentage === 'number' ? f.percentage : 0, description: f.description }))
+    .filter((f) => f.slug);
+  if (raw.length === 0) return null;
+  let total = raw.reduce((s, f) => s + f.percentage, 0);
+  if (total <= 0) { raw.forEach((f) => (f.percentage = 100 / raw.length)); total = 100; }
+  const sorted = [...raw].sort((a, b) => b.percentage - a.percentage);
+  const out: QuestionTypeAllocation[] = [];
+  let remaining = numQ;
+  for (let i = 0; i < sorted.length; i++) {
+    const f = sorted[i];
+    const sp = specs?.[f.slug]?.schema_params as Record<string, unknown> | undefined;
+    const name = (specs?.[f.slug]?.label as string) || f.slug;
+    const count = i === sorted.length - 1
+      ? remaining
+      : Math.min(remaining, Math.max(f.percentage >= 5 ? 1 : 0, Math.round(numQ * f.percentage / total)));
+    if (count > 0) {
+      out.push({ slug: f.slug, name, count, percentage: Math.round(f.percentage), description: f.description, num_options: sp?.num_options as number | undefined });
+      remaining -= count;
+    }
+  }
+  return out.filter((a) => a.count > 0);
+}
+
 export async function buildSubjectTasks(
   mockSpecs: Record<string, unknown>,
   courseStructure: Record<string, unknown>,
@@ -266,8 +300,32 @@ export async function buildSubjectTasks(
 
 // ── Build format-specific JSON schema for the prompt ──
 
-function buildFormatSchema(allocations: QuestionTypeAllocation[]): string {
-  if (allocations.length === 1 && allocations[0].slug === 'mcq_single') {
+// Render a format's generation instructions FROM the guidelines' derived spec
+// (the fully-generic path): the concrete output template + this exam's rules. This
+// makes generation guidelines-driven, so a format defined only in the guidelines
+// needs no hardcoded branch below.
+function renderGuidelinesFormatBlock(alloc: QuestionTypeAllocation, spec: Record<string, unknown>): string {
+  const list = (v: unknown) => (Array.isArray(v) ? (v as unknown[]).map(String) : v ? [String(v)] : []);
+  const rules = [
+    ...list(spec.syntax_rules).map((s) => `  • ${s}`),
+    ...list(spec.structure_requirements).map((s) => `  • ${s}`),
+    ...list(spec.content_rules).map((s) => `  • ${s}`),
+  ];
+  const grad = spec.gradability ? `GRADABILITY (mandatory): ${spec.gradability}` : '';
+  const template = JSON.stringify(spec.generation_template, null, 2);
+  return `FORMAT: ${alloc.slug} (${alloc.name}) — ${alloc.count} question(s)
+${rules.length ? 'RULES:\n' + rules.join('\n') + '\n' : ''}${grad ? grad + '\n' : ''}Output EACH question as a JSON object with EXACTLY this shape (fill with real content; keep all fields):
+${template}`;
+}
+
+function buildFormatSchema(allocations: QuestionTypeAllocation[], guidelines?: Record<string, unknown>): string {
+  const specFor = (slug: string): Record<string, unknown> | undefined => {
+    const specs = guidelines?.format_specs as Record<string, Record<string, unknown>> | undefined;
+    const s = specs?.[slug];
+    return s && s.generation_template ? s : undefined;
+  };
+
+  if (allocations.length === 1 && allocations[0].slug === 'mcq_single' && !specFor('mcq_single')) {
     // Pure MCQ — use the original compact schema
     const numOpts = allocations[0].num_options || 4;
     const optLetters = 'ABCDEFGH'.slice(0, numOpts).split('').map((l) => `"${l}. ..."`).join(', ');
@@ -291,6 +349,11 @@ RULE: A question is only answerable if everything it references is present. If t
   const schemas: string[] = [];
 
   for (const alloc of allocations) {
+    // Guidelines-driven (generic) path: render from the derived spec when present.
+    const gspec = specFor(alloc.slug);
+    if (gspec) { schemas.push(renderGuidelinesFormatBlock(alloc, gspec)); continue; }
+
+    // Fallback: hardcoded per-format template for formats the guidelines don't cover.
     let schema: string;
     switch (alloc.slug) {
       case 'mcq_single': {
@@ -591,6 +654,38 @@ TASK-BASED SIMULATION RULES (MANDATORY):
   "image_search_terms": []
 }`;
         break;
+      case 'passage_set':
+        schema = `FORMAT: passage_set (${alloc.name}) — ${alloc.count} passage set(s)
+READING PASSAGE SET RULES (MANDATORY):
+  • Each set is ONE shared reading passage plus a group of questions about it. Output ONE object per set.
+  • "passage": the FULL reading text (~400–500 words). For a comparative set, include BOTH texts labeled "Passage A" and "Passage B" within this field.
+  • Provide 5–8 "sub_questions", each answerable ONLY from the passage. Do NOT reference facts not in the passage.
+  • Each sub-question is a complete, gradable question (usually mcq_single): its own stem, options, correct answer, and "rationale" (why the key is right AND why each distractor is wrong).
+  • Use standard exam lead-ins ("Which one of the following most accurately states the main point of the passage?", "The author's attitude can best be described as…").
+  • Number sub-questions sequentially ("number": 1..N). Every sub-question MUST include the COMPLETE answer scaffolding for its format (never an answer only in prose).
+{
+  "format_type": "passage_set",
+  "passage": "<full ~400–500 word passage; comparative → 'Passage A' … 'Passage B' …>",
+  "topics": ["<subtopic(s) this passage's questions cover>"],
+  "sub_questions": [
+    {
+      "number": 1, "format_type": "mcq_single",
+      "question": "<question answerable only from the passage>",
+      "options": ["A. …","B. …","C. …","D. …","E. …"],
+      "correct_answer": "B",
+      "rationale": "<why B is right AND why A, C, D, E are wrong>", "difficulty": "<easy|medium|hard>"
+    }
+    // … 5–8 sub-questions total
+  ],
+  "explanation": "<1-2 sentences on the passage's overall structure/argument>",
+  "difficulty": "<easy|medium|hard>",
+  "bloom_level": "<3_apply|4_analyze|5_evaluate>",
+  "is_image_question": false,
+  "image_type": null,
+  "image_search_terms": []
+}
+PER-SUB ANSWER KEY (machine-gradable; use EXACT shapes): mcq_single → options[] + correct_answer:"<letter>"; sata → options[] + correct_answers:["<letters>"]. Every sub-question is answerable solely from the passage above.`;
+        break;
       default:
         schema = `FORMAT: ${alloc.slug} (${alloc.name}) — ${alloc.count} question(s)
 ${alloc.description ? `Description: ${alloc.description}` : ''}
@@ -833,7 +928,7 @@ ${topicBlocks.join('\n\n')}
     ? `Multiple formats:\n${allocations.map((a) => `              - ${a.name}: ${a.count} question(s) (${a.percentage}%)`).join('\n')}`
     : `${allocations[0].name}, ${allocations[0].num_options || ep.num_options} options per question`;
 
-  const formatSchemas = buildFormatSchema(allocations);
+  const formatSchemas = buildFormatSchema(allocations, subjectTask.guidelines);
 
   return `You are a Professor of ${subject} and a ${examinerRole}.
 You are now setting your department's contribution to this year's ${courseName}${boardNote} question paper${batchNote}.
@@ -1380,6 +1475,15 @@ function buildContentFromQuestion(q: Record<string, unknown>): Record<string, un
         explanation: (q.explanation as string) || '',
       };
     }
+    case 'passage_set': {
+      const subs = (q.sub_questions as Array<Record<string, unknown>>) || [];
+      return {
+        passage: (q.passage as string) || (q.reading_passage as string) || (q.case_narrative as string) || '',
+        ...(Array.isArray(q.topics) ? { topics: q.topics } : {}),
+        sub_questions: subs.map(enrichSubQuestion),
+        explanation: (q.explanation as string) || '',
+      };
+    }
     case 'task_based_simulation':
     case 'tbs': {
       // Some models nest sub_questions/response_instructions under `answer`.
@@ -1405,14 +1509,40 @@ function buildContentFromQuestion(q: Record<string, unknown>): Record<string, un
         explanation: (q.explanation as string) || '',
       };
     }
-    default:
-      // Generic fallback — store the entire LLM output as content
+    default: {
+      // Generic GROUPED fallback: any format the model returned with sub_questions
+      // is a shared-stimulus set — normalize it like a case (shared stimulus passed
+      // through + enriched subs) so a guidelines-only new grouped format works with
+      // no dedicated code.
+      const ans = (q.answer as Record<string, unknown>) || {};
+      const subs = (q.sub_questions as Array<Record<string, unknown>>)
+        || (ans.sub_questions as Array<Record<string, unknown>>);
+      if (Array.isArray(subs) && subs.length > 0) {
+        const rawExhibits = (q.exhibits as Array<Record<string, unknown>>) || (ans.exhibits as Array<Record<string, unknown>>) || [];
+        return {
+          ...(q.passage ? { passage: q.passage as string } : {}),
+          ...(q.case_narrative ? { case_narrative: q.case_narrative as string } : {}),
+          ...(q.scenario ? { scenario: q.scenario as string } : {}),
+          ...(rawExhibits.length ? { exhibits: rawExhibits.map((ex, i) => ({
+            label: (ex.label as string) || `Exhibit ${i + 1}`,
+            title: (ex.title as string) || '',
+            type: (ex.type as string) || 'document',
+            content: (ex.content as string) || (ex.markdown as string) || (ex.text as string) || '',
+          })) } : {}),
+          ...(Array.isArray(q.topics) ? { topics: q.topics } : {}),
+          sub_questions: subs.map(enrichSubQuestion),
+          response_instructions: (q.response_instructions as string) || (ans.response_instructions as string) || '',
+          explanation: (q.explanation as string) || '',
+        };
+      }
+      // Non-grouped unknown format — store the entire LLM output as content.
       return {
         stem: q.question as string,
         answer: q.answer || q.correct_answer || q.correct_option || '',
         explanation: (q.explanation as string) || '',
         raw: q,
       };
+    }
   }
 }
 
@@ -1422,7 +1552,8 @@ async function insertSubjectQuestions(
   jobId: string,
   courseId: string,
   courseName: string,
-  subjectIndex: number
+  subjectIndex: number,
+  guidelines?: Record<string, unknown>
 ) {
   if (questions.length === 0) return;
 
@@ -1451,6 +1582,14 @@ async function insertSubjectQuestions(
     const questionType = classifyQuestionType({ ...q, content });
     content.question_type = questionType;
     const isImage = questionType === 'image';
+
+    // Deterministic schema check against the guidelines' materialized content_schema
+    // for this format. Record violations so the review pre-pass can enforce them —
+    // generation is expected to stick to the schema; a mismatch is surfaced, not hidden.
+    const schemaErrors = schemaErrorsFor(guidelines, formatType, content);
+    if (schemaErrors.length > 0) {
+      console.warn(`  [Schema] subject ${subjectIndex} q${idx + 1} (${formatType}): ${schemaErrors.slice(0, 3).join('; ')}`);
+    }
 
     return {
       job_id: jobId,
@@ -1484,6 +1623,8 @@ async function insertSubjectQuestions(
         difficulty: (q.difficulty as number) || 1,
         format_type: formatType,
         question_type: questionType,
+        schema_valid: schemaErrors.length === 0,
+        ...(schemaErrors.length > 0 ? { schema_errors: schemaErrors } : {}),
       },
       media: (isImage && q.image_type) ? [{
         type: (q.image_type as string) || 'image',
@@ -1593,7 +1734,7 @@ async function runAllProfessors(
   const promises = tasks.map(async (task, idx) => {
     try {
       const questions = await generateSubjectPaper(task, courseName);
-      await insertSubjectQuestions(questions, jobId, courseId, courseName, idx);
+      await insertSubjectQuestions(questions, jobId, courseId, courseName, idx, task.guidelines);
 
       // Update progress as each professor finishes
       completedSubjects.push(task.subject);
@@ -1941,10 +2082,13 @@ export async function generateBatchForJob(
     ? await buildTopicWiseTasks(structure, examFormat, courseName, (jobConfig.questions_per_topic as number) || 5)
     : await buildSubjectTasks(examFormat, structure, examFormat, courseName);
 
-  // Attach guidelines to each task
+  // Attach guidelines to each task, and let the guidelines' format_distribution
+  // drive the format mix when present (guidelines are authoritative on formats).
   if (Object.keys(guidelines).length > 0) {
     for (const task of tasks) {
       task.guidelines = guidelines;
+      const gAlloc = allocationsFromGuidelines(task.num_questions, guidelines);
+      if (gAlloc && gAlloc.length > 0) task.question_type_allocations = gAlloc;
     }
   }
 
