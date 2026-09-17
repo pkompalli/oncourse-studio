@@ -8,8 +8,26 @@ import { reprocessFlaggedForJob, peekReprocess } from '../services/review/reproc
 import { orchestrateJob } from '../services/pipeline/orchestrator.js';
 import { fetchAllRows } from '../db/pagination.js';
 import { classifyQuestionType, needsMarkdownRegeneration } from '../services/questionType.js';
+import { revalidateContentForJob, getRevalidateStatus } from '../services/review/contentRevalidate.js';
 
 export const jobsRouter = Router();
+
+// Re-validate the CONTENT of every question in a job (not just flagged) — a
+// second-pass audit that fixes content defects the initial review missed on
+// already-approved questions. Runs in the background; poll the GET below.
+jobsRouter.post('/:id/revalidate-content', async (req, res, next) => {
+  try {
+    const existing = getRevalidateStatus(req.params.id);
+    if (existing?.running) { res.json({ started: false, alreadyRunning: true, status: existing }); return; }
+    // fire-and-forget; progress tracked in-memory
+    revalidateContentForJob(req.params.id).catch((e) => console.error('[revalidate] failed:', e));
+    res.json({ started: true });
+  } catch (e) { next(e); }
+});
+
+jobsRouter.get('/:id/revalidate-content', (req, res) => {
+  res.json({ status: getRevalidateStatus(req.params.id) });
+});
 
 // Flag questions whose intended medium is Markdown but that are stored as an
 // image (or have no exhibits) — so they can be regenerated with the markdown
