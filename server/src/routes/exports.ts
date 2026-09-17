@@ -90,6 +90,7 @@ exportRouter.get('/json/:jobId', async (req, res, next) => {
           },
           quality_status: q.status,
           quality_score: q.quality_score,
+          ...(q.tags?.content_review_status ? { content_review_status: q.tags.content_review_status } : {}),
         };
       })
     );
