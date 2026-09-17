@@ -91,6 +91,48 @@ function standaloneIssues(ft: string, c: Record<string, unknown>, q: Record<stri
 }
 
 /**
+ * A question is only ANSWERABLE if any shared stimulus it references is actually
+ * present. Reading-comprehension / passage / excerpt items (LSAT RC, GMAT/GRE
+ * verbal, comprehension sets) and "shown above" figure items are ungradable when
+ * the stem points at a passage/figure that lives nowhere in the record — even
+ * though options + answer key exist. This is orthogonal to answer scaffolding, so
+ * it's checked separately from standaloneIssues/subQuestionIssues.
+ */
+// Reference to a separate reading passage/excerpt, OR to an author's stance /
+// a named "account" that is only meaningful if a passage is provided. Bare "the
+// author" is intentionally NOT here — logical-reasoning stems print the argument
+// inline and refer to "the author" of that inline argument.
+const PASSAGE_REF_RX = /\bthe passage\b|\bin the passage\b|\baccording to the passage\b|\bbased on the passage\b|\bthe (?:excerpt|extract|reading)\b|\bpassages? (?:above|below)\b|\bpassage [AB]\b|\bthe author'?s? (?:attitude|position|view|viewpoint|opinion|stance|tone|main point|primary purpose|argument|claim|conclusion|reasoning)\b|\bthe (?:conventional|traditional|standard|prevailing|received) account\b/i;
+// Reference to a visual that should be attached as an image or described in content.
+const VISUAL_REF_RX = /\b(?:shown|depicted|illustrated|pictured|displayed) (?:above|below)\b|\bthe (?:figure|diagram|graph|chart|image|table|map|photograph) (?:above|below)\b|\bin the (?:figure|diagram|graph|chart|image) (?:above|below)\b/i;
+
+// A genuine passage-based question that's MISSING its passage is a bare question
+// (~a sentence or two). A self-contained question that legitimately refers to
+// "the author" or "the account" prints the passage/argument inline, making the
+// stem long. This length gate cleanly separates the two and avoids false-flagging
+// self-contained items across any exam.
+const INLINE_STIMULUS_MIN = 400;
+
+/** True if a shared stimulus (passage/excerpt/exhibit field) is present. */
+function stimulusPresent(c: Record<string, unknown>): boolean {
+  if (_has(c.passage) || _has(c.stimulus) || _has(c.reading_passage) || _has(c.shared_stimulus) || _has(c.excerpt) || _has(c.context) || _has(c.scenario)) return true;
+  return Array.isArray(c.exhibits) && c.exhibits.length > 0;
+}
+
+function referencedStimulusMissing(c: Record<string, unknown>, q: Record<string, unknown>): string[] {
+  const stem = String((c.stem as string) ?? (q.question as string) ?? '');
+  // Long stems carry their passage/argument inline → treat as self-contained.
+  if (!stem || stem.length >= INLINE_STIMULUS_MIN || stimulusPresent(c)) return [];
+  const out: string[] = [];
+  if (PASSAGE_REF_RX.test(stem))
+    out.push('stem refers to a reading passage / author\'s stance not present in the record (add the full passage to content.passage) — question is unanswerable as-is');
+  const hasImage = !!q.is_image_question || _has(c.image) || (Array.isArray(c.media) && c.media.length > 0);
+  if (!hasImage && VISUAL_REF_RX.test(stem))
+    out.push('stem refers to a figure/diagram/table that is neither attached as an image nor described in content — question is unanswerable as-is');
+  return out;
+}
+
+/**
  * Deterministic STRUCTURAL gradability check for ANY format — standalone
  * questions and case_study/TBS sub-questions alike. Returns concrete problems
  * (empty = fully gradable). Used as a HARD gate so an ungradable question can
@@ -104,7 +146,7 @@ export function gradabilityIssues(q: Record<string, unknown>): string[] {
     if (subs.length === 0) return ['Case has no machine-readable sub_questions'];
     return subs.flatMap((sq, i) => subQuestionIssues(sq, (sq.number as number) ?? i + 1));
   }
-  return standaloneIssues(ft, c, q);
+  return [...standaloneIssues(ft, c, q), ...referencedStimulusMissing(c, q)];
 }
 
 // Normalize difficulty to the labels the reviewer expects. Stored as int 1/2/3
@@ -174,6 +216,13 @@ function formatOneQuestion(q: Record<string, unknown>, i: number): string {
 
   // Use content JSONB if available, otherwise fall back to legacy columns
   const stem = (content?.stem as string) || (q.question as string) || '';
+
+  // Shared reading stimulus (passage/excerpt). Lives in content but the mcq_single
+  // serializer below only emits options+answer, and mcq_single skips the raw-content
+  // dump — so without this the reviewer would score a passage-based question blind
+  // (or wrongly flag a good one as "no passage"). Emit it right after the stem.
+  const passageRaw = content?.passage ?? content?.reading_passage ?? content?.excerpt ?? content?.stimulus_text;
+  const passageBlock = passageRaw ? `Passage:\n${asText(passageRaw)}\n` : '';
 
   let bodyStr = '';
 
@@ -317,7 +366,7 @@ function formatOneQuestion(q: Record<string, unknown>, i: number): string {
   }
 
   return `--- Q${i + 1} ---${formatLabel}${metaLine}
-Question: ${stem}
+${passageBlock}Question: ${stem}
 ${bodyStr}
 Explanation: ${explanation}${imageStatus ? '\n' + imageStatus : ''}${groundTruth}`;
 }

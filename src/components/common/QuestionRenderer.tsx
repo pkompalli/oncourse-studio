@@ -710,6 +710,7 @@ export default function QuestionRenderer({ question: q, showAnswer = true, compa
   const formatLabel = getFormatLabel(q);
   const content = q.content || {};
   const answer = content.answer as Record<string, unknown> | undefined;
+  const passage = (content.passage || content.reading_passage || content.excerpt) as string | undefined;
 
   return (
     <div className={compact ? '' : 'space-y-2'}>
@@ -722,6 +723,14 @@ export default function QuestionRenderer({ question: q, showAnswer = true, compa
 
       {/* Media (before stem for image-based questions) */}
       <MediaBlock media={media} />
+
+      {/* Reading passage / excerpt (comprehension questions) — shown before the stem */}
+      {passage && (
+        <div className="text-sm text-slate-700 bg-slate-50 border border-slate-200 rounded p-3 whitespace-pre-wrap">
+          <div className="text-[10px] uppercase tracking-wide text-slate-400 mb-1">Passage</div>
+          {toText(passage)}
+        </div>
+      )}
 
       {/* Layout-specific rendering */}
       {layout === 'case_with_sub_questions' ? (

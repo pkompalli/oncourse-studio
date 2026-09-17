@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { supabase } from '../db/supabase.js';
 import { fetchAllRows } from '../db/pagination.js';
 import { classifyQuestionType, needsMarkdownRegeneration } from '../services/questionType.js';
+import { gradabilityIssues } from '../services/review/shared.js';
 
 export const exportRouter = Router();
 
@@ -57,6 +58,9 @@ exportRouter.get('/json/:jobId', async (req, res, next) => {
         // already live in content; no mcq scaffolding leaking into non-mcq records.)
         const questionType = classifyQuestionType(q);
         const needsRegen = needsMarkdownRegeneration(q);
+        // Self-diagnosing: flag any question that isn't machine-gradable/answerable
+        // (missing answer key, or a referenced passage/figure that isn't present).
+        const gradIssues = gradabilityIssues(q);
 
         // Canonical content — synthesize from legacy columns only if absent.
         const content = q.content || {
@@ -90,6 +94,7 @@ exportRouter.get('/json/:jobId', async (req, res, next) => {
           },
           quality_status: q.status,
           quality_score: q.quality_score,
+          ...(gradIssues.length ? { gradability_issues: gradIssues } : {}),
           ...(q.tags?.content_review_status ? { content_review_status: q.tags.content_review_status } : {}),
         };
       })
