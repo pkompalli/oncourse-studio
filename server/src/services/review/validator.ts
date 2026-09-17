@@ -116,6 +116,22 @@ Output ONLY the JSON array. No preamble, no trailing text.`;
     const coverage = (guidelines.coverage_rules as string[]) || [];
     if (coverage.length > 0) gParts.push(`Coverage rules:\n${coverage.slice(0, 4).map(c => `  • ${c}`).join('\n')}`);
 
+    // Per-format compliance checklist — only for the formats present in THIS batch,
+    // so the reviewer checks each question against its format's concrete requirements.
+    const specs = guidelines.format_specs as Record<string, Record<string, unknown>> | undefined;
+    if (specs && Object.keys(specs).length > 0) {
+      const list = (v: unknown) => (Array.isArray(v) ? (v as unknown[]).map(String) : v ? [String(v)] : []);
+      const blocks: string[] = [];
+      for (const [fmt, spec] of Object.entries(specs)) {
+        if (formatsInBatch && !formatsInBatch.has(fmt)) continue;
+        if (!spec || typeof spec !== 'object') continue;
+        const checks = [...list(spec.validation_checks), ...list(spec.structure_requirements)];
+        if (spec.gradability) checks.push(String(spec.gradability));
+        if (checks.length > 0) blocks.push(`  [${fmt}] must satisfy:\n${checks.slice(0, 8).map(c => `    • ${c}`).join('\n')}`);
+      }
+      if (blocks.length > 0) gParts.push(`PER-FORMAT COMPLIANCE (verify each question against its format's requirements; flag violations):\n${blocks.join('\n')}`);
+    }
+
     if (gParts.length > 0) {
       guidelinesContext = `\nGENERATION GUIDELINES (check compliance against these rules):\n${gParts.join('\n')}\n`;
     }
