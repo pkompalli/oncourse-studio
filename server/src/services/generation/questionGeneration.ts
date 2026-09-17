@@ -484,7 +484,13 @@ CASE STUDY RULES (MANDATORY):
       – Law / other: use that field's own reasoning progression (issue → rule → analysis → conclusion, etc.)
   • The overall "explanation" covers the reasoning thread across the full case
   • GRADABILITY IS MANDATORY — every sub-question MUST be machine-gradable. Include the COMPLETE answer scaffolding for its format (see per-format shapes below). A sub-question whose answer exists only in the rationale prose is INVALID. Never omit options/choices/rows/columns or the answer key.
-  • Number sub-questions sequentially ("number": 1..N). Reference exhibits/data explicitly in each "question".
+  • Number sub-questions sequentially ("number": 1..N).
+  • EXHIBIT REFERENCES: refer to exhibits ONLY by their visible label (e.g. "Using Exhibit 1"). NEVER use an internal id/slug (e.g. "cds-inputs-exhibit") in any candidate-visible text.
+  • CONTENT INTEGRITY (candidate-visible correctness):
+      – Each distractor's VALUE must actually equal the wrong result its rationale describes (recompute; if the rationale says "applies the recovery rate", the option value must be that number).
+      – For numeric multiple-choice, order the options ASCENDING by value.
+      – response_instructions must describe ONLY the response types that actually appear in the sub-questions (don't mention basis-point entry if there is no bps fill-in; state the exact accepted format for each numeric/date entry).
+      – Keep the case internally consistent: every sub-question must use the SAME mechanics/rules stated in the narrative/exhibits (e.g. if the case says physical settlement, all sub-questions must reflect physical settlement, not cash settlement).
 {
   "format_type": "case_study",
   "case_narrative": "<detailed scenario unfolding across time — include the specific data, documents, figures, or evidence a candidate must analyze (clinical: vitals/labs/history; accounting: financials/exhibits/schedules; law: facts/filings; etc.)>",
@@ -1173,20 +1179,30 @@ function enrichSubQuestion(sq: Record<string, unknown>, idx: number): Record<str
     columns: sq.columns,                 // matrix_grid
     blanks: sq.blanks,                   // cloze (alt shape)
     correct_order: sq.correct_order,
-    scoring: sq.scoring || null,
     stimulus: sq.stimulus,               // hot_spot
     rationale: sq.rationale || sq.explanation || '',
     reasoning_step: sq.reasoning_step || sq.cjmm_step || null,
     bloom_level: sq.bloom_level || null,
     difficulty: sq.difficulty || null,
   };
-  // Answer key — use EXACTLY ONE field per format (never emit twin keys):
-  //   sata/mcq_multi → correct_answers (array); everything else → correct_answer.
   const ft = (sq.format_type as string) || 'mcq_single';
+  const unwrap = (v: unknown): unknown =>
+    (v && typeof v === 'object' && !Array.isArray(v) && (v as Record<string, unknown>).correct_order !== undefined)
+      ? (v as Record<string, unknown>).correct_order : v;
+
+  // Answer key — EXACTLY ONE field per format (never emit twin keys):
   if (ft === 'sata' || ft === 'mcq_multi') {
     base.correct_answers = sq.correct_answers ?? sq.correct_answer ?? sq.keyed_answer ?? sq.answer;
+  } else if (ft === 'ordered_response' || ft === 'drag_drop') {
+    // The answer IS correct_order; unwrap if the model nested it under correct_answer/answer.
+    if (base.correct_order === undefined) base.correct_order = unwrap(sq.correct_answer ?? sq.answer);
+    // do NOT also emit correct_answer
   } else {
     base.correct_answer = sq.correct_answer ?? sq.keyed_answer ?? sq.answer ?? sq.correct_answers;
+  }
+  // Scoring only where partial credit is meaningful; never emit a null.
+  if (['matrix_grid', 'sata', 'mcq_multi', 'ordered_response'].includes(ft) && sq.scoring) {
+    base.scoring = sq.scoring;
   }
   // Drop keys that are genuinely absent so records stay clean.
   for (const k of Object.keys(base)) if (base[k] === undefined) delete base[k];
@@ -1410,7 +1426,10 @@ async function insertSubjectQuestions(
       content,
       tags: {
         subject: q.subject as string,
-        topic: (q.topic as string) || '',
+        // For multi-topic cases, route by the case's actual topic (its first
+        // covered topic), not the generic subject-task topic (which mis-routes).
+        topic: (Array.isArray(content.topics) && (content.topics as string[])[0]) || (q.topic as string) || '',
+        ...(Array.isArray(content.topics) ? { topics: content.topics } : {}),
         blooms: (q.blooms_level as string) || '',
         difficulty: (q.difficulty as number) || 1,
         format_type: formatType,
