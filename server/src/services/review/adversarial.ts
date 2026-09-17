@@ -105,7 +105,11 @@ Flag only if one of these is true:
    f. ANSWER-KEY CORRECTNESS — verify EACH keyed answer against the exhibit facts + stated rule. In particular:
       • Date/number boundary arithmetic: recompute the keyed value and check off-by-one errors (inclusive vs exclusive boundary). E.g. "earliest date documentation may be DESTROYED" = the day AFTER the retention period ends, not the last retained day. Flag if the key is off by one.
       • Rule grounding: the answer must be gradable against a rule/threshold/fact that ACTUALLY appears in an exhibit or the narrative. Flag any sub-question whose key depends on a rule not stated in any exhibit.
-      • Cross-task consistency: two sub-questions in the same case must not apply contradictory rules (e.g. one task teaches "the 60-day documentation rule does not govern other deadlines" while another uses that same 60-day rule to judge a communication deadline). Flag the contradiction and name both sub-questions.
+      • Cross-task consistency: two sub-questions in the same case must not apply contradictory rules (e.g. one task teaches "the 60-day documentation rule does not govern other deadlines" while another uses that same 60-day rule to judge a communication deadline). Flag the contradiction and name both sub-questions. This includes MECHANICS (e.g. physical vs cash settlement) — every sub-question must reflect the mechanics stated in the narrative.
+      • Distractor ↔ rationale match: RECOMPUTE each distractor. Its displayed value MUST equal the wrong result its rationale attributes to it. Flag if the rationale says "applies the recovery rate" but the number is actually LGD-doubled, etc.
+      • Leaked slugs: candidate-visible text must reference exhibits by their LABEL ("Exhibit 1"), never an internal id/slug (e.g. "cds-inputs-exhibit"). Flag any leaked slug.
+      • response_instructions accuracy: must describe ONLY the response types actually present (no "enter basis points" if there is no bps entry) and specify the accepted numeric/date format. Flag mismatches.
+      • Numeric options must be ordered ascending by value. Flag out-of-order option sets.
 8. CONCEPT DIVERSITY — look across the entire batch:
    a. Flag questions that test the EXACT same concept/fact as another question in the batch (conceptual duplicate even if worded differently)
    b. Flag questions that are too similar in scenario/presentation (e.g., 3 questions built on the same fact pattern → suggest varying it)
