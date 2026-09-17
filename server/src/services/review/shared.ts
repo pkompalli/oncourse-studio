@@ -141,10 +141,20 @@ function referencedStimulusMissing(c: Record<string, unknown>, q: Record<string,
 export function gradabilityIssues(q: Record<string, unknown>): string[] {
   const ft = (q.format_type as string) || ((q.tags as Record<string, unknown>)?.format_type as string) || 'mcq_single';
   const c = (q.content as Record<string, unknown>) || {};
-  if (['case_study', 'task_based_simulation', 'tbs'].includes(ft)) {
+  // Grouped question — a shared stimulus feeding several sub-questions (case study,
+  // TBS, reading passage set, or ANY future shared-stimulus format). Detected by
+  // SHAPE (presence of sub_questions), not a hardcoded slug list, so new grouped
+  // formats work with no code. The legacy slug list is kept only so a grouped
+  // format that arrived with an EMPTY sub_questions array still fails loudly.
+  const isGrouped = Array.isArray(c.sub_questions) || ['case_study', 'task_based_simulation', 'tbs', 'passage_set'].includes(ft);
+  if (isGrouped) {
     const subs = (c.sub_questions as Array<Record<string, unknown>>) || [];
-    if (subs.length === 0) return ['Case has no machine-readable sub_questions'];
-    return subs.flatMap((sq, i) => subQuestionIssues(sq, (sq.number as number) ?? i + 1));
+    if (subs.length === 0) return ['Grouped question has no machine-readable sub_questions'];
+    const out = subs.flatMap((sq, i) => subQuestionIssues(sq, (sq.number as number) ?? i + 1));
+    // The shared stimulus the sub-questions depend on must be present.
+    const hasStimulus = _has(c.passage) || _has(c.case_narrative) || _has(c.scenario) || (Array.isArray(c.exhibits) && c.exhibits.length > 0);
+    if (!hasStimulus) out.push('Grouped question is missing its shared stimulus (passage / narrative / exhibits)');
+    return out;
   }
   return [...standaloneIssues(ft, c, q), ...referencedStimulusMissing(c, q)];
 }
@@ -226,7 +236,20 @@ function formatOneQuestion(q: Record<string, unknown>, i: number): string {
 
   let bodyStr = '';
 
-  switch (formatType) {
+  // Shape-driven grouped serialization: ANY question carrying sub_questions (case
+  // study, TBS, reading passage set, or any future shared-stimulus format) is
+  // serialized as shared stimulus + each sub-question — so the reviewer never sees
+  // a grouped question "blind" (previously TBS fell through and rendered nothing).
+  const groupedSubs = Array.isArray(content?.sub_questions) ? (content!.sub_questions as Array<Record<string, unknown>>) : null;
+  if (groupedSubs) {
+    const narrative = (content?.case_narrative as string) || (content?.scenario as string) || '';
+    const exhibits = Array.isArray(content?.exhibits) ? (content!.exhibits as Array<Record<string, unknown>>) : [];
+    const exhibitStr = exhibits.length
+      ? '\nExhibits:\n' + exhibits.map((e, k) => `  [${asText(e.label) || `Exhibit ${k + 1}`}]${e.title ? ` ${asText(e.title)}` : ''}\n${asText(e.content)}`).join('\n')
+      : '';
+    const subStr = groupedSubs.map((sq, j) => formatSubQuestion(sq, j)).join('\n');
+    bodyStr = `${narrative ? `Scenario/Narrative: ${narrative}\n` : ''}${exhibitStr}\nSub-questions (${groupedSubs.length}):\n${subStr}`;
+  } else switch (formatType) {
     case 'mcq_single': {
       const opts = content?.options || q.options;
       let optsStr = '';

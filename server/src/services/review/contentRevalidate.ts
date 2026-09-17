@@ -36,8 +36,12 @@ function grabJson(raw: string): Record<string, unknown> | null {
   try { return JSON.parse(m[0]); } catch { return null; }
 }
 
+// Grouped/shared-stimulus question — detected by SHAPE (sub_questions present),
+// not a hardcoded slug list, so case studies, TBS, reading passage sets, and any
+// future grouped format are all repaired through the case-audit path.
 const isCase = (q: Record<string, any>) =>
-  ['case_study', 'task_based_simulation', 'tbs'].includes(q.tags?.format_type || q.format_type);
+  Array.isArray(q.content?.sub_questions) ||
+  ['case_study', 'task_based_simulation', 'tbs', 'passage_set'].includes(q.tags?.format_type || q.format_type);
 
 const CASE_AUDIT = `Audit this case study for CONTENT correctness; fix genuine errors ONLY (preserve good content, keys, and gradability):
 1) LEAKED SLUGS → reference exhibits by LABEL ("Exhibit 1") only.
@@ -49,9 +53,11 @@ const CASE_AUDIT = `Audit this case study for CONTENT correctness; fix genuine e
 
 async function reviewCaseFull(q: Record<string, any>): Promise<{ nc: Record<string, unknown>; changed: boolean } | null> {
   const c = q.content || {};
+  const sharedStimulus = c.passage
+    ? `PASSAGE:${String(c.passage).slice(0, 4000)}`
+    : `EXHIBITS:${JSON.stringify(c.exhibits || [])}\nNARRATIVE:${String(c.case_narrative || c.scenario || '').slice(0, 1200)}`;
   const prompt = `${CASE_AUDIT}
-EXHIBITS:${JSON.stringify(c.exhibits || [])}
-NARRATIVE:${String(c.case_narrative || '').slice(0, 1200)}
+${sharedStimulus}
 RESPONSE_INSTRUCTIONS:${c.response_instructions || ''}
 SUB_QUESTIONS:${JSON.stringify(c.sub_questions || [])}
 Return ONLY JSON {"changed":bool,"exhibits":[...],"sub_questions":[...],"response_instructions":"..."}.`;
@@ -96,12 +102,14 @@ async function reviewStandalone(q: Record<string, any>): Promise<{ nc: Record<st
 2) NUMERIC options ascending by value (relabel letters + correct answer to match).
 3) No leaked internal ids/slugs in candidate-visible text.
 4) The correct answer must be factually right and unambiguous.
-STEM:${c.stem || q.question || ''}
+${c.passage ? `PASSAGE:${String(c.passage).slice(0, 4000)}\n` : ''}STEM:${c.stem || q.question || ''}
 OPTIONS:${JSON.stringify(c.options || q.options)}
 ANSWER:${JSON.stringify(c.answer || q.correct_option)}
 EXPLANATION:${String(c.explanation || q.explanation || '').slice(0, 900)}
 Return ONLY JSON {"changed":bool,"stem":"...","options":[{"key","text"}],"answer":{...},"explanation":"..."}.`;
-  const r = await brCall(MODELS.AUDITOR, '', prompt, { maxTokens: 3500 });
+  // 8000 (not 3500) so verbose items — e.g. LSAT parallel-reasoning with long
+  // analytical options — don't truncate mid-JSON and fall to manual-check.
+  const r = await brCall(MODELS.AUDITOR, '', prompt, { maxTokens: 8000 });
   const p = grabJson(r.content);
   if (!p) return null;
   const nc = { ...c, stem: p.stem ?? c.stem, options: p.options ?? c.options, answer: p.answer ?? c.answer, explanation: p.explanation ?? c.explanation };

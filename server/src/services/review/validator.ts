@@ -6,6 +6,7 @@
 import { orCall, MODELS } from '../llm/openrouter.js';
 import type { ContentPart } from '../llm/openrouter.js';
 import { extractJsonArray, formatQuestionsForReviewWithImages, gradabilityIssues } from './shared.js';
+import { schemaErrorsFor } from '../generation/schemaValidate.js';
 
 // ── Validator Prompt (V1 lines 5803-5857, verbatim) ──
 
@@ -291,12 +292,11 @@ export async function runValidatorBatch(
       || ((q.tags as Record<string, unknown>)?.format_type as string)
       || 'mcq_single';
     formatsInBatch.add(ft);
-    // Also check for hot_spot sub-questions inside case studies
-    if (ft === 'case_study') {
-      const subs = ((q.content as Record<string, unknown>)?.sub_questions as Array<Record<string, unknown>>) || [];
-      for (const s of subs) {
-        if (s.format_type === 'hot_spot') formatsInBatch.add('hot_spot');
-      }
+    // Any grouped question (case study, TBS, passage set, …) — detected by shape —
+    // surfaces its sub-question formats so their format-specific checks are included.
+    const subs = ((q.content as Record<string, unknown>)?.sub_questions as Array<Record<string, unknown>>) || [];
+    for (const s of subs) {
+      if (s.format_type) formatsInBatch.add(s.format_type as string);
     }
   }
 
@@ -343,19 +343,25 @@ export async function runValidatorBatch(
     }
   }
 
-  // HARD GATE: a case_study/TBS whose sub-questions aren't machine-gradable must
-  // never pass, regardless of what the LLM scored. Deterministic override.
+  // HARD GATE (deterministic override, regardless of the LLM score):
+  //  1) gradability — an ungradable question can never pass.
+  //  2) schema — a question that violates its format's materialized content_schema
+  //     (the contract the guidelines step fixed) can never pass.
   for (let i = 0; i < questions.length; i++) {
-    const issues = gradabilityIssues(questions[i]);
+    const q = questions[i];
+    const fmt = (q.format_type as string) || ((q.tags as Record<string, unknown>)?.format_type as string) || 'mcq_single';
+    const gradeIssues = gradabilityIssues(q);
+    const schemaIssues = schemaErrorsFor(guidelines, fmt, q.content).map((s) => `schema: ${s}`);
+    const issues = [...gradeIssues, ...schemaIssues];
     if (issues.length === 0) continue;
     const r = results.find((x) => (x.question_number as number) === i + 1) || results[i];
     if (!r) continue;
     const prior = (r.overall_accuracy_score as number) ?? 5;
     r.overall_accuracy_score = Math.min(prior, 3);
     r.needs_revision = true;
-    r.case_study_issues = [ ...((r.case_study_issues as string[]) || []), ...issues.map((s) => `NOT GRADABLE — ${s}`) ];
-    r.changes_required = [ ...((r.changes_required as string[]) || []), ...issues.map((s) => `Fix gradability: ${s}`) ];
-    r.summary = `Ungradable sub-question(s): ${issues.slice(0, 3).join('; ')}${issues.length > 3 ? '…' : ''}`;
+    r.case_study_issues = [ ...((r.case_study_issues as string[]) || []), ...issues.map((s) => `NOT COMPLIANT — ${s}`) ];
+    r.changes_required = [ ...((r.changes_required as string[]) || []), ...issues.map((s) => `Fix: ${s}`) ];
+    r.summary = `Structural/gradability issue(s): ${issues.slice(0, 3).join('; ')}${issues.length > 3 ? '…' : ''}`;
   }
 
   return results;
