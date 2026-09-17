@@ -1165,10 +1165,20 @@ async function getFormatId(slug: string): Promise<string | null> {
 // Preserve the COMPLETE, machine-gradable structure of a case_study / TBS
 // sub-question — never drop the fields a grader/renderer needs per format
 // (matrix rows+columns, cloze choices, the answer key, item order, etc.).
+// Normalize any leaked exhibit slug ("helix-exhibit-1", "cds-inputs-exhibit")
+// to the candidate-visible label ("Exhibit 1"). Belt-and-suspenders: the prompt
+// forbids slugs and the reviewer flags them, but this guarantees clean data.
+function deslugExhibits(s: unknown): unknown {
+  if (typeof s !== 'string') return s;
+  return s
+    .replace(/\b(?:[a-z0-9]+[-_])*exhibit[-_](\d+)\b/gi, 'Exhibit $1')
+    .replace(/\b(?:[a-z0-9]+[-_])+exhibit\b/gi, 'Exhibit 1');
+}
+
 function enrichSubQuestion(sq: Record<string, unknown>, idx: number): Record<string, unknown> {
   const base: Record<string, unknown> = {
     number: sq.number ?? idx + 1,
-    question: sq.question || sq.prompt || sq.stem || '',
+    question: deslugExhibits(sq.question || sq.prompt || sq.stem || ''),
     format_type: sq.format_type || 'mcq_single',
     // choice/answer scaffolding across all formats
     options: sq.options,                 // mcq_single / sata
@@ -1180,7 +1190,7 @@ function enrichSubQuestion(sq: Record<string, unknown>, idx: number): Record<str
     blanks: sq.blanks,                   // cloze (alt shape)
     correct_order: sq.correct_order,
     stimulus: sq.stimulus,               // hot_spot
-    rationale: sq.rationale || sq.explanation || '',
+    rationale: deslugExhibits(sq.rationale || sq.explanation || ''),
     reasoning_step: sq.reasoning_step || sq.cjmm_step || null,
     bloom_level: sq.bloom_level || null,
     difficulty: sq.difficulty || null,
