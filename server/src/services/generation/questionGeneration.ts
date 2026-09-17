@@ -956,11 +956,52 @@ function parseQuestions(raw: string): Record<string, unknown>[] {
   let text = raw;
   if (text.includes('```json')) text = text.split('```json')[1].split('```')[0];
   else if (text.includes('```')) text = text.split('```')[1].split('```')[0];
+
+  // Fast path: a complete array parses cleanly.
   const match = text.match(/\[[\s\S]*\]/);
-  if (match) text = match[0];
-  const qs = JSON.parse(text.trim());
-  if (!Array.isArray(qs)) throw new Error('non-list');
-  return qs;
+  if (match) {
+    try {
+      const qs = JSON.parse(match[0].trim());
+      if (Array.isArray(qs)) return qs;
+    } catch { /* fall through to salvage */ }
+  }
+
+  // Salvage path: the batch was truncated mid-object (large case studies overflow
+  // the token cap). Recover every COMPLETE top-level {...} object and drop only
+  // the truncated tail — so we keep the questions that did finish instead of 0.
+  const salvaged = salvageQuestionObjects(text);
+  if (salvaged.length > 0) {
+    console.warn(`  [Gen] Salvaged ${salvaged.length} complete question(s) from a truncated/malformed batch`);
+    return salvaged;
+  }
+  throw new Error('no parseable questions');
+}
+
+/** Extract complete top-level JSON objects from a (possibly truncated) array. */
+function salvageQuestionObjects(text: string): Record<string, unknown>[] {
+  const start = text.indexOf('[');
+  const body = start >= 0 ? text.slice(start + 1) : text;
+  const out: Record<string, unknown>[] = [];
+  let depth = 0, objStart = -1, inStr = false, esc = false;
+  for (let i = 0; i < body.length; i++) {
+    const ch = body[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (ch === '\\') esc = true;
+      else if (ch === '"') inStr = false;
+      continue;
+    }
+    if (ch === '"') { inStr = true; continue; }
+    if (ch === '{') { if (depth === 0) objStart = i; depth++; }
+    else if (ch === '}') {
+      depth--;
+      if (depth === 0 && objStart >= 0) {
+        try { out.push(JSON.parse(body.slice(objStart, i + 1))); } catch { /* skip bad object */ }
+        objStart = -1;
+      }
+    }
+  }
+  return out;
 }
 
 // ── Generate questions for one subject (V1 lines 1305-1446) ──
@@ -1028,7 +1069,7 @@ async function professorGenerateQuestions(
     try {
       const prompt = buildProfessorPrompt(batchTask, courseName);
       console.log(`  [Gen] ${subject} batch ${b + 1}/${numBatches}: sending prompt (${prompt.length} chars)...`);
-      const response = await orCall(MODELS.GENERATOR, '', prompt, { maxTokens: 8000, temperature: 0.7 });
+      const response = await orCall(MODELS.GENERATOR, '', prompt, { maxTokens: 20000, temperature: 0.7 });
       console.log(`  [Gen] ${subject} batch ${b + 1}: got response (${response.content.length} chars)`);
       let qs: Record<string, unknown>[];
       try {
@@ -1037,7 +1078,7 @@ async function professorGenerateQuestions(
         console.error(`  [Gen] ${subject} batch ${b + 1}: PARSE FAILED — ${parseErr}`);
         console.error(`  [Gen] Response preview: ${response.content.slice(0, 300)}...`);
         // Retry with lower temperature
-        const response2 = await orCall(MODELS.GENERATOR, '', prompt, { maxTokens: 8000, temperature: 0.5 });
+        const response2 = await orCall(MODELS.GENERATOR, '', prompt, { maxTokens: 20000, temperature: 0.5 });
         try {
           qs = parseQuestions(response2.content);
           console.log(`  [Gen] ${subject} batch ${b + 1}: retry succeeded — ${qs.length} Qs parsed`);
@@ -1051,7 +1092,7 @@ async function professorGenerateQuestions(
       // Retry if too few questions
       if (qs.length < batchSize) {
         console.log(`  [Gen] ${subject} batch ${b + 1}: only ${qs.length}/${batchSize}, retrying...`);
-        const response2 = await orCall(MODELS.GENERATOR, '', prompt, { maxTokens: 8000, temperature: 0.5 });
+        const response2 = await orCall(MODELS.GENERATOR, '', prompt, { maxTokens: 20000, temperature: 0.5 });
         try {
           const qs2 = parseQuestions(response2.content);
           if (qs2.length > qs.length) qs = qs2;
