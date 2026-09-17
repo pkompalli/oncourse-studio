@@ -129,17 +129,39 @@ IMPORTANT:
 
 Return ONLY the JSON object. No preamble, no markdown fences.`;
 
-  const response = await orCall(MODELS.STRUCTURE, '', prompt, {
-    maxTokens: 6000,
-    temperature: 0.3,
-  });
-
-  let raw = response.content.trim();
-  if (raw.includes('```json')) raw = raw.split('```json')[1].split('```')[0].trim();
-  else if (raw.includes('```')) raw = raw.split('```')[1].split('```')[0].trim();
-
-  const guidelines = JSON.parse(raw);
+  const guidelines = await callAndParseJson(prompt, 0.3);
   return guidelines;
+}
+
+/** Extract a JSON object from an LLM response, tolerating markdown fences. */
+function extractJsonObject(raw: string): string {
+  let t = raw.trim();
+  if (t.includes('```json')) t = t.split('```json')[1].split('```')[0].trim();
+  else if (t.includes('```')) t = t.split('```')[1].split('```')[0].trim();
+  const first = t.indexOf('{');
+  const last = t.lastIndexOf('}');
+  if (first >= 0 && last > first) t = t.slice(first, last + 1);
+  return t;
+}
+
+/**
+ * Call the structure model and parse a JSON object. The guidelines JSON is
+ * large (per-format rules, distributions), so a low token cap truncates it into
+ * "Unterminated string in JSON". Generous cap + one retry that asks for a
+ * COMPLETE, more concise object.
+ */
+async function callAndParseJson(prompt: string, temperature: number): Promise<Record<string, unknown>> {
+  const r1 = await orCall(MODELS.STRUCTURE, '', prompt, { maxTokens: 16000, temperature });
+  try {
+    return JSON.parse(extractJsonObject(r1.content));
+  } catch {
+    const r2 = await orCall(
+      MODELS.STRUCTURE, '',
+      `${prompt}\n\nIMPORTANT: Return a COMPLETE, valid JSON object. Keep prose fields concise so the JSON is not truncated. Do not stop mid-string.`,
+      { maxTokens: 16000, temperature: Math.max(0, temperature - 0.2) }
+    );
+    return JSON.parse(extractJsonObject(r2.content));
+  }
 }
 
 export async function refineGuidelines(
@@ -172,18 +194,9 @@ If the request doesn't require changes (just a question), return:
 
 Return ONLY valid JSON. No preamble, no markdown fences.`;
 
-  const res = await orCall(MODELS.STRUCTURE, '', prompt, {
-    maxTokens: 6000,
-    temperature: 0.3,
-  });
-
-  let raw = res.content.trim();
-  if (raw.includes('```json')) raw = raw.split('```json')[1].split('```')[0].trim();
-  else if (raw.includes('```')) raw = raw.split('```')[1].split('```')[0].trim();
-
-  const result = JSON.parse(raw);
+  const result = await callAndParseJson(prompt, 0.3);
   return {
-    updated_guidelines: result.updated_guidelines || null,
-    response: result.response || 'Guidelines updated.',
+    updated_guidelines: (result.updated_guidelines as Record<string, unknown>) || null,
+    response: (result.response as string) || 'Guidelines updated.',
   };
 }
