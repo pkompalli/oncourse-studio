@@ -1,0 +1,201 @@
+/**
+ * Format Contract Registry — the SINGLE SOURCE OF TRUTH for the syntax,
+ * structure, and gradability requirements of every question format.
+ *
+ * The generator (buildFormatSchema), the gradability gate (review/shared.ts),
+ * and the guidelines engine (guidelines.ts) must all agree on what a well-formed
+ * question of each format looks like. This registry states that contract once, in
+ * one place, so the guidelines document can be seeded with the EXACT structural
+ * requirements (rather than the LLM re-inventing them as prose each run) and the
+ * validator can check compliance against the same contract the generator targets.
+ *
+ * The guidelines engine layers EXAM-SPECIFIC interpretation on top of these
+ * course-agnostic contracts (e.g. "LSAT reading-comprehension mcq_single MUST
+ * include a 200–450 word passage"; "CPA TBS exhibits are documents, never images").
+ */
+
+export type FormatContract = {
+  slug: string;
+  label: string;
+  /** Structural fields the stored record MUST contain (the "shape"). */
+  structure: string;
+  /** What makes a response of this format machine-gradable (the answer key shape). */
+  gradability: string;
+  /** Stem / option / labeling conventions the writer must follow. */
+  syntax: string[];
+  /** Whether this format may carry a shared stimulus the stem depends on. */
+  stimulusRule?: string;
+};
+
+export const FORMAT_CONTRACTS: Record<string, FormatContract> = {
+  mcq_single: {
+    slug: 'mcq_single',
+    label: 'Single Best Answer MCQ',
+    structure: 'stem (question); options[] (each {key,text}); answer.key = exactly one option letter; explanation.',
+    gradability: 'answer.key must be a single option letter that exists in options[].',
+    syntax: [
+      'One unambiguously best option; the rest are plausible distractors of similar length/category.',
+      'No "All/None of the above" unless the real exam uses them.',
+    ],
+    stimulusRule: 'If the stem refers to a reading passage/excerpt, the FULL passage MUST be in content.passage. Never reference "the passage" without including it. If it refers to a figure, set is_image_question=true or describe the data inline.',
+  },
+  mcq_multi: {
+    slug: 'mcq_multi',
+    label: 'Multiple Response MCQ',
+    structure: 'stem; options[]; answer.keys[] = the set of correct option letters; explanation.',
+    gradability: 'answer.keys[] must be a non-empty set of letters, each present in options[].',
+    syntax: ['Stem must clearly state that more than one answer applies.'],
+    stimulusRule: 'Same passage/figure rule as mcq_single.',
+  },
+  sata: {
+    slug: 'sata',
+    label: 'Select All That Apply',
+    structure: 'stem (states "Select all that apply"); options[] (5–6 typical); answer.keys[] = all correct letters; explanation.',
+    gradability: 'answer.keys[] non-empty, each present in options[]. Partial credit per-option ("scoring":"partial") allowed.',
+    syntax: ['Stem must explicitly say "Select all that apply".', 'Each option independently true or false — no interdependence.'],
+    stimulusRule: 'Same passage/figure rule as mcq_single.',
+  },
+  ordered_response: {
+    slug: 'ordered_response',
+    label: 'Ordered Response / Drag-and-Drop Sequence',
+    structure: 'stem; items[] (the elements to arrange); correct_order = array of 1-based item indices in the CORRECT sequence (e.g. [2,4,1,3] = item 2 first); explanation.',
+    gradability: 'correct_order must be a permutation of 1..items.length. NOT an item→position map.',
+    syntax: ['Items must have a single defensible ordering.'],
+  },
+  drag_drop: {
+    slug: 'drag_drop',
+    label: 'Drag-and-Drop Sequence',
+    structure: 'Same as ordered_response: items[] + correct_order (1-based indices).',
+    gradability: 'correct_order must be a permutation of 1..items.length.',
+    syntax: ['Single defensible ordering.'],
+  },
+  fill_blank: {
+    slug: 'fill_blank',
+    label: 'Fill in the Blank / Calculation',
+    structure: 'stem; answer.value (the exact numeric/text answer); answer.unit (if applicable); answer.acceptable_range (if numeric); explanation shows the calculation.',
+    gradability: 'answer.value must be an explicit structured value — NEVER only stated in the explanation prose.',
+    syntax: ['Ask for one specific value.', 'State the required unit/format in the stem when relevant.'],
+  },
+  hot_spot: {
+    slug: 'hot_spot',
+    label: 'Hot Spot (click-to-select)',
+    structure: 'stem; stimulus{type:"text_targets"|"image_regions", targets/regions each with a lowercase-slug id}; answer.correct_ids[]; rationale keyed by target id.',
+    gradability: 'answer.correct_ids[] non-empty; every id must exist in stimulus targets/regions. FORBIDDEN: answer.region/label/landmark.',
+    syntax: ['≥2 targets.', 'text_targets for discrete text elements; image_regions ONLY for genuine photos/figures.', 'scoring: dichotomous (single) | plus_minus (multiple).'],
+    stimulusRule: 'The stimulus (targets or image) is REQUIRED — it is what the candidate clicks.',
+  },
+  matrix_grid: {
+    slug: 'matrix_grid',
+    label: 'Matrix / Grid Classification',
+    structure: 'stem; row_headers[] (items to classify); column_headers[] (categories); correct_cells[] ({row,col} indices) OR a row→column map; explanation.',
+    gradability: 'Both row_headers and column_headers must be present, and one correct column per row. Missing rows/columns = ungradable.',
+    syntax: ['Every row gets exactly one (or a defined number of) correct column(s).'],
+  },
+  cloze_dropdown: {
+    slug: 'cloze_dropdown',
+    label: 'Cloze with Dropdowns',
+    structure: 'stem with [Blank N] / [[BLANKn]] markers; blanks[] each {id, options[], correct} (or choices{} + correct{}); explanation.',
+    gradability: 'Each blank must have an options list AND a correct value drawn from that list.',
+    syntax: ['Every blank marker in the stem must have a matching blank entry, and vice-versa.'],
+  },
+  emq: {
+    slug: 'emq',
+    label: 'Extended Matching Questions',
+    structure: 'theme; option_list[] (shared lettered options, typically 5–10); scenarios[] each {stem, correct_answer letter}; explanation per scenario.',
+    gradability: 'Each scenario\'s correct_answer must be a letter present in option_list. Option list shared across all scenarios.',
+    syntax: ['All options belong to one homogeneous theme.', 'Each scenario resolves to exactly one option.'],
+  },
+  case_study: {
+    slug: 'case_study',
+    label: 'Case Study (shared narrative + sub-questions)',
+    structure: 'case_narrative (with the data/evidence to analyze); topics[]; response_instructions; sub_questions[] (each a fully-formed question of its own format_type with its own answer key, rationale, and reasoning_step); overall explanation.',
+    gradability: 'EVERY sub-question must carry the COMPLETE machine-readable answer scaffolding for ITS format (options/rows/columns/choices/items + a structured answer key). A sub-answer that exists only in rationale prose is INVALID.',
+    syntax: [
+      'Exactly 6 sub-questions; at least 3 different sub-question format_types.',
+      'reasoning_step per sub-question using THIS exam\'s discipline taxonomy (no clinical steps on non-clinical exams).',
+      'Reference exhibits by visible LABEL only — never an internal id/slug.',
+      'Any rule/fact a key depends on must appear in the narrative or an exhibit.',
+    ],
+    stimulusRule: 'The narrative (and any exhibits) is the shared stimulus; every sub-question must be answerable from it.',
+  },
+  task_based_simulation: {
+    slug: 'task_based_simulation',
+    label: 'Task-Based Simulation (TBS)',
+    structure: 'question (directions/memo); exhibits[] (2–5 documents, each {label,title,type,content} where content is MARKDOWN — tables for numeric data); sub_questions[] (4–8 tasks referencing exhibits by label, each with its format\'s answer key + rationale + reasoning_step); response_instructions; explanation.',
+    gradability: 'Each task carries its format\'s complete answer key. Every fact a task needs must actually appear in an exhibit\'s markdown.',
+    syntax: [
+      'NOT an image question (is_image_question=false); exhibit data is MARKDOWN, never an image.',
+      'Tasks reference exhibits by label ("Using Exhibit 1…").',
+      'Mix realistic task types (fill_blank, cloze_dropdown, matrix_grid, mcq_single, emq, ordered_response).',
+    ],
+    stimulusRule: 'Exhibits are the shared stimulus and are REQUIRED, embedded as markdown.',
+  },
+};
+
+// tbs is an alias for task_based_simulation.
+FORMAT_CONTRACTS.tbs = { ...FORMAT_CONTRACTS.task_based_simulation, slug: 'tbs' };
+
+/** Resolve a set of (possibly messy) format slugs to their contracts, de-duped. */
+export function contractsFor(slugs: Iterable<string>): FormatContract[] {
+  const seen = new Set<string>();
+  const out: FormatContract[] = [];
+  for (const raw of slugs) {
+    const slug = String(raw || '').toLowerCase().trim();
+    const c = FORMAT_CONTRACTS[slug];
+    if (c && !seen.has(c.slug === 'tbs' ? 'task_based_simulation' : c.slug)) {
+      seen.add(c.slug === 'tbs' ? 'task_based_simulation' : c.slug);
+      out.push(c);
+    }
+  }
+  return out;
+}
+
+/** Render one contract as a compact, prompt-ready text block. */
+export function renderContract(c: FormatContract): string {
+  const lines = [
+    `### ${c.slug} — ${c.label}`,
+    `- STRUCTURE: ${c.structure}`,
+    `- GRADABILITY: ${c.gradability}`,
+    `- SYNTAX: ${c.syntax.join(' ')}`,
+  ];
+  if (c.stimulusRule) lines.push(`- STIMULUS: ${c.stimulusRule}`);
+  return lines.join('\n');
+}
+
+/** Render the contracts for a set of formats (falls back to the core set). */
+export function renderContractsForPrompt(slugs: Iterable<string>): string {
+  let contracts = contractsFor(slugs);
+  if (contracts.length === 0) contracts = contractsFor(['mcq_single', 'sata', 'case_study']);
+  return contracts.map(renderContract).join('\n\n');
+}
+
+/**
+ * Best-effort extraction of the format slugs an exam uses, tolerating the several
+ * shapes the exam-format spec can take across courses.
+ */
+export function extractFormatSlugs(examFormat: Record<string, unknown> | undefined): string[] {
+  if (!examFormat) return [];
+  const out: string[] = [];
+  const pushFrom = (arr: unknown, keys: string[]) => {
+    if (!Array.isArray(arr)) return;
+    for (const el of arr) {
+      if (typeof el === 'string') { out.push(el); continue; }
+      if (el && typeof el === 'object') {
+        for (const k of keys) {
+          const v = (el as Record<string, unknown>)[k];
+          if (typeof v === 'string') { out.push(v); break; }
+        }
+      }
+    }
+  };
+  pushFrom(examFormat.format_distribution, ['format', 'slug', 'type']);
+  pushFrom(examFormat.question_formats, ['slug', 'type', 'format']);
+  pushFrom(examFormat.question_type_allocations, ['slug', 'type', 'format']);
+  pushFrom(examFormat.formats, ['slug', 'type', 'format']);
+  // Also scan per-subject allocations if present.
+  const subjects = examFormat.subjects || examFormat.subject_distribution;
+  if (Array.isArray(subjects)) {
+    for (const s of subjects) pushFrom((s as Record<string, unknown>)?.question_type_allocations, ['slug', 'type', 'format']);
+  }
+  return [...new Set(out.map((s) => s.toLowerCase().trim()).filter(Boolean))];
+}

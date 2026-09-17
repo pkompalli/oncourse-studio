@@ -672,6 +672,39 @@ function buildGuidelinesSection(guidelines?: Record<string, unknown>): string {
     parts.push(`AVOID:\n${anti.map(a => `  - ${a}`).join('\n')}`);
   }
 
+  // Per-format specs — the authoritative per-format syntax/structure/gradability
+  // the generator must satisfy for THIS exam (interpreted from the format contracts).
+  const specs = guidelines.format_specs as Record<string, Record<string, unknown>> | undefined;
+  if (specs && Object.keys(specs).length > 0) {
+    const blocks: string[] = [];
+    for (const [fmt, spec] of Object.entries(specs)) {
+      if (!spec || typeof spec !== 'object') continue;
+      const lines: string[] = [`  [${fmt}]`];
+      if (spec.when_to_use) lines.push(`    When: ${spec.when_to_use}`);
+      const list = (v: unknown) => (Array.isArray(v) ? (v as unknown[]).map(String) : v ? [String(v)] : []);
+      for (const item of list(spec.syntax_rules)) lines.push(`    Syntax: ${item}`);
+      for (const item of list(spec.structure_requirements)) lines.push(`    Structure: ${item}`);
+      for (const item of list(spec.content_rules)) lines.push(`    Content: ${item}`);
+      if (spec.gradability) lines.push(`    Gradability: ${spec.gradability}`);
+      if (spec.difficulty_target) lines.push(`    Difficulty: ${spec.difficulty_target}`);
+      blocks.push(lines.join('\n'));
+    }
+    if (blocks.length > 0) parts.push(`PER-FORMAT REQUIREMENTS (MANDATORY — match exactly):\n${blocks.join('\n')}`);
+  }
+
+  // Image guidelines
+  const img = guidelines.image_guidelines as Record<string, unknown> | undefined;
+  if (img && (img.percentage || img.when_required)) {
+    const bits = [img.percentage != null ? `~${img.percentage}% of questions` : '', img.when_required ? `when: ${img.when_required}` : ''].filter(Boolean);
+    if (bits.length) parts.push(`Images: ${bits.join('; ')}`);
+  }
+
+  // Coverage rules
+  const coverage = (guidelines.coverage_rules as string[]) || [];
+  if (coverage.length > 0) {
+    parts.push(`Coverage rules:\n${coverage.map(c => `  - ${c}`).join('\n')}`);
+  }
+
   // Custom rules
   const custom = (guidelines.custom_rules as string[]) || [];
   if (custom.length > 0) {
