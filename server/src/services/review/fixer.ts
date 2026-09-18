@@ -64,36 +64,39 @@ Example output format:
 
 Return ONLY valid JSON. No preamble, no markdown fences.`;
 
-  try {
-    const response = await orCall(MODELS.FIXER, '', prompt, {
-      maxTokens: 4000,
-      temperature: 0.2,
-    });
+  // The fixer must restate the ENTIRE question, so a grouped question (case study
+  // with 6 sub-questions, ~14k chars) needs far more than the old 4000-token cap —
+  // it truncated mid-JSON, JSON.parse threw, and the repair was silently abandoned,
+  // leaving the question flagged with no explanation. Generous cap + one retry.
+  const MAX_TOKENS = 16000;
+  let lastErr = '';
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const response = await orCall(
+        MODELS.FIXER,
+        '',
+        attempt === 1
+          ? prompt
+          : `${prompt}\n\nIMPORTANT: Return the COMPLETE JSON object — every field of the question, including every sub_question. Do NOT truncate or elide anything.`,
+        { maxTokens: MAX_TOKENS, temperature: attempt === 1 ? 0.2 : 0.1 }
+      );
 
-    let raw = response.content.trim();
+      let raw = response.content.trim();
+      if (raw.includes('```json')) raw = raw.split('```json')[1].split('```')[0].trim();
+      else if (raw.includes('```')) raw = raw.split('```')[1].split('```')[0].trim();
 
-    // Strip markdown fences (V1 pattern)
-    if (raw.includes('```json')) {
-      raw = raw.split('```json')[1].split('```')[0].trim();
-    } else if (raw.includes('```')) {
-      raw = raw.split('```')[1].split('```')[0].trim();
+      const wrapper = JSON.parse(raw);
+      if (typeof wrapper === 'object' && wrapper.question) {
+        return { fixed: true, question: wrapper.question, changesApplied: wrapper.changes_applied || [] };
+      }
+      return { fixed: true, question: wrapper, changesApplied: [] };
+    } catch (e) {
+      lastErr = e instanceof Error ? e.message : 'Fix failed';
+      console.warn(`  [Fixer] attempt ${attempt}/2 failed to parse fixed question: ${lastErr}`);
     }
-
-    const wrapper = JSON.parse(raw);
-    if (typeof wrapper === 'object' && wrapper.question) {
-      return {
-        fixed: true,
-        question: wrapper.question,
-        changesApplied: wrapper.changes_applied || [],
-      };
-    }
-
-    // Fallback: model returned question directly
-    return { fixed: true, question: wrapper, changesApplied: [] };
-  } catch (e) {
-    console.error(`  [Fixer] Error fixing question: ${e}`);
-    return { fixed: false, error: e instanceof Error ? e.message : 'Fix failed' };
   }
+  console.error(`  [Fixer] GAVE UP after 2 attempts — question left unrepaired: ${lastErr}`);
+  return { fixed: false, error: lastErr };
 }
 
 /**
