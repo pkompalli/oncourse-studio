@@ -147,6 +147,109 @@ export const FORMAT_CONTRACTS: Record<string, FormatContract> = {
 // tbs is an alias for task_based_simulation.
 FORMAT_CONTRACTS.tbs = { ...FORMAT_CONTRACTS.task_based_simulation, slug: 'tbs' };
 
+FORMAT_CONTRACTS.constructed_response = {
+  slug: 'constructed_response',
+  label: 'Constructed Response / Essay (human-scored)',
+  structure: 'prompt (the writing task / question) + optional sample_response and scoring_rubric. There is no machine answer key — this format is scored by a human/rubric, not auto-graded.',
+  gradability: 'Not auto-gradable by design. A prompt is required; no answer key is expected.',
+  syntax: ['State the task clearly.', 'Provide any source material the writer must respond to.'],
+};
+
+FORMAT_CONTRACTS.performance_task = {
+  slug: 'performance_task',
+  label: 'Performance Task (source materials + extended constructed work product)',
+  structure: 'prompt (the assigned lawyering/professional task, e.g. draft/analyze/advise) + exhibits[] (the supplied source materials — client file, legal authorities, data — each {label,title,type,content:MARKDOWN}) + scoring_rubric + optional sample_response. The response is an extended constructed work product, human-scored — there is no machine answer key.',
+  gradability: 'Not auto-gradable by design. A prompt is required; exhibits carry the source materials; scoring is by rubric.',
+  syntax: [
+    'State the task and deliverable clearly (what the examinee must produce).',
+    'Provide the source materials as markdown exhibits referenced by the task.',
+    'Include a scoring_rubric describing what a strong response demonstrates.',
+  ],
+  stimulusRule: 'The source materials (exhibits) are the shared stimulus the task operates on and should be embedded as markdown.',
+};
+
+// ── Canonical format slugs ──────────────────────────────────────────────────
+// Analysis/guidelines LLMs invent slug variants (mcq_single_lr, mcq_shared_stimulus,
+// reading_comprehension, argumentative_writing…). Map ANY such slug onto the fixed
+// registry so every declared format resolves to a canonical question type with a
+// fixed schema. Order matters — more specific patterns first.
+const FORMAT_ALIASES: Array<[RegExp, string]> = [
+  [/select[_\s-]?all|\bsata\b|multiple[_\s-]?response|mcq[_\s-]?multi|multi[_\s-]?select/, 'sata'],
+  [/shared[_\s-]?stimulus|passage[_\s-]?set|reading[_\s-]?comprehension|passage[_\s-]?based|comprehension[_\s-]?set|\brc\b/, 'passage_set'],
+  [/task[_\s-]?based|\btbs\b|simulation/, 'task_based_simulation'],
+  [/case[_\s-]?study|case[_\s-]?based|\bcase\b/, 'case_study'],
+  [/extended[_\s-]?matching|\bemq\b/, 'emq'],
+  [/ordered[_\s-]?response|drag[_\s-]?(and[_\s-]?)?drop|sequenc|ordering|reorder/, 'ordered_response'],
+  [/hot[_\s-]?spot|image[_\s-]?region|point[_\s-]?and[_\s-]?click|click[_\s-]?to/, 'hot_spot'],
+  [/\bmatrix\b|\bgrid\b/, 'matrix_grid'],
+  [/cloze|dropdown/, 'cloze_dropdown'],
+  [/fill[_\s-]?in|fill[_\s-]?blank|numeric[_\s-]?entry/, 'fill_blank'],
+  [/essay|constructed[_\s-]?response|writing[_\s-]?sample|argumentative[_\s-]?writing|free[_\s-]?text|written[_\s-]?response|short[_\s-]?answer/, 'constructed_response'],
+  [/single|best[_\s-]?answer|one[_\s-]?best|standard[_\s-]?mcq|mcq|multiple[_\s-]?choice/, 'mcq_single'],
+];
+
+/** Map any (possibly LLM-invented) format slug to a canonical registry slug. */
+export function canonicalizeFormatSlug(raw: string): string {
+  const s = String(raw || '').toLowerCase().trim().replace(/\s+/g, '_');
+  if (!s) return 'mcq_single';
+  if (FORMAT_CONTRACTS[s]) return s === 'tbs' ? 'task_based_simulation' : s; // already canonical
+  for (const [rx, canon] of FORMAT_ALIASES) if (rx.test(s)) return canon;
+  return s; // genuinely unknown — leave as-is (buildContentSchema gives it no constraints)
+}
+
+/**
+ * Resolve a declared format to a canonical registry slug by STRUCTURE / answer-model,
+ * not just its name. First tries the slug (fast path); if that stays non-canonical,
+ * inspects name + description + answer_format for the format's actual shape. This is
+ * how "Integrated Question Sets" resolves to case_study and "Performance Tasks" to
+ * performance_task even though their invented slugs match nothing by name.
+ */
+export function resolveFormat(hint: { slug?: string; name?: string; description?: string; answer_format?: string }): string {
+  const text = `${hint.name || ''} ${hint.description || ''} ${hint.answer_format || ''}`.toLowerCase();
+  const has = (...ws: string[]) => ws.some((w) => text.includes(w));
+
+  // ANSWER-MODEL OVERRIDE — this beats a canonical-but-WRONG slug. An extended
+  // free-text WORK PRODUCT built on supplied source documents is a human-scored
+  // performance task, never an auto-graded format. The analysis LLM readily
+  // mislabels these as task_based_simulation (both carry exhibits), so the
+  // structure must win over the slug here.
+  const extendedConstructed = has('work product', 'extended free-text', 'extended free text', 'extended constructed', 'constructed work', 'drafting', 'draft a legal', 'memorandum', 'lawyering task');
+  const hasSourceDocs = has('client file', 'source material', 'supplied authorities', 'authorities', 'library', 'realistic client', 'practice file', 'closed-universe');
+  if (has('performance task', 'performance_task') || (extendedConstructed && hasSourceDocs)) return 'performance_task';
+
+  // A slug that only says "these questions share a stimulus" (shared_stimulus,
+  // question_set, integrated…) does NOT say WHICH kind — a reading passage or a
+  // client matter. Skip the slug fast-path for those and let the structure decide,
+  // otherwise "shared_stimulus" would always become passage_set.
+  const slugText = String(hint.slug || '').toLowerCase();
+  const ambiguousGrouped = /shared[_\s-]?stimulus|question[_\s-]?set|item[_\s-]?set|integrated|vignette[_\s-]?set/.test(slugText);
+  const bySlug = canonicalizeFormatSlug(hint.slug || '');
+
+  // Correct a canonical-but-contradicted grouped slug. A passage_set asserts a
+  // READING passage; with no reading signal anywhere it is really a case/client
+  // set. (And vice-versa for an explicitly reading-based case_study.)
+  const readingSignal = has('passage', 'reading comprehension', 'reading passage', 'excerpt');
+  if (bySlug === 'passage_set' && !readingSignal) return 'case_study';
+  if (bySlug === 'case_study' && has('reading passage', 'reading comprehension')) return 'passage_set';
+
+  if (!ambiguousGrouped && FORMAT_CONTRACTS[bySlug]) return bySlug; // known canonical slug
+
+  // A shared stimulus feeding SEVERAL sibling questions → grouped set.
+  const severalQuestions = has('several', 'multiple questions', 'related questions', 'set of questions', 'component questions', 'each set', 'followed by');
+  const sharedStimulus = has('shared', 'common scenario', 'integrated', 'shared stimulus', 'scenario', 'source materials, followed', 'passage', 'stimulus');
+  if (has('integrated') || (sharedStimulus && severalQuestions)) {
+    if (has('passage', 'reading comprehension', 'reading passage')) return 'passage_set';
+    return 'case_study';
+  }
+
+  // Remaining constructed / selected-answer signals.
+  if (extendedConstructed || has('constructed response', 'essay', 'short answer')) return 'constructed_response';
+  if (has('select all', 'more than one', 'multiple correct', 'select each')) return 'sata';
+  if (has('single best answer', 'best answer', 'multiple-choice', 'multiple choice', 'four options', 'one correct', 'select the correct')) return 'mcq_single';
+
+  return bySlug;
+}
+
 /** Resolve a set of (possibly messy) format slugs to their contracts, de-duped. */
 export function contractsFor(slugs: Iterable<string>): FormatContract[] {
   const seen = new Set<string>();
@@ -291,6 +394,20 @@ export function buildContentSchema(format: string, p: SchemaParams = {}): JsonSc
       if (p.subQuestionCount) { sub.minItems = p.subQuestionCount; sub.maxItems = p.subQuestionCount; } else sub.minItems = 1;
       return { ...base, required: ['case_narrative', 'sub_questions'], properties: {
         case_narrative: NON_EMPTY_STR, topics: { type: 'array' }, sub_questions: sub, response_instructions: STR, explanation: STR } };
+    }
+    case 'constructed_response':
+    case 'essay':
+      // Human-scored free text — a prompt is the only required field; no answer key.
+      return { ...base, required: ['prompt'], properties: {
+        prompt: NON_EMPTY_STR, source_material: STR, sample_response: STR, scoring_rubric: STR } };
+    case 'performance_task': {
+      // Source-material exhibits + an extended constructed work product, human-scored.
+      const exhibitContent: JsonSchema = p.exhibitsAsMarkdown === false ? STR : NON_EMPTY_STR;
+      return { ...base, required: ['prompt'], properties: {
+        prompt: NON_EMPTY_STR,
+        exhibits: { type: 'array', items: { type: 'object', required: ['label', 'content'],
+          properties: { label: NON_EMPTY_STR, title: STR, type: STR, content: exhibitContent } } },
+        scoring_rubric: STR, sample_response: STR } };
     }
     case 'passage_set': {
       const sub: JsonSchema = { type: 'array', minItems: p.subQuestionMin || 2,

@@ -1,5 +1,6 @@
 import { orCall, MODELS } from '../llm/openrouter.js';
 import { supabase } from '../../db/supabase.js';
+import { resolveFormat } from './formatContracts.js';
 
 /**
  * MODULE 2: Exam Format Analyzer
@@ -15,6 +16,7 @@ import { supabase } from '../../db/supabase.js';
 // ── Phase 1: Discover Question Types ──
 
 interface QuestionTypeInfo {
+  items_per_unit?: number;
   slug: string;
   name: string;
   percentage: number;
@@ -44,9 +46,10 @@ SUBJECTS: ${subjectsStr}
 
 Return ONLY a JSON array. Each element:
 {
-  "slug": "<machine_name — e.g. mcq_single, sata, ordered_response, fill_blank, hot_spot, emq, assertion_reason, match, short_answer, case_study, task_based_simulation, passage_set, drag_drop, matrix_grid, audio, cloze_dropdown>",
+  "slug": "<machine_name — e.g. mcq_single, sata, ordered_response, fill_blank, hot_spot, emq, assertion_reason, match, short_answer, case_study, task_based_simulation, passage_set, performance_task, constructed_response, drag_drop, matrix_grid, audio, cloze_dropdown>",
   "name": "<human-readable name — e.g. 'Select All That Apply (SATA)'>",
-  "percentage": <integer — approximate % of total exam questions using this type>,
+  "percentage": <integer — this type's share of the exam's SCORED WEIGHT / testing emphasis, NOT its raw item count. If a handful of long tasks consume roughly a third of scored time, that is ~33 even though they may be only 2 of 128 printed items. All percentages must sum to 100.>,
+  "items_per_unit": <integer — how many SEPARATELY SCORED questions ONE item of this type yields: 1 for a standalone question or a single extended task; the typical number of sub-questions for an integrated set / case study / passage set (e.g. 6)>,
   "description": "<1-2 sentences: how this question type works in ${courseName} specifically>",
   "example_stem": "<a brief example stem pattern (without real content) showing the structure>",
   "answer_format": "<how the answer is structured — e.g. 'single letter A-D', 'multiple correct from list', 'ordered sequence', 'numeric value', 'click coordinates on image', 'free text'>",
@@ -74,12 +77,29 @@ RULES:
     if (!Array.isArray(types) || types.length === 0) {
       return [{ slug: 'mcq_single', name: 'Single Best Answer MCQ', percentage: 100, description: 'Standard multiple choice question with one correct answer.', answer_format: 'single letter', num_options: 4 }];
     }
-    // Normalize percentages to sum to 100
-    const total = types.reduce((s: number, t: QuestionTypeInfo) => s + (t.percentage || 0), 0);
-    if (total > 0 && total !== 100) {
-      for (const t of types) t.percentage = Math.round((t.percentage / total) * 100);
+    // Canonicalize slugs to the fixed registry and MERGE any that collapse to the
+    // same canonical type (e.g. mcq_single_lr + mcq_shared_stimulus → mcq_single /
+    // passage_set) so every declared question type is a real, schema-backed format.
+    const merged = new Map<string, QuestionTypeInfo>();
+    for (const t of types as QuestionTypeInfo[]) {
+      // Resolve by STRUCTURE (name + description + answer_format), not just the slug,
+      // so shared-stimulus sets and constructed work products map correctly even when
+      // the LLM invents a slug (e.g. integrated_question_set, performance_task).
+      const slug = resolveFormat({ slug: t.slug, name: t.name, description: t.description, answer_format: t.answer_format });
+      const existing = merged.get(slug);
+      if (existing) {
+        existing.percentage = (existing.percentage || 0) + (t.percentage || 0);
+      } else {
+        merged.set(slug, { ...t, slug, items_per_unit: Number(t.items_per_unit) > 0 ? Number(t.items_per_unit) : undefined });
+      }
     }
-    return types;
+    const canon = [...merged.values()];
+    // Normalize percentages to sum to 100
+    const total = canon.reduce((s: number, t: QuestionTypeInfo) => s + (t.percentage || 0), 0);
+    if (total > 0 && total !== 100) {
+      for (const t of canon) t.percentage = Math.round((t.percentage / total) * 100);
+    }
+    return canon;
   } catch {
     return [{ slug: 'mcq_single', name: 'Single Best Answer MCQ', percentage: 100, description: 'Standard multiple choice question.', answer_format: 'single letter', num_options: 4 }];
   }
@@ -123,6 +143,7 @@ Return ONLY a JSON object:
       "members_per_group": [<min int>, <max int>],
       "member_formats": ["<format slugs used inside the group, e.g. mcq_single, sata>"],
       "shared_stimulus_words": [<min int>, <max int>],
+      "applies_to_subjects": ["<EXACT subject name(s) from the course structure whose questions are delivered as THIS kind of group — e.g. the reading-comprehension subjects. Copy names verbatim from the structure. Empty only if grouping spans no identifiable subject.>"],
       "description": "<1-2 sentences: what the shared stimulus is and how its questions relate to it>"
     }
   ],
@@ -345,6 +366,10 @@ function buildSchemaForType(qt: QuestionTypeInfo): Record<string, unknown> {
       return { ...base, case_narrative: { type: 'string', required: true }, sub_questions: { type: 'array', items: { type: 'string', stem: 'string', answer: 'object' }, required: true } };
     case 'passage_set':
       return { ...base, passage: { type: 'string', required: true }, sub_questions: { type: 'array', items: { type: 'string', stem: 'string', answer: 'object' }, required: true } };
+    case 'performance_task':
+      return { ...base, prompt: { type: 'string', required: true }, exhibits: { type: 'array', items: { label: 'string', content: 'string' } }, scoring_rubric: { type: 'string' } };
+    case 'constructed_response':
+      return { ...base, prompt: { type: 'string', required: true }, scoring_rubric: { type: 'string' } };
     default:
       return { ...base, answer_format: { type: 'string', value: qt.answer_format }, answer: { type: 'object', required: true } };
   }
@@ -369,6 +394,8 @@ function buildDisplayForType(qt: QuestionTypeInfo): Record<string, unknown> {
     case_study: 'case_with_sub_questions',
     task_based_simulation: 'case_with_sub_questions',
     passage_set: 'case_with_sub_questions',
+    performance_task: 'exhibits_then_response',
+    constructed_response: 'stem_then_text',
     audio: 'media_then_choices',
   };
 

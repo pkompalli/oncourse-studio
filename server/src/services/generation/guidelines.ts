@@ -4,7 +4,55 @@
  */
 
 import { orCall, MODELS } from '../llm/openrouter.js';
-import { extractFormatSlugs, renderContractsForPrompt, buildContentSchema, normalizeSchemaParams } from './formatContracts.js';
+import { extractFormatSlugs, renderContractsForPrompt, buildContentSchema, normalizeSchemaParams, canonicalizeFormatSlug, resolveFormat } from './formatContracts.js';
+
+/** Canonicalize every format slug in the guidelines (format_specs keys +
+ *  format_distribution) so the whole pipeline uses the fixed registry vocabulary. */
+function canonicalizeGuidelines(g: Record<string, unknown>): Record<string, unknown> {
+  const specs = g.format_specs as Record<string, Record<string, unknown>> | undefined;
+  if (specs && typeof specs === 'object') {
+    const out: Record<string, Record<string, unknown>> = {};
+    for (const [slug, spec] of Object.entries(specs)) {
+      // Resolve by STRUCTURE using the spec's own prose, so a format the guidelines
+      // LLM mislabeled (e.g. a human-scored work product called task_based_simulation)
+      // is corrected here too — slug-only canonicalization cannot catch that.
+      const specText = [spec?.when_to_use, ...(Array.isArray(spec?.structure_requirements) ? spec.structure_requirements : []), spec?.gradability].filter(Boolean).join(' ');
+      const canon = resolveFormat({ slug, description: specText });
+      out[canon] = out[canon] ? { ...spec, ...out[canon] } : spec;
+    }
+    g.format_specs = out;
+  }
+  const fd = g.format_distribution as Array<Record<string, unknown>> | undefined;
+  if (Array.isArray(fd)) {
+    const map = new Map<string, Record<string, unknown>>();
+    for (const f of fd) {
+      const canon = resolveFormat({ slug: String(f.format || f.slug || ''), description: String(f.description || '') });
+      if (!canon) continue;
+      const ex = map.get(canon);
+      if (ex) ex.percentage = (Number(ex.percentage) || 0) + (Number(f.percentage) || 0);
+      else map.set(canon, { ...f, format: canon });
+    }
+    g.format_distribution = [...map.values()];
+  }
+  return g;
+}
+
+/** GUARANTEE: every format in format_distribution has a format_specs entry with a
+ *  materialized content_schema — so the guidelines step ends with each question
+ *  type backed by a fixed schema. */
+function ensureSchemaForEveryFormat(g: Record<string, unknown>): Record<string, unknown> {
+  const fd = (g.format_distribution as Array<Record<string, unknown>>) || [];
+  const specs = (g.format_specs = (g.format_specs as Record<string, Record<string, unknown>>) || {});
+  for (const f of fd) {
+    const fmt = canonicalizeFormatSlug(String(f.format || f.slug || ''));
+    if (!fmt) continue;
+    const spec = (specs[fmt] = specs[fmt] || {});
+    if (!spec.content_schema) {
+      try { spec.content_schema = buildContentSchema(fmt, normalizeSchemaParams(spec.schema_params)); } catch { /* unknown format → no schema */ }
+    }
+  }
+  return g;
+}
 
 /**
  * Materialize a deterministic JSON Schema for each format in format_specs,
@@ -45,7 +93,7 @@ export async function generateGuidelines(
   const groupingBlock = groups.length > 0
     ? `The exam groups some questions under a shared stimulus. For EACH group, add a format_specs entry for the mapped machine format AND a format_distribution entry:\n` +
       groups.map((g, i) => `  Group ${i + 1}: stimulus_type=${g.stimulus_type}, ${JSON.stringify(g.members_per_group)} questions/group, member formats ${JSON.stringify(g.member_formats)} — ${g.description || ''}`).join('\n') +
-      `\nMAPPING: reading_passage → passage_set (ONE shared "passage" + sub_questions[]); case_scenario → case_study; exhibit_set/data_set → task_based_simulation (markdown exhibits); image → keep the member formats with is_image_question=true.\nFor a grouped format: set schema_params.sub_question_min/max from members_per_group; structure_requirements MUST require the shared stimulus embedded IN the question; each sub-question fully gradable.`
+      `\nMAPPING (by ANSWER MODEL, not by name): reading_passage → passage_set (ONE shared "passage" + sub_questions[]); case_scenario → case_study (shared narrative + mixed sub-questions); exhibit_set/data_set → task_based_simulation ONLY IF its components are individually MACHINE-SCORED (numeric entry, dropdown, grid). If the exhibits instead feed ONE extended, human-scored work product (a memo, letter, brief, analysis), that is performance_task — a STANDALONE format, NOT a grouped set — and must NOT be emitted as task_based_simulation; image → keep the member formats with is_image_question=true.\nFor a grouped format: set schema_params.sub_question_min/max from members_per_group; structure_requirements MUST require the shared stimulus embedded IN the question; each sub-question fully gradable.`
     : `This exam has no shared-stimulus grouping — all questions are standalone.${(examFormat.structure_overview ? ` Structure: ${examFormat.structure_overview}` : '')}`;
 
   const prompt = `You are a senior exam design architect for the ${courseName} exam. Given a course structure and exam format specification, produce a comprehensive GENERATION GUIDELINES document that INTERPRETS this specific exam into concrete, enforceable requirements.
@@ -78,7 +126,7 @@ Produce a JSON object with these exact sections:
   },
 
   "format_distribution": [
-    { "format": "<format_slug>", "percentage": <number>, "count": <number>, "description": "<when to use this format>" }
+    { "format": "<format_slug>", "percentage": <number — share of the exam's SCORED WEIGHT / emphasis, not raw item count; sums to 100>, "count": <number>, "description": "<when to use this format>" }
   ],
 
   "format_specs": {
@@ -189,6 +237,7 @@ IMPORTANT:
     • emq: "theme", "option_list": [...], "scenarios": [{"stem","correct_answer"}].
     • GROUPED formats (case_study, task_based_simulation, passage_set, or any shared-stimulus set): ONE object with the shared stimulus + a "sub_questions" array. Shared stimulus field: passage_set → "passage"; case_study → "case_narrative"; task_based_simulation → "exhibits":[{label,title,type,content(markdown)}]. Each sub-question: {"number","format_type","question", <that sub-format's answer scaffolding as above>, "rationale","difficulty"}.
 - STIMULUS COMPLETENESS: for any format whose questions can reference a passage/excerpt/figure/exhibit, structure_requirements MUST state that the stimulus is embedded in the question (reading passage in content.passage; TBS/case exhibits as markdown; figures as images) and validation_checks MUST include "a question that references a passage/figure/exhibit not present is ungradable — reject it".
+- anti_patterns MUST include an authenticity rule: questions must TEST each skill by making the candidate PERFORM it on real material (a real argument/passage/data/scenario), NOT ask ABOUT the skill. Explicitly forbid meta / definitional / test-strategy / study-skill questions (e.g. "what is a good reading technique?", "what is the definition of a necessary assumption?"). A topic name is the TASK the question must require, never a subject to describe.
 - explanation_guidelines.must_address_distractors MUST be true — every explanation must discuss why EACH wrong option is wrong, not just defend the correct answer
 - The correct answer must ALWAYS be a structured value, not prose. Ungradable questions are rejected.
 - If case_study format is present, its format_specs entry must require: exactly 6 sub-questions per case, at least 3 different format_types per case, per-sub-question rationale, and a per-sub-question reasoning_step tag using a step taxonomy appropriate to THIS exam's discipline (e.g. nursing/NCLEX: Recognize Cues → Evaluate Outcomes; audit/CPA: Identify Risk → Report; do NOT impose clinical-judgment steps on non-clinical exams)
@@ -199,7 +248,48 @@ IMPORTANT:
 Return ONLY the JSON object. No preamble, no markdown fences.`;
 
   const guidelines = await callAndParseJson(prompt, 0.3);
-  return attachContentSchemas(guidelines);
+  // Pipeline: canonicalize slugs → materialize per-format schemas → guarantee
+  // grouped formats → guarantee a schema for EVERY declared format.
+  return ensureSchemaForEveryFormat(
+    reconcileGroupedFormats(attachContentSchemas(canonicalizeGuidelines(guidelines)), examFormat)
+  );
+}
+
+// Deterministic reconciliation: whenever the analysis describes a shared-stimulus
+// group (exam_format.question_groups), GUARANTEE the mapped grouped format has a
+// materialized content_schema — even if the guidelines LLM forgot to emit a
+// format_specs entry for it. This makes "grouping described → grouped format
+// enforceable" a guarantee, not dependent on LLM variance. (Allocation routes the
+// format to its subjects separately, from question_groups.)
+const STIMULUS_TO_FORMAT: Record<string, string> = {
+  reading_passage: 'passage_set',
+  case_scenario: 'case_study',
+  exhibit_set: 'task_based_simulation',
+  data_set: 'task_based_simulation',
+};
+function reconcileGroupedFormats(guidelines: Record<string, unknown>, examFormat: Record<string, unknown>): Record<string, unknown> {
+  const groups = Array.isArray(examFormat?.question_groups) ? (examFormat.question_groups as Array<Record<string, unknown>>) : [];
+  if (groups.length === 0) return guidelines;
+  const specs = (guidelines.format_specs = (guidelines.format_specs as Record<string, Record<string, unknown>>) || {});
+  // Only reconcile a grouped format this exam ACTUALLY declares. Otherwise an
+  // "exhibit_set" group would resurrect task_based_simulation even when the exam's
+  // real format is a human-scored performance_task (the answer models differ).
+  const declared = new Set(((guidelines.format_distribution as Array<Record<string, unknown>>) || [])
+    .map((f) => String(f.format || f.slug || '')));
+  for (const g of groups) {
+    const fmt = STIMULUS_TO_FORMAT[String(g.stimulus_type)];
+    if (!fmt) continue;
+    if (declared.size > 0 && !declared.has(fmt)) continue;
+    const spec = (specs[fmt] = specs[fmt] || {});
+    const params = normalizeSchemaParams(spec.schema_params);
+    const mm = Array.isArray(g.members_per_group) ? (g.members_per_group as number[]) : [5, 8];
+    if (!params.subQuestionMin) params.subQuestionMin = Number(mm[0]) || undefined;
+    if (!params.subQuestionMax) params.subQuestionMax = Number(mm[1]) || undefined;
+    if (!spec.content_schema) {
+      try { spec.content_schema = buildContentSchema(fmt, params); } catch { /* leave unschema'd */ }
+    }
+  }
+  return guidelines;
 }
 
 /** Extract a JSON object from an LLM response, tolerating markdown fences. */

@@ -169,34 +169,90 @@ function allocateQuestionTypes(
   return allocations.filter((a) => a.count > 0);
 }
 
+// Grouped/shared-stimulus formats and the analysis stimulus_type → format mapping.
+const GROUPED_FORMATS = new Set(['passage_set', 'case_study', 'task_based_simulation', 'tbs']);
+const STIMULUS_TO_FORMAT: Record<string, string> = {
+  reading_passage: 'passage_set',
+  case_scenario: 'case_study',
+  exhibit_set: 'task_based_simulation',
+  data_set: 'task_based_simulation',
+};
+const RC_SUBJECT_RX = /passage|reading|comprehension|\bmain point\b|author'?s?|inference|paragraph|\brc\b/i;
+const normName = (s: unknown) => String(s ?? '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+
+// SUBJECT ROUTING: a grouped format (passage_set, case_study, TBS) belongs only to
+// the SUBJECTS whose questions are actually delivered as that kind of group — not
+// to every subject. If this subject is one of them (per the analysis's
+// applies_to_subjects, with a name-based fallback for reading passages), allocate
+// the grouped format for it as SETS (each set yields ~avg member questions), so a
+// reading subject produces passage sets and a logical-reasoning subject does not.
+function subjectAwareGroupedAllocation(subject: string, numQ: number, guidelines: Record<string, unknown>, examFormat: Record<string, unknown>): QuestionTypeAllocation[] | null {
+  const groups = Array.isArray(examFormat?.question_groups) ? (examFormat.question_groups as Array<Record<string, unknown>>) : [];
+  if (groups.length === 0) return null;
+  const specs = guidelines?.format_specs as Record<string, Record<string, unknown>> | undefined;
+  // Only honour a group whose mapped format this exam ACTUALLY declares — otherwise
+  // e.g. an "exhibit_set" group would hijack subjects with task_based_simulation
+  // even when the exam's real format is a performance_task.
+  const declared = new Set(((guidelines?.format_distribution as Array<Record<string, unknown>>) || [])
+    .map((f) => String(f.format || f.slug || '')));
+  const ns = normName(subject);
+  for (const g of groups) {
+    const fmt = STIMULUS_TO_FORMAT[String(g.stimulus_type)];
+    if (!fmt) continue;
+    if (declared.size > 0 && !declared.has(fmt)) continue;
+    const applies = Array.isArray(g.applies_to_subjects) ? (g.applies_to_subjects as unknown[]).map(normName) : [];
+    const matches = applies.includes(ns) || (applies.length === 0 && g.stimulus_type === 'reading_passage' && RC_SUBJECT_RX.test(subject));
+    if (!matches) continue;
+    const mm = Array.isArray(g.members_per_group) ? (g.members_per_group as number[]) : [5, 8];
+    const avg = Math.max(1, Math.round(((Number(mm[0]) || 5) + (Number(mm[1]) || 8)) / 2));
+    const count = Math.max(1, Math.round(numQ / avg)); // each set yields ~avg gradable questions
+    return [{ slug: fmt, name: (specs?.[fmt]?.label as string) || fmt, count, percentage: 100 }];
+  }
+  return null;
+}
+
 // Guidelines are authoritative on the format MIX (per the describe→derive→generate
 // design): when generation_guidelines carry a format_distribution, derive the
-// per-subject allocations from it — so grouped formats the guidelines introduced
-// (e.g. passage_set) are actually generated. Falls back to null (→ keep the
-// exam_format-derived allocation) when no format_distribution is present.
-function allocationsFromGuidelines(numQ: number, guidelines: Record<string, unknown>): QuestionTypeAllocation[] | null {
+// per-subject allocations from it. With excludeGrouped, grouped formats are dropped
+// (they are routed per-subject by subjectAwareGroupedAllocation instead, so they
+// never leak into non-grouped subjects). Falls back to null when no distribution.
+function allocationsFromGuidelines(numQ: number, guidelines: Record<string, unknown>, opts?: { excludeFormats?: Set<string> }): QuestionTypeAllocation[] | null {
   const fd = guidelines?.format_distribution as Array<{ format?: string; slug?: string; percentage?: number; description?: string }> | undefined;
   if (!Array.isArray(fd) || fd.length === 0) return null;
   const specs = guidelines?.format_specs as Record<string, Record<string, unknown>> | undefined;
   const raw = fd
     .map((f) => ({ slug: String(f.format || f.slug || '').trim(), percentage: typeof f.percentage === 'number' ? f.percentage : 0, description: f.description }))
-    .filter((f) => f.slug);
+    .filter((f) => f.slug && !opts?.excludeFormats?.has(f.slug));
   if (raw.length === 0) return null;
   let total = raw.reduce((s, f) => s + f.percentage, 0);
   if (total <= 0) { raw.forEach((f) => (f.percentage = 100 / raw.length)); total = 100; }
   const sorted = [...raw].sort((a, b) => b.percentage - a.percentage);
+  // percentage is a SCORED-WEIGHT share, so split the QUESTION budget by weight and
+  // then convert each share into UNIT counts: one grouped unit (case study, passage
+  // set) expands into several scored questions, so N% weight is N% of questions —
+  // NOT N% of units. Without this a 33% set share would emit 33 sets (~200 questions).
+  const itemsPerUnit = (slug: string): number => {
+    const sp = specs?.[slug]?.schema_params as Record<string, unknown> | undefined;
+    const mn = Number(sp?.sub_question_min) || 0;
+    const mx = Number(sp?.sub_question_max) || 0;
+    if (mn > 0 && mx > 0) return Math.max(1, Math.round((mn + mx) / 2));
+    if (mn > 0) return Math.max(1, mn);
+    return 1;
+  };
   const out: QuestionTypeAllocation[] = [];
-  let remaining = numQ;
+  let remainingQuestions = numQ;
   for (let i = 0; i < sorted.length; i++) {
     const f = sorted[i];
     const sp = specs?.[f.slug]?.schema_params as Record<string, unknown> | undefined;
     const name = (specs?.[f.slug]?.label as string) || f.slug;
-    const count = i === sorted.length - 1
-      ? remaining
-      : Math.min(remaining, Math.max(f.percentage >= 5 ? 1 : 0, Math.round(numQ * f.percentage / total)));
+    const ipu = itemsPerUnit(f.slug);
+    const wantQuestions = i === sorted.length - 1
+      ? remainingQuestions
+      : Math.min(remainingQuestions, Math.round(numQ * f.percentage / total));
+    const count = Math.max(f.percentage >= 5 ? 1 : 0, Math.round(wantQuestions / ipu));
     if (count > 0) {
       out.push({ slug: f.slug, name, count, percentage: Math.round(f.percentage), description: f.description, num_options: sp?.num_options as number | undefined });
-      remaining -= count;
+      remainingQuestions -= Math.min(remainingQuestions, count * ipu);
     }
   }
   return out.filter((a) => a.count > 0);
@@ -304,6 +360,16 @@ export async function buildSubjectTasks(
 // (the fully-generic path): the concrete output template + this exam's rules. This
 // makes generation guidelines-driven, so a format defined only in the guidelines
 // needs no hardcoded branch below.
+const SUB_ANSWER_KEY_RULES = `PER-SUB-QUESTION ANSWER KEY (MANDATORY — a sub-answer that exists ONLY in the rationale/prose is INVALID and will be rejected):
+  - mcq_single: options[] + correct_answer:"<letter>"
+  - sata: options[] + correct_answers:["<letters>"]
+  - matrix_grid: rows[] + columns[] + correct_answer:{ "<each row text>": "<chosen column text>" }
+  - cloze_dropdown: [Blank N] markers + choices:{ "Blank N":[options] } + correct_answer:{ "Blank N":"<one of its choices>" }
+  - fill_blank: correct_answer:"<exact value>"  ← NEVER omit this field
+  - ordered_response: items[] + correct_order (1-based indices in the correct sequence)
+  - constructed_response: prompt only (human-scored; no answer key)
+Every sub-question MUST include the COMPLETE scaffolding its format needs (options/rows/columns/choices/items) AND its structured answer key.`;
+
 function renderGuidelinesFormatBlock(alloc: QuestionTypeAllocation, spec: Record<string, unknown>): string {
   const list = (v: unknown) => (Array.isArray(v) ? (v as unknown[]).map(String) : v ? [String(v)] : []);
   const rules = [
@@ -313,9 +379,13 @@ function renderGuidelinesFormatBlock(alloc: QuestionTypeAllocation, spec: Record
   ];
   const grad = spec.gradability ? `GRADABILITY (mandatory): ${spec.gradability}` : '';
   const template = JSON.stringify(spec.generation_template, null, 2);
+  // A guidelines-authored template may omit per-sub answer keys; the canonical
+  // sub-answer contract is appended so grouped formats stay machine-gradable.
+  const tmplHasSubs = /"sub_questions"/.test(template) || GROUPED_FORMATS.has(alloc.slug);
+  const subRules = tmplHasSubs ? `\n${SUB_ANSWER_KEY_RULES}` : '';
   return `FORMAT: ${alloc.slug} (${alloc.name}) — ${alloc.count} question(s)
 ${rules.length ? 'RULES:\n' + rules.join('\n') + '\n' : ''}${grad ? grad + '\n' : ''}Output EACH question as a JSON object with EXACTLY this shape (fill with real content; keep all fields):
-${template}`;
+${template}${subRules}`;
 }
 
 function buildFormatSchema(allocations: QuestionTypeAllocation[], guidelines?: Record<string, unknown>): string {
@@ -654,6 +724,45 @@ TASK-BASED SIMULATION RULES (MANDATORY):
   "image_search_terms": []
 }`;
         break;
+      case 'performance_task':
+        schema = `FORMAT: performance_task (${alloc.name}) — ${alloc.count} task(s)
+PERFORMANCE TASK RULES (MANDATORY):
+  • This is a human-scored EXTENDED CONSTRUCTED WORK PRODUCT — there is NO machine answer key. is_image_question:false.
+  • Provide the source materials the examinee must use as "exhibits" (markdown): the client/case file AND the supplied authorities/data. Reference them from the task.
+  • "prompt" states the assigned task and deliverable (e.g. draft a memo/letter, analyze the matter, advise the client).
+  • Provide a "scoring_rubric" describing what a strong response must demonstrate, and a brief "sample_response" outline.
+{
+  "format_type": "performance_task",
+  "prompt": "<the assigned task and the exact work product to produce>",
+  "exhibits": [ { "label": "Exhibit 1", "title": "<e.g. Client File>", "type": "document|authority|correspondence|data", "content": "<MARKDOWN; the actual source material>" } ],
+  "scoring_rubric": "<what a strong response demonstrates — issues to spot, authorities to apply, structure expected>",
+  "sample_response": "<a brief outline/skeleton of a model response>",
+  "explanation": "<how the task assesses the target lawyering/professional skills — 2-3 sentences>",
+  "difficulty": "<medium|hard>",
+  "bloom_level": "<4_analyze|5_evaluate|6_create>",
+  "is_image_question": false,
+  "image_type": null,
+  "image_search_terms": []
+}`;
+        break;
+      case 'constructed_response':
+      case 'essay':
+        schema = `FORMAT: ${alloc.slug} (${alloc.name}) — ${alloc.count} question(s)
+This is a human-scored free-text response — NO machine answer key.
+{
+  "format_type": "constructed_response",
+  "prompt": "<the writing task / question the examinee must respond to>",
+  "source_material": "<any passage/material the writer must engage with, else empty>",
+  "scoring_rubric": "<what a strong response demonstrates>",
+  "sample_response": "<a brief model-response outline>",
+  "explanation": "<what skill this assesses — 1-2 sentences>",
+  "difficulty": "<easy|medium|hard>",
+  "bloom_level": "<4_analyze|5_evaluate|6_create>",
+  "is_image_question": false,
+  "image_type": null,
+  "image_search_terms": []
+}`;
+        break;
       case 'passage_set':
         schema = `FORMAT: passage_set (${alloc.name}) — ${alloc.count} passage set(s)
 READING PASSAGE SET RULES (MANDATORY):
@@ -963,6 +1072,13 @@ ${isMultiFormat ? `- You MUST generate the EXACT number of questions for EACH fo
 - No two questions should test the same fact
 - Distribute your questions across the HYT topics listed above
 - Each question must be tagged with its exact Bloom's level
+
+AUTHENTIC EXAM CONTENT — TEST THE SKILL, NEVER ASK ABOUT IT
+────────────────────────────────────────────────────────────
+- Produce AUTHENTIC ${courseName} items — the exact kind of question a candidate faces on the REAL exam. Test each skill by making the candidate PERFORM it on real material (a real argument, passage, data set, rule, calculation, or scenario), not by asking ABOUT the skill.
+- A topic name denotes the TASK your question must require the candidate to do — it is NOT a subject to describe or define. E.g. a "Necessary Assumption" topic → present an argument and ask which assumption it depends on; a "Main point" topic → give a passage/argument and ask for its main point; a "Dosage calculation" topic → give a real order and ask for the computed dose.
+- NEVER write meta / definitional / test-strategy / study-skill questions. FORBIDDEN examples: "What is a good reading technique?", "Which is the best way to approach this question type?", "What is the definition of a necessary assumption?", "Which study method improves speed?", "What should a test-taker do first when reading a passage?". These never appear on the real exam.
+- Every question MUST embed the actual stimulus it operates on, so the candidate reasons from real content — never from generic knowledge about test-taking or about the concept's name.
 ${buildGuidelinesSection(subjectTask.guidelines)}
 EXPLANATION / RATIONALE — MANDATORY RULES
 ──────────────────────────────────────────
@@ -1340,6 +1456,11 @@ function enrichSubQuestion(sq: Record<string, unknown>, idx: number): Record<str
     // The answer IS correct_order; unwrap if the model nested it under correct_answer/answer.
     if (base.correct_order === undefined) base.correct_order = unwrap(sq.correct_answer ?? sq.answer);
     // do NOT also emit correct_answer
+  } else if (ft === 'constructed_response' || ft === 'essay' || ft === 'short_answer') {
+    // Human-scored sub-item — NO machine answer key; carry the prompt + optional rubric.
+    base.prompt = sq.prompt ?? sq.question ?? sq.stem;
+    if (sq.scoring_rubric) base.scoring_rubric = sq.scoring_rubric;
+    if (sq.sample_response) base.sample_response = sq.sample_response;
   } else {
     base.correct_answer = sq.correct_answer ?? sq.keyed_answer ?? sq.answer ?? sq.correct_answers;
   }
@@ -1481,6 +1602,30 @@ function buildContentFromQuestion(q: Record<string, unknown>): Record<string, un
         passage: (q.passage as string) || (q.reading_passage as string) || (q.case_narrative as string) || '',
         ...(Array.isArray(q.topics) ? { topics: q.topics } : {}),
         sub_questions: subs.map(enrichSubQuestion),
+        explanation: (q.explanation as string) || '',
+      };
+    }
+    case 'constructed_response':
+    case 'essay':
+      return {
+        prompt: (q.prompt as string) || (q.question as string) || '',
+        ...(q.source_material ? { source_material: q.source_material as string } : {}),
+        ...(q.sample_response ? { sample_response: q.sample_response as string } : {}),
+        ...(q.scoring_rubric ? { scoring_rubric: q.scoring_rubric as string } : {}),
+        explanation: (q.explanation as string) || '',
+      };
+    case 'performance_task': {
+      const rawExhibits = (q.exhibits as Array<Record<string, unknown>>) || [];
+      return {
+        prompt: (q.prompt as string) || (q.question as string) || '',
+        exhibits: rawExhibits.map((ex, i) => ({
+          label: (ex.label as string) || `Exhibit ${i + 1}`,
+          title: (ex.title as string) || '',
+          type: (ex.type as string) || 'document',
+          content: (ex.content as string) || (ex.markdown as string) || (ex.text as string) || '',
+        })),
+        ...(q.scoring_rubric ? { scoring_rubric: q.scoring_rubric as string } : {}),
+        ...(q.sample_response ? { sample_response: q.sample_response as string } : {}),
         explanation: (q.explanation as string) || '',
       };
     }
@@ -2082,12 +2227,39 @@ export async function generateBatchForJob(
     ? await buildTopicWiseTasks(structure, examFormat, courseName, (jobConfig.questions_per_topic as number) || 5)
     : await buildSubjectTasks(examFormat, structure, examFormat, courseName);
 
-  // Attach guidelines to each task, and let the guidelines' format_distribution
-  // drive the format mix when present (guidelines are authoritative on formats).
+  // Attach guidelines to each task, and let the guidelines drive the format mix
+  // (guidelines are authoritative on formats). Grouped formats (passage_set, …) are
+  // routed ONLY to the subjects that actually use them; all other subjects get the
+  // standalone mix with grouped formats excluded — so passage_set concentrates in
+  // the reading subjects instead of diluting across every subject.
   if (Object.keys(guidelines).length > 0) {
+    // Which grouped formats are actually CLAIMED by a subject (via the analysis's
+    // question_groups.applies_to_subjects)? Only those are removed from the general
+    // per-subject mix. A grouped format the guidelines declared but no subject
+    // claimed (e.g. an exam-wide "integrated set" with no subject mapping) must
+    // still be generated across subjects rather than silently dropped.
+    // Subject-routing gives a matched subject 100% of the grouped format. That is
+    // right only when the format is CONFINED to a subset of subjects (LSAT reading
+    // subjects ARE entirely passage sets). A group spanning (nearly) every subject
+    // — e.g. Bar integrated sets, which touch all doctrinal subjects but are only
+    // 30% of the exam — must instead follow the weighted mix, or every subject
+    // would become 100% case_study.
+    const matchCount = new Map<string, number>();
+    for (const task of tasks) {
+      const g = subjectAwareGroupedAllocation(task.subject, task.num_questions, guidelines, examFormat);
+      if (g && g.length > 0) matchCount.set(g[0].slug, (matchCount.get(g[0].slug) || 0) + 1);
+    }
+    const exclusivityCap = Math.max(1, Math.floor(tasks.length * 0.6));
+    const routedGrouped = new Set<string>();
+    for (const [slug, n] of matchCount) if (n <= exclusivityCap) routedGrouped.add(slug);
+    for (const [slug, n] of matchCount) {
+      if (!routedGrouped.has(slug)) console.log(`  [Alloc] ${slug} spans ${n}/${tasks.length} subjects — exam-wide, using weighted mix instead of subject routing`);
+    }
     for (const task of tasks) {
       task.guidelines = guidelines;
-      const gAlloc = allocationsFromGuidelines(task.num_questions, guidelines);
+      const grouped = subjectAwareGroupedAllocation(task.subject, task.num_questions, guidelines, examFormat);
+      if (grouped && grouped.length > 0 && routedGrouped.has(grouped[0].slug)) { task.question_type_allocations = grouped; continue; }
+      const gAlloc = allocationsFromGuidelines(task.num_questions, guidelines, { excludeFormats: routedGrouped });
       if (gAlloc && gAlloc.length > 0) task.question_type_allocations = gAlloc;
     }
   }
