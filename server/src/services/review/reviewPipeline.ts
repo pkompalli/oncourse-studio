@@ -307,9 +307,27 @@ async function runValidatorPhase(
             question: fixedQ.question, options: fixedQ.options,
             correct_option: fixedQ.correct_option || fixedQ.correct_answer,
             explanation: fixedQ.explanation,
+            // CRITICAL: grouped formats keep their sub_questions/exhibits in
+            // `content`. Writing only the legacy MCQ columns meant a successful
+            // repair of a case study was never actually persisted.
+            ...(fixedQ.content && typeof fixedQ.content === 'object' ? { content: fixedQ.content } : {}),
             audit_trail: trail,
           }).eq('id', item.dbId);
           totalFixed++;
+        } else {
+          // A failed repair must never vanish silently — record WHY the question
+          // is still flagged, so it is visible instead of sitting unexplained.
+          const { data: cur } = await supabase.from('qb_questions')
+            .select('audit_trail').eq('id', item.dbId).single();
+          const ft = Array.isArray(cur?.audit_trail) ? [...(cur.audit_trail as unknown[])] : [];
+          ft.push({
+            phase: 'validator_fix_failed',
+            changes_requested: item.changesRequired,
+            error: fixResult.error || 'fixer returned no usable question',
+            timestamp: new Date().toISOString(),
+          });
+          await supabase.from('qb_questions').update({ audit_trail: ft }).eq('id', item.dbId);
+          console.warn(`  [Validator] FIX FAILED for ${item.dbId} — still flagged: ${fixResult.error || 'no question returned'}`);
         }
       });
       await Promise.all(fixPromises);
@@ -496,9 +514,27 @@ async function runAdversarialPhase(
             question: fixedQ.question, options: fixedQ.options,
             correct_option: fixedQ.correct_option || fixedQ.correct_answer,
             explanation: fixedQ.explanation,
+            // CRITICAL: grouped formats keep their sub_questions/exhibits in
+            // `content`. Writing only the legacy MCQ columns meant a successful
+            // repair of a case study was never actually persisted.
+            ...(fixedQ.content && typeof fixedQ.content === 'object' ? { content: fixedQ.content } : {}),
             audit_trail: trail,
           }).eq('id', item.dbId);
           totalFixed++;
+        } else {
+          // A failed repair must never vanish silently — record WHY the question
+          // is still flagged, so it is visible instead of sitting unexplained.
+          const { data: cur } = await supabase.from('qb_questions')
+            .select('audit_trail').eq('id', item.dbId).single();
+          const ft = Array.isArray(cur?.audit_trail) ? [...(cur.audit_trail as unknown[])] : [];
+          ft.push({
+            phase: 'adversarial_fix_failed',
+            changes_requested: item.changesRequired,
+            error: fixResult.error || 'fixer returned no usable question',
+            timestamp: new Date().toISOString(),
+          });
+          await supabase.from('qb_questions').update({ audit_trail: ft }).eq('id', item.dbId);
+          console.warn(`  [Adversarial] FIX FAILED for ${item.dbId} — still flagged: ${fixResult.error || 'no question returned'}`);
         }
       });
       await Promise.all(fixPromises);
