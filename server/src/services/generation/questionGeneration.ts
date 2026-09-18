@@ -4,6 +4,7 @@ import { fetchAllRows } from '../../db/pagination.js';
 import { startTracking, getStepTokens } from '../llm/tokenTracker.js';
 import { classifyQuestionType } from '../questionType.js';
 import { schemaErrorsFor } from './schemaValidate.js';
+import { canonicalizeFormatSlug } from './formatContracts.js';
 
 /**
  * Faithful port of V1's generation pipeline:
@@ -1693,6 +1694,30 @@ function buildContentFromQuestion(q: Record<string, unknown>): Record<string, un
 }
 
 // ── Insert questions for a subject into DB ──
+
+/**
+ * The allocation slug is what we ASKED for; the model sometimes returns a
+ * differently-shaped question (a case study or performance task emitted inside an
+ * mcq_single allocation). Trusting the slug then mis-tags the row, mangles it
+ * through the wrong content builder, and validates it against the wrong schema.
+ * Derive the real format from the SHAPE of what came back.
+ */
+function deriveFormatType(declared: string, raw: Record<string, unknown>): string {
+  const canon = canonicalizeFormatSlug(declared || 'mcq_single');
+  const subs = raw.sub_questions;
+  const hasSubs = Array.isArray(subs) && subs.length > 0;
+  const hasExhibits = Array.isArray(raw.exhibits) && (raw.exhibits as unknown[]).length > 0;
+  // Shared stimulus + sub-questions => a grouped format, whatever the slug said.
+  if (hasSubs && !GROUPED_FORMATS.has(canon)) {
+    return raw.passage ? 'passage_set' : 'case_study';
+  }
+  // An assigned task over supplied source documents => a performance task.
+  if (!hasSubs && raw.prompt && hasExhibits && canon !== 'performance_task' && canon !== 'constructed_response') {
+    return 'performance_task';
+  }
+  return canon;
+}
+
 async function insertSubjectQuestions(
   questions: Record<string, unknown>[],
   jobId: string,
@@ -1711,11 +1736,16 @@ async function insertSubjectQuestions(
   }
 
   const rows = questions.map((q, idx) => {
-    const formatType = (q.format_type as string) || 'mcq_single';
+    const declaredFormat = (q.format_type as string) || 'mcq_single';
+    const formatType = deriveFormatType(declaredFormat, q);
+    if (formatType !== canonicalizeFormatSlug(declaredFormat)) {
+      console.warn(`  [Format] q${idx + 1}: model returned ${formatType}-shaped content under a "${declaredFormat}" allocation — retagging`);
+    }
     const isMcq = formatType === 'mcq_single' || formatType === 'mcq_multi' || formatType === 'sata';
 
-    // Build content, preserving any markdown exhibits the model produced (any format).
-    const content = buildContentFromQuestion(q) as Record<string, unknown>;
+    // Build content using the DERIVED format so a grouped question is not mangled
+    // through the mcq content builder (which would drop its sub_questions).
+    const content = buildContentFromQuestion({ ...q, format_type: formatType }) as Record<string, unknown>;
     if (!Array.isArray(content.exhibits) && Array.isArray(q.exhibits)) {
       content.exhibits = (q.exhibits as Array<Record<string, unknown>>).map((ex, i) => ({
         label: (ex.label as string) || `Exhibit ${i + 1}`,
