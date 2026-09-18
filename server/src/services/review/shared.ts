@@ -50,8 +50,11 @@ function standaloneIssues(ft: string, c: Record<string, unknown>, q: Record<stri
       if (!_has(c.prompt) && !_has(c.stem) && !_has(q.question)) out.push('missing prompt');
       break;
     case 'performance_task':
-      // Source materials (exhibits) + an extended constructed work product, human-scored.
+      // Human-scored, closed-universe: the rubric IS the answer key and the
+      // exhibits are the universe. Missing either makes the task unscorable.
       if (!_has(c.prompt) && !_has(c.stem) && !_has(q.question)) out.push('missing prompt (the assigned task)');
+      if (!_has(c.scoring_rubric)) out.push('missing scoring_rubric (the answer key for a human-scored task)');
+      if (!(Array.isArray(c.exhibits) && c.exhibits.length > 0)) out.push('missing exhibits (the supplied client file / authorities)');
       break;
     case 'mcq_single':
       if (!_has(c.options) && !_has(q.options)) out.push('missing options');

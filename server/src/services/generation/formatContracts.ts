@@ -159,7 +159,7 @@ FORMAT_CONTRACTS.performance_task = {
   slug: 'performance_task',
   label: 'Performance Task (source materials + extended constructed work product)',
   structure: 'prompt (the assigned lawyering/professional task, e.g. draft/analyze/advise) + exhibits[] (the supplied source materials — client file, legal authorities, data — each {label,title,type,content:MARKDOWN}) + scoring_rubric + optional sample_response. The response is an extended constructed work product, human-scored — there is no machine answer key.',
-  gradability: 'Not auto-gradable by design. A prompt is required; exhibits carry the source materials; scoring is by rubric.',
+  gradability: 'Not auto-gradable by design, but NOT unscorable: a prompt, at least one source exhibit, and a scoring_rubric are ALL required. The rubric is this format\'s answer key — a task without one cannot be scored, and a task without exhibits is not closed-universe.',
   syntax: [
     'State the task and deliverable clearly (what the examinee must produce).',
     'Provide the source materials as markdown exhibits referenced by the task.',
@@ -403,11 +403,14 @@ export function buildContentSchema(format: string, p: SchemaParams = {}): JsonSc
     case 'performance_task': {
       // Source-material exhibits + an extended constructed work product, human-scored.
       const exhibitContent: JsonSchema = p.exhibitsAsMarkdown === false ? STR : NON_EMPTY_STR;
-      return { ...base, required: ['prompt'], properties: {
+      // A performance task is human-scored and closed-universe: the RUBRIC is its
+      // answer key, and the supplied exhibits are the universe the examinee works
+      // from. Requiring only `prompt` let rubric-less, source-less tasks pass.
+      return { ...base, required: ['prompt', 'scoring_rubric', 'exhibits'], properties: {
         prompt: NON_EMPTY_STR,
-        exhibits: { type: 'array', items: { type: 'object', required: ['label', 'content'],
+        exhibits: { type: 'array', minItems: 1, items: { type: 'object', required: ['label', 'content'],
           properties: { label: NON_EMPTY_STR, title: STR, type: STR, content: exhibitContent } } },
-        scoring_rubric: STR, sample_response: STR } };
+        scoring_rubric: NON_EMPTY_STR, sample_response: STR } };
     }
     case 'passage_set': {
       const sub: JsonSchema = { type: 'array', minItems: p.subQuestionMin || 2,
