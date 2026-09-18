@@ -31,8 +31,8 @@ export function classifyQuestionType(q: Record<string, unknown>): 'text' | 'imag
     || 'mcq_single';
   const content = (q.content as Record<string, unknown>) || {};
 
-  // TBS / anything already carrying markdown exhibits → markdown.
-  if (formatType === 'task_based_simulation' || formatType === 'tbs') return 'markdown';
+  // TBS / performance tasks / anything already carrying markdown exhibits → markdown.
+  if (formatType === 'task_based_simulation' || formatType === 'tbs' || formatType === 'performance_task') return 'markdown';
   if (Array.isArray(content.exhibits) && (content.exhibits as unknown[]).length > 0) return 'markdown';
 
   const imageType = ((q.image_type as string) || (content.image_type as string) || '').trim();

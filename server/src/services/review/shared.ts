@@ -33,6 +33,7 @@ function subQuestionIssues(sq: Record<string, unknown>, n: number): string[] {
     case 'ordered_response': case 'drag_drop': if (!_has(sq.items)) out.push(`${tag}: missing items`); if (!_has(sq.correct_order)) out.push(`${tag}: missing correct_order`); break;
     case 'emq': if (!_has(sq.response_options)) out.push(`${tag}: missing response_options`); if (!_has(key) && !_has(sq.items)) out.push(`${tag}: missing answers`); break;
     case 'hot_spot': if (!_has(sq.stimulus)) out.push(`${tag}: missing stimulus`); if (!_has(sq.answer) && !_has(key)) out.push(`${tag}: missing answer`); break;
+    case 'constructed_response': case 'essay': case 'short_answer': if (!_has(sq.prompt) && !_has(sq.question) && !_has(sq.stem)) out.push(`${tag}: missing prompt`); break; // human-scored — no answer key
     default: if (!_has(key) && !_has(sq.correct_answers) && !_has(sq.correct_order)) out.push(`${tag}: missing an answer key`);
   }
   return out;
@@ -44,6 +45,14 @@ function standaloneIssues(ft: string, c: Record<string, unknown>, q: Record<stri
   const out: string[] = [];
   const answer = (c.answer as Record<string, unknown>) || {};
   switch (ft) {
+    case 'constructed_response': case 'essay':
+      // Human-scored free text — a prompt is enough; no machine answer key.
+      if (!_has(c.prompt) && !_has(c.stem) && !_has(q.question)) out.push('missing prompt');
+      break;
+    case 'performance_task':
+      // Source materials (exhibits) + an extended constructed work product, human-scored.
+      if (!_has(c.prompt) && !_has(c.stem) && !_has(q.question)) out.push('missing prompt (the assigned task)');
+      break;
     case 'mcq_single':
       if (!_has(c.options) && !_has(q.options)) out.push('missing options');
       if (!_has(answer.key) && !_has(q.correct_option)) out.push('missing answer');

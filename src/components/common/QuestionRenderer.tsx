@@ -443,6 +443,21 @@ function SubQuestionAnswer({ sq, showAnswer }: { sq: Record<string, unknown>; sh
     return opt;
   });
 
+  // Constructed response / short answer — human-scored, no selectable answer
+  if (formatType === 'constructed_response' || formatType === 'essay' || formatType === 'short_answer') {
+    return (
+      <div className="mt-1 ml-2 text-xs text-slate-500">
+        <span className="italic">Constructed response (human-scored)</span>
+        {showAnswer && sq.scoring_rubric ? (
+          <div className="mt-1"><span className="font-semibold text-slate-400">Rubric: </span>{toText(sq.scoring_rubric)}</div>
+        ) : null}
+        {showAnswer && sq.sample_response ? (
+          <div className="mt-1"><span className="font-semibold text-slate-400">Model outline: </span>{toText(sq.sample_response)}</div>
+        ) : null}
+      </div>
+    );
+  }
+
   // Ordered response
   if (formatType === 'ordered_response') {
     const items = (sq.items as string[]) || [];
@@ -798,6 +813,30 @@ export default function QuestionRenderer({ question: q, showAnswer = true, compa
           <StemBlock stem={stem} />
           <BooleanAnswerBlock answer={answer} showAnswer={showAnswer} />
         </>
+      ) : content.prompt ? (
+        /* performance_task / constructed_response — prompt + optional source exhibits + rubric */
+        <div className="space-y-2">
+          <StemBlock stem={toText(content.prompt)} />
+          {Array.isArray(content.exhibits) && (content.exhibits as unknown[]).length > 0 && (
+            <div className="space-y-1">
+              {(content.exhibits as Array<Record<string, unknown>>).map((ex, i) => (
+                <details key={i} className="text-xs bg-slate-50 border border-slate-200 rounded p-2">
+                  <summary className="cursor-pointer font-medium text-slate-600">
+                    {toText(ex.label) || `Exhibit ${i + 1}`}{ex.title ? ` — ${toText(ex.title)}` : ''}
+                  </summary>
+                  <div className="mt-1 whitespace-pre-wrap text-slate-700">{toText(ex.content)}</div>
+                </details>
+              ))}
+            </div>
+          )}
+          <div className="text-xs text-slate-500 italic">Constructed work product — human-scored</div>
+          {showAnswer && content.scoring_rubric ? (
+            <div className="text-xs text-slate-600"><span className="font-semibold text-slate-400">Rubric: </span>{toText(content.scoring_rubric)}</div>
+          ) : null}
+          {showAnswer && content.sample_response ? (
+            <div className="text-xs text-slate-600"><span className="font-semibold text-slate-400">Model outline: </span>{toText(content.sample_response)}</div>
+          ) : null}
+        </div>
       ) : layout === 'stem_then_input' || layout === 'stem_then_text' ? (
         <>
           <StemBlock stem={stem} />
