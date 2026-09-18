@@ -730,7 +730,8 @@ PERFORMANCE TASK RULES (MANDATORY):
   • This is a human-scored EXTENDED CONSTRUCTED WORK PRODUCT — there is NO machine answer key. is_image_question:false.
   • Provide the source materials the examinee must use as "exhibits" (markdown): the client/case file AND the supplied authorities/data. Reference them from the task.
   • "prompt" states the assigned task and deliverable (e.g. draft a memo/letter, analyze the matter, advise the client).
-  • Provide a "scoring_rubric" describing what a strong response must demonstrate, and a brief "sample_response" outline.
+  • "scoring_rubric" is MANDATORY — it is this format's answer key. Describe concretely what a strong response must demonstrate (issues to spot, authorities to apply, structure expected). A task without a rubric cannot be scored and will be REJECTED.
+  • "exhibits" is MANDATORY (at least one) — a task with no supplied materials is not closed-universe and will be REJECTED. Also give a brief "sample_response" outline.
 {
   "format_type": "performance_task",
   "prompt": "<the assigned task and the exact work product to produce>",
