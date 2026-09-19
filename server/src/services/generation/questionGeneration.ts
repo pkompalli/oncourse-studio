@@ -751,10 +751,17 @@ PERFORMANCE TASK RULES (MANDATORY):
       case 'essay':
         schema = `FORMAT: ${alloc.slug} (${alloc.name}) — ${alloc.count} question(s)
 This is a human-scored free-text response — NO machine answer key.
+If this exam's responses are ITEM SETS (a shared vignette followed by labelled parts, as at CFA Level III), you MUST emit "vignette" plus "parts": each part gets its own label, prompt, POINT VALUE and its own scoring_rubric, because parts are scored separately. total_points must equal the sum of the part points. Never merge the parts into a single prompt. For a plain single-prompt essay, omit vignette/parts.
 {
   "format_type": "constructed_response",
-  "prompt": "<the writing task / question the examinee must respond to>",
-  "source_material": "<any passage/material the writer must engage with, else empty>",
+  "prompt": "<the task framing — what the examinee must produce>",
+  "vignette": "<ITEM SET ONLY: the shared scenario every part refers to (client, portfolio, mandate, constraints, data). Omit for a single-prompt essay.>",
+  "parts": [
+    { "label": "A", "prompt": "<what part A asks; state whether justification/calculation is required>", "points": <int>, "scoring_rubric": "<exactly what earns each point for THIS part>", "sample_response": "<brief model answer outline>" },
+    { "label": "B", "prompt": "<...>", "points": <int>, "scoring_rubric": "<...>" }
+  ],
+  "total_points": <int — MUST equal the sum of the part points>,
+  "source_material": "<any extra material the writer must engage with, else empty>",
   "scoring_rubric": "<MANDATORY — this format's answer key. State exactly what earns credit, the point allocation across any labeled parts, and what earns none (unsupported or irrelevant writing). A response item without a rubric cannot be scored and will be REJECTED.>",
   "sample_response": "<a brief model-response outline>",
   "explanation": "<what skill this assesses — 1-2 sentences>",
@@ -1608,14 +1615,27 @@ function buildContentFromQuestion(q: Record<string, unknown>): Record<string, un
       };
     }
     case 'constructed_response':
-    case 'essay':
+    case 'essay': {
+      // An item set carries a shared vignette plus separately-scored labelled parts.
+      const rawParts = (q.parts as Array<Record<string, unknown>>) || (q.sub_questions as Array<Record<string, unknown>>) || [];
+      const parts = rawParts.map((pt, i) => ({
+        label: (pt.label as string) || String.fromCharCode(65 + i),
+        prompt: (pt.prompt as string) || (pt.question as string) || '',
+        points: Number(pt.points ?? pt.point_value ?? 0) || 0,
+        scoring_rubric: (pt.scoring_rubric as string) || (pt.rubric as string) || '',
+        ...(pt.sample_response ? { sample_response: pt.sample_response as string } : {}),
+      }));
+      const summed = parts.reduce((n, pt) => n + pt.points, 0);
       return {
         prompt: (q.prompt as string) || (q.question as string) || '',
+        ...(q.vignette || q.case_narrative ? { vignette: (q.vignette as string) || (q.case_narrative as string) } : {}),
         ...(q.source_material ? { source_material: q.source_material as string } : {}),
+        ...(parts.length ? { parts, total_points: Number(q.total_points) || summed } : {}),
         ...(q.sample_response ? { sample_response: q.sample_response as string } : {}),
         ...(q.scoring_rubric ? { scoring_rubric: q.scoring_rubric as string } : {}),
         explanation: (q.explanation as string) || '',
       };
+    }
     case 'performance_task': {
       const rawExhibits = (q.exhibits as Array<Record<string, unknown>>) || [];
       return {
