@@ -46,8 +46,9 @@ function standaloneIssues(ft: string, c: Record<string, unknown>, q: Record<stri
   const answer = (c.answer as Record<string, unknown>) || {};
   switch (ft) {
     case 'constructed_response': case 'essay':
-      // Human-scored free text — a prompt is enough; no machine answer key.
+      // Human-scored free text: the rubric is the answer key, so it is required.
       if (!_has(c.prompt) && !_has(c.stem) && !_has(q.question)) out.push('missing prompt');
+      if (!_has(c.scoring_rubric)) out.push('missing scoring_rubric (the answer key for a human-scored response)');
       break;
     case 'performance_task':
       // Human-scored, closed-universe: the rubric IS the answer key and the
