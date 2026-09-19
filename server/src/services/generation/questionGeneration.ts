@@ -755,7 +755,7 @@ This is a human-scored free-text response — NO machine answer key.
   "format_type": "constructed_response",
   "prompt": "<the writing task / question the examinee must respond to>",
   "source_material": "<any passage/material the writer must engage with, else empty>",
-  "scoring_rubric": "<what a strong response demonstrates>",
+  "scoring_rubric": "<MANDATORY — this format's answer key. State exactly what earns credit, the point allocation across any labeled parts, and what earns none (unsupported or irrelevant writing). A response item without a rubric cannot be scored and will be REJECTED.>",
   "sample_response": "<a brief model-response outline>",
   "explanation": "<what skill this assesses — 1-2 sentences>",
   "difficulty": "<easy|medium|hard>",

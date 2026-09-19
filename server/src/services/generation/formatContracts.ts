@@ -151,7 +151,7 @@ FORMAT_CONTRACTS.constructed_response = {
   slug: 'constructed_response',
   label: 'Constructed Response / Essay (human-scored)',
   structure: 'prompt (the writing task / question) + optional sample_response and scoring_rubric. There is no machine answer key — this format is scored by a human/rubric, not auto-graded.',
-  gradability: 'Not auto-gradable by design. A prompt is required; no answer key is expected.',
+  gradability: 'Not auto-gradable by design, but NOT unscorable: a prompt AND a scoring_rubric are required. The rubric is this format\'s answer key — it states what earns credit, the point allocation across any labeled parts, and what earns none.',
   syntax: ['State the task clearly.', 'Provide any source material the writer must respond to.'],
 };
 
@@ -205,7 +205,10 @@ export function canonicalizeFormatSlug(raw: string): string {
  * performance_task even though their invented slugs match nothing by name.
  */
 export function resolveFormat(hint: { slug?: string; name?: string; description?: string; answer_format?: string }): string {
-  const text = `${hint.name || ''} ${hint.description || ''} ${hint.answer_format || ''}`.toLowerCase();
+  // Exam docs hyphenate heavily ("single-best-answer", "constructed-response",
+  // "vignette-based"). Normalise separators so keyword tests actually match.
+  const text = `${hint.name || ''} ${hint.description || ''} ${hint.answer_format || ''}`
+    .toLowerCase().replace(/[-_]+/g, ' ').replace(/\s+/g, ' ');
   const has = (...ws: string[]) => ws.some((w) => text.includes(w));
 
   // ANSWER-MODEL OVERRIDE — this beats a canonical-but-WRONG slug. An extended
@@ -235,8 +238,12 @@ export function resolveFormat(hint: { slug?: string; name?: string; description?
   if (!ambiguousGrouped && FORMAT_CONTRACTS[bySlug]) return bySlug; // known canonical slug
 
   // A shared stimulus feeding SEVERAL sibling questions → grouped set.
-  const severalQuestions = has('several', 'multiple questions', 'related questions', 'set of questions', 'component questions', 'each set', 'followed by');
-  const sharedStimulus = has('shared', 'common scenario', 'integrated', 'shared stimulus', 'scenario', 'source materials, followed', 'passage', 'stimulus');
+  const severalQuestions =
+    has('several', 'multiple questions', 'related questions', 'set of questions', 'component questions',
+        'each set', 'followed by', 'separately scored', 'item set', 'sub questions', 'labeled parts')
+    || /\b(two|three|four|five|six|seven|eight|nine|ten|\d+)\s+[a-z ]{0,28}\b(questions|items|parts)\b/.test(text);
+  const sharedStimulus = has('shared', 'common scenario', 'integrated', 'shared stimulus', 'scenario',
+        'source materials, followed', 'passage', 'stimulus', 'vignette');
   if (has('integrated') || (sharedStimulus && severalQuestions)) {
     if (has('passage', 'reading comprehension', 'reading passage')) return 'passage_set';
     return 'case_study';
@@ -398,8 +405,10 @@ export function buildContentSchema(format: string, p: SchemaParams = {}): JsonSc
     case 'constructed_response':
     case 'essay':
       // Human-scored free text — a prompt is the only required field; no answer key.
-      return { ...base, required: ['prompt'], properties: {
-        prompt: NON_EMPTY_STR, source_material: STR, sample_response: STR, scoring_rubric: STR } };
+      // The RUBRIC is the answer key — without it the item cannot be scored, so it
+      // is required just as it is for performance_task.
+      return { ...base, required: ['prompt', 'scoring_rubric'], properties: {
+        prompt: NON_EMPTY_STR, source_material: STR, sample_response: STR, scoring_rubric: NON_EMPTY_STR } };
     case 'performance_task': {
       // Source-material exhibits + an extended constructed work product, human-scored.
       const exhibitContent: JsonSchema = p.exhibitsAsMarkdown === false ? STR : NON_EMPTY_STR;
