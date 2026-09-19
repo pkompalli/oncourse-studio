@@ -192,6 +192,139 @@ function dropContradictoryTemplates(g: Record<string, unknown>): Record<string, 
   return g;
 }
 
+/**
+ * A format spec must describe ITS OWN shape. The guidelines LLM writes the
+ * format_specs prose one format at a time and leaks field names between them —
+ * CFA's constructed_response came back with "Required top-level fields are
+ * format_type, question, case_narrative, response_instructions, parts,
+ * total_points", naming two case_study fields its own schema does not have.
+ *
+ * The schema gate rejects anything built to that prose, so it cannot produce an
+ * invalid question — but the generator reads the prose too, and burns attempts
+ * emitting fields that are then stripped. This removes the contamination at the
+ * source: the content_schema already states which fields this format has, so any
+ * clause naming a field DISTINCTIVE TO ANOTHER FORMAT is a copy-paste artefact.
+ *
+ * Deliberately narrow, because this edits guidance the generator depends on:
+ *   - only underscored field names are policed. Single-word schema fields
+ *     (passage, options, answer, parts, exhibits) are ordinary English and would
+ *     fire on legitimate prose; `case_narrative` and `response_instructions`
+ *     cannot appear by accident.
+ *   - envelope fields every question record carries (format_type, question,
+ *     reasoning_step…) are never foreign.
+ *   - a NEGATED mention is kept — "never include sub_questions" is a correct rule
+ *     for a standalone format, not contamination.
+ */
+const ENVELOPE_FIELDS = new Set([
+  'format_type', 'is_image_question', 'image_type', 'reasoning_step', 'question_type',
+]);
+/**
+ * The specs describe the RAW shape the generator emits; the content_schema describes
+ * the NORMALIZED shape buildContentFromQuestion produces from it. These raw names are
+ * how EVERY format spells its answer key and its per-item scoring, so they are never
+ * evidence of contamination — `correct_answer` lives in the emq schema alone, and
+ * policing it would have deleted "correct_answer must be exactly one letter A-E" from
+ * every MCQ spec in the database.
+ */
+const RAW_GENERATION_FIELDS = new Set([
+  'correct_answer', 'correct_answers', 'correct_option', 'keyed_answer', 'answer_key',
+  'point_value', 'total_points', 'acceptable_range', 'sample_response', 'bloom_level',
+]);
+const NEGATION_RX = /\b(no|not|never|non|without|avoid|omit|exclude|rather than|instead of|unlike|do not|don't|must not|should not|is not|are not)\b/i;
+
+/** Every underscored field name a JSON Schema mentions, at any depth. */
+function schemaFieldNames(schema: unknown, out = new Set<string>()): Set<string> {
+  if (!schema || typeof schema !== 'object') return out;
+  const s = schema as Record<string, unknown>;
+  const props = s.properties as Record<string, unknown> | undefined;
+  if (props && typeof props === 'object') {
+    for (const [k, v] of Object.entries(props)) { if (k.includes('_')) out.add(k); schemaFieldNames(v, out); }
+  }
+  if (Array.isArray(s.required)) for (const k of s.required) if (typeof k === 'string' && k.includes('_')) out.add(k);
+  for (const k of ['items', 'anyOf', 'allOf', 'oneOf']) {
+    const v = s[k];
+    if (Array.isArray(v)) v.forEach((e) => schemaFieldNames(e, out));
+    else if (v) schemaFieldNames(v, out);
+  }
+  return out;
+}
+
+function scrubForeignFieldNames(g: Record<string, unknown>): Record<string, unknown> {
+  const specs = g.format_specs as Record<string, Record<string, unknown>> | undefined;
+  if (!specs) return g;
+
+  // Vocabulary of every format, so "foreign" means "belongs to a DIFFERENT format"
+  // rather than merely "absent from this schema" — a field no format declares is
+  // exam-specific prose and must be left alone.
+  const vocab = new Map<string, Set<string>>();
+  for (const slug of Object.keys(FORMAT_CONTRACTS)) {
+    try { vocab.set(slug, schemaFieldNames(buildContentSchema(slug))); } catch { /* skip */ }
+  }
+
+  for (const [slug, spec] of Object.entries(specs)) {
+    if (!spec || typeof spec !== 'object') continue;
+    const own = schemaFieldNames(spec.content_schema);
+    for (const f of vocab.get(slug) || []) own.add(f);
+    const foreign = new Set<string>();
+    for (const [other, fields] of vocab) {
+      if (other === slug) continue;
+      for (const f of fields) if (!own.has(f) && !ENVELOPE_FIELDS.has(f) && !RAW_GENERATION_FIELDS.has(f)) foreign.add(f);
+    }
+    if (foreign.size === 0) continue;
+    const mentions = (text: string) => [...foreign].filter((f) => new RegExp(`\\b${f}\\b`).test(text));
+
+    const dropped: string[] = [];
+    for (const key of ['structure_requirements', 'syntax_rules', 'validation_checks']) {
+      const arr = spec[key];
+      if (!Array.isArray(arr)) continue;
+      const kept: string[] = [];
+      for (const entry of arr) {
+        if (typeof entry !== 'string') { kept.push(entry as unknown as string); continue; }
+        // Scrub per CLAUSE so an exam-specific requirement sharing a bullet with a
+        // contaminated field list survives.
+        const clauses = entry.split(/(?<=[.;])\s+/);
+        const good = clauses.filter((c) => {
+          const hits = mentions(c);
+          if (hits.length === 0 || NEGATION_RX.test(c)) return true;
+          dropped.push(...hits);
+          return false;
+        });
+        const text = good.join(' ').trim();
+        if (text) kept.push(text);
+      }
+      if (kept.length !== arr.length || dropped.length > 0) spec[key] = kept;
+    }
+
+    // A generation_template is copied LITERALLY by the generator, so a foreign key is
+    // worse there than in prose: a constructed_response template keyed case_narrative
+    // instead of vignette sends the shared scenario to a field the normalizer drops,
+    // losing it entirely. Don't edit keys out of a template — a half-rewritten shape
+    // is its own hazard. Discard it, exactly as dropContradictoryTemplates does, and
+    // let buildFormatSchema fall back to the built-in template, correct by construction.
+    const tmpl = spec.generation_template as Record<string, unknown> | undefined;
+    if (tmpl && typeof tmpl === 'object') {
+      const bad = Object.keys(tmpl).filter((k) => foreign.has(k));
+      if (bad.length > 0) {
+        delete spec.generation_template;
+        dropped.push(...bad);
+        console.warn(`  [Guidelines] ${slug}: generation_template keyed by another format's field(s) ${bad.join(', ')} — discarding it and using the canonical template`);
+      }
+    }
+
+    if (dropped.length > 0) {
+      // Removing the contaminated field list can leave the format with no statement
+      // of its shape at all — restore the canonical one.
+      const contract = FORMAT_CONTRACTS[slug];
+      const reqs = (spec.structure_requirements = (Array.isArray(spec.structure_requirements) ? spec.structure_requirements : []) as string[]);
+      if (contract && !reqs.some((r) => typeof r === 'string' && r.includes(contract.structure.slice(0, 40)))) {
+        reqs.unshift(contract.structure);
+      }
+      console.warn(`  [Guidelines] ${slug}: removed field name(s) belonging to other formats — ${[...new Set(dropped)].join(', ')}`);
+    }
+  }
+  return g;
+}
+
 export async function generateGuidelines(
   courseName: string,
   structure: Record<string, unknown>,
@@ -385,19 +518,16 @@ IMPORTANT:
 Return ONLY the JSON object. No preamble, no markdown fences.`;
 
   const guidelines = await callAndParseJson(prompt, 0.3);
-  // Pipeline: canonicalize slugs → materialize per-format schemas → guarantee
-  // grouped formats → guarantee a schema for EVERY declared format.
-  // canonicalize slugs -> force the analysed format set -> materialize schemas ->
-  // guarantee grouped formats -> guarantee a schema for every declared format.
-  // canonicalize slugs -> force the analysed format set -> materialize schemas ->
-  // guarantee grouped formats -> guarantee a schema for every format -> discard any
-  // template that contradicts its schema.
-  return dropContradictoryTemplates(ensureSchemaForEveryFormat(
+  // Pipeline: canonicalize slugs -> force the analysed format set -> materialize
+  // schemas -> guarantee grouped formats -> guarantee a schema for every format ->
+  // discard any template that contradicts its schema -> strip field names that
+  // leaked in from a different format's spec.
+  return scrubForeignFieldNames(dropContradictoryTemplates(ensureSchemaForEveryFormat(
     reconcileGroupedFormats(
       attachContentSchemas(reconcileToAnalysisFormats(canonicalizeGuidelines(guidelines), examFormat)),
       examFormat
     )
-  ));
+  )));
 }
 
 // Deterministic reconciliation: whenever the analysis describes a shared-stimulus
@@ -516,7 +646,7 @@ Return ONLY valid JSON. No preamble, no markdown fences.`;
   return {
     // Re-materialize schemas so an edit to num_options / sub-question counts /
     // exhibit rules updates the deterministic contract too.
-    updated_guidelines: updated ? attachContentSchemas(updated) : null,
+    updated_guidelines: updated ? scrubForeignFieldNames(attachContentSchemas(updated)) : null,
     response: (result.response as string) || 'Guidelines updated.',
   };
 }
