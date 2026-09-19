@@ -1,4 +1,4 @@
--- Migration 004: Auto-delete generated sets older than N days (default 30)
+-- Migration 004: Auto-delete generated sets older than N days (default 10)
 --
 -- A "generated set" is a row in qb_jobs. This purges jobs whose created_at
 -- is older than the retention window, along with everything hanging off
@@ -16,7 +16,7 @@
 create extension if not exists pg_cron;
 
 -- ── 2. Cleanup function ─────────────────────────────────────────
-create or replace function qb_delete_old_generations(retention_days int default 30)
+create or replace function qb_delete_old_generations(retention_days int default 10)
 returns jsonb
 language plpgsql
 security definer
@@ -76,5 +76,5 @@ select cron.unschedule('qb-delete-old-generations')
 select cron.schedule(
   'qb-delete-old-generations',
   '0 3 * * *',
-  $$ select qb_delete_old_generations(30); $$
+  $$ select qb_delete_old_generations(10); $$
 );

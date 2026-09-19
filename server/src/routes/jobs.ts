@@ -248,19 +248,60 @@ jobsRouter.get('/:id', async (req, res, next) => {
   }
 });
 
-// Delete a job and its questions
+// Delete a job and EVERYTHING hanging off it.
+//
+// This previously deleted only qb_questions + qb_jobs, which left three things
+// behind and silently failed in a fourth way:
+//   • generated images in the `question-images` bucket — never removed, and the
+//     single largest consumer of the storage quota
+//   • qb_question_snapshots / qb_exports rows referencing the deleted questions
+//   • qb_questions.replaced_by_id is a SELF-FK; rows pointing into the doomed set
+//     block the delete unless nulled first
+// Errors on the child deletes were not checked, so a blocked delete returned 200
+// and the run appeared to vanish from the UI while still occupying the database.
+async function deleteJobCascade(jobId: string): Promise<{ images: number }> {
+  const { data: qIds } = await supabase.from('qb_questions').select('id').eq('job_id', jobId);
+  const ids = (qIds || []).map((r) => r.id as string);
+
+  // Null the self-FK so references into the doomed rows cannot block the delete.
+  await supabase.from('qb_questions').update({ replaced_by_id: null }).eq('job_id', jobId);
+
+  if (ids.length > 0) {
+    const { error: snapErr } = await supabase.from('qb_question_snapshots').delete().in('question_id', ids);
+    if (snapErr && !/does not exist/i.test(snapErr.message)) throw new Error(`snapshots: ${snapErr.message}`);
+  }
+  const { error: expErr } = await supabase.from('qb_exports').delete().eq('job_id', jobId);
+  if (expErr && !/does not exist/i.test(expErr.message)) throw new Error(`exports: ${expErr.message}`);
+
+  const { error: qErr } = await supabase.from('qb_questions').delete().eq('job_id', jobId);
+  if (qErr) throw new Error(`questions: ${qErr.message}`);
+
+  const { error: jErr } = await supabase.from('qb_jobs').delete().eq('id', jobId);
+  if (jErr) throw new Error(`job: ${jErr.message}`);
+
+  // Generated images are namespaced by job: questions/<jobId>/<questionId>_<hash>.<ext>
+  let images = 0;
+  const prefix = `questions/${jobId}`;
+  for (let page = 0; page < 50; page++) {
+    const { data: files } = await supabase.storage
+      .from('question-images')
+      .list(prefix, { limit: 100, offset: page * 100 });
+    if (!files || files.length === 0) break;
+    const paths = files.map((f) => `${prefix}/${f.name}`);
+    const { error: rmErr } = await supabase.storage.from('question-images').remove(paths);
+    if (rmErr) { console.warn(`  [DeleteJob] image cleanup failed: ${rmErr.message}`); break; }
+    images += paths.length;
+    if (files.length < 100) break;
+  }
+  return { images };
+}
+
 jobsRouter.delete('/:id', async (req, res, next) => {
   try {
     const jobId = req.params.id;
-
-    // Delete questions first (foreign key)
-    await supabase.from('qb_questions').delete().eq('job_id', jobId);
-
-    // Delete the job
-    const { error } = await supabase.from('qb_jobs').delete().eq('id', jobId);
-    if (error) throw new Error(error.message);
-
-    res.json({ success: true });
+    const { images } = await deleteJobCascade(jobId);
+    console.log(`  [DeleteJob] ${jobId}: removed questions, snapshots, exports, job and ${images} image(s)`);
+    res.json({ success: true, images_removed: images });
   } catch (e) {
     next(e);
   }

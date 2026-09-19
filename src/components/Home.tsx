@@ -108,7 +108,12 @@ export default function Home() {
     try {
       await jobsApi.delete(jobId);
       setAllJobs(prev => prev.filter(j => j.id !== jobId));
-    } catch { /* silent */ }
+    } catch (err) {
+      // Never swallow this: a failed delete used to remove the row from the list
+      // while the run stayed in the database, so storage never actually dropped.
+      console.error('Delete failed', err);
+      alert(`Could not delete this run: ${err instanceof Error ? err.message : 'unknown error'}`);
+    }
   };
 
   const getJobStats = (job: Job) => {
