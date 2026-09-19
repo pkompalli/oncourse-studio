@@ -4,7 +4,7 @@
  */
 
 import { orCall, MODELS } from '../llm/openrouter.js';
-import { extractFormatSlugs, renderContractsForPrompt, buildContentSchema, normalizeSchemaParams, canonicalizeFormatSlug, resolveFormat } from './formatContracts.js';
+import { extractFormatSlugs, renderContractsForPrompt, buildContentSchema, normalizeSchemaParams, canonicalizeFormatSlug, resolveFormat, FORMAT_CONTRACTS } from './formatContracts.js';
 
 /** Canonicalize every format slug in the guidelines (format_specs keys +
  *  format_distribution) so the whole pipeline uses the fixed registry vocabulary. */
@@ -112,6 +112,27 @@ function reconcileToAnalysisFormats(g: Record<string, unknown>, examFormat: Reco
       description: (existing.description as string) || (t.description as string) || '',
     });
     const spec = (specs[slug] = specs[slug] || {});
+
+    // A spec this function had to CREATE (because the model mislabelled or omitted
+    // the format) would otherwise be an empty shell: no rules for the generator,
+    // nothing for the validator's per-format checklist. Seed anything missing from
+    // the canonical contract so it is never rule-less.
+    const contract = FORMAT_CONTRACTS[slug];
+    if (contract) {
+      const empty = (v: unknown) => !Array.isArray(v) || v.length === 0;
+      if (!spec.when_to_use) spec.when_to_use = (t.description as string) || contract.label;
+      if (empty(spec.structure_requirements)) {
+        spec.structure_requirements = [contract.structure, ...(contract.stimulusRule ? [contract.stimulusRule] : [])];
+      }
+      if (empty(spec.syntax_rules)) spec.syntax_rules = [...contract.syntax];
+      if (!spec.gradability) spec.gradability = contract.gradability;
+      if (empty(spec.validation_checks)) {
+        spec.validation_checks = [
+          `Verify the record matches the required structure: ${contract.structure}`,
+          contract.gradability,
+        ];
+      }
+    }
     // The analysis knows how many scored questions one unit yields; that beats the
     // generic contract default the guidelines tends to copy.
     const ipu = Number(t.items_per_unit) || 0;
@@ -125,6 +146,49 @@ function reconcileToAnalysisFormats(g: Record<string, unknown>, examFormat: Reco
   // Drop anything the analysis never declared (LLM inventions/substitutions).
   for (const k of Object.keys(specs)) if (!want.has(k)) delete specs[k];
   g.format_distribution = out;
+  return g;
+}
+
+
+/**
+ * A generation_template that cannot satisfy its own content_schema is worse than
+ * none: generation copies the template, then validation rejects what it produced.
+ *
+ * Seen on CFA — the model described "Constructed-Response Item Set" as a grouped
+ * case-study shape (case_narrative + sub_questions, no prompt, no scoring_rubric)
+ * while the constructed_response schema requires prompt + scoring_rubric. Dropping
+ * the contradictory template makes buildFormatSchema fall back to the built-in one,
+ * which is correct by construction.
+ */
+function dropContradictoryTemplates(g: Record<string, unknown>): Record<string, unknown> {
+  const specs = g.format_specs as Record<string, Record<string, unknown>> | undefined;
+  if (!specs) return g;
+  // The template describes the RAW generation shape; the schema describes the
+  // NORMALIZED content that buildContentFromQuestion produces from it. Compare via
+  // aliases, or a correct template (question -> stem, correct_answer -> answer.key)
+  // would be thrown away for "missing" fields it legitimately supplies.
+  const ALIASES: Record<string, string[]> = {
+    stem: ['stem', 'question', 'prompt'],
+    prompt: ['prompt', 'question', 'stem'],
+    answer: ['answer', 'correct_answer', 'correct_answers', 'correct_option', 'keyed_answer', 'correct_ids'],
+    case_narrative: ['case_narrative', 'scenario', 'question'],
+    passage: ['passage', 'reading_passage'],
+    row_headers: ['row_headers', 'rows'],
+    column_headers: ['column_headers', 'columns'],
+    blanks: ['blanks', 'choices'],
+    correct_order: ['correct_order', 'items'],
+  };
+  for (const [slug, spec] of Object.entries(specs)) {
+    const tmpl = spec?.generation_template as Record<string, unknown> | undefined;
+    const schema = spec?.content_schema as { required?: string[] } | undefined;
+    if (!tmpl || typeof tmpl !== 'object' || !Array.isArray(schema?.required)) continue;
+    const has = (k: string) => (ALIASES[k] || [k]).some((a) => Object.prototype.hasOwnProperty.call(tmpl, a));
+    const missing = schema.required.filter((k) => !has(k));
+    if (missing.length > 0) {
+      console.warn(`  [Guidelines] ${slug}: generation_template is missing required field(s) ${missing.join(', ')} — discarding it and using the canonical template`);
+      delete spec.generation_template;
+    }
+  }
   return g;
 }
 
@@ -144,6 +208,18 @@ export async function generateGuidelines(
 
   // Turn the analysis's described question-grouping into an explicit instruction:
   // map each shared-stimulus group onto a concrete grouped machine format.
+  // The analysis already resolved these structurally, so they are canonical and
+  // authoritative. Naming them explicitly stops the model substituting a similar
+  // format (a constructed-response set re-labelled task_based_simulation, say).
+  const qTypes = Array.isArray(examFormat.question_types) ? (examFormat.question_types as Array<Record<string, unknown>>) : [];
+  const formatListBlock = qTypes.length > 0
+    ? qTypes.map((t) => {
+        const slug = canonicalizeFormatSlug(String(t.slug || ''));
+        const ipu = Number(t.items_per_unit) || 1;
+        return `  - ${slug} — ${t.percentage}% of scored weight${ipu > 1 ? `; ONE unit yields ${ipu} scored questions (use this for sub_question_min/max)` : ''}. ${String(t.description || '').slice(0, 220)}`;
+      }).join('\n')
+    : '  (none declared — infer from the specification above)';
+
   const groups = Array.isArray(examFormat.question_groups) ? (examFormat.question_groups as Array<Record<string, unknown>>) : [];
   const groupingBlock = groups.length > 0
     ? `The exam groups some questions under a shared stimulus. For EACH group, add a format_specs entry for the mapped machine format AND a format_distribution entry:\n` +
@@ -172,6 +248,9 @@ ${contractsBlock}
 
 ─── QUESTION GROUPING (from the analysis — turn described grouping into concrete grouped formats) ───
 ${groupingBlock}
+
+─── THE EXAM'S FORMATS (AUTHORITATIVE — use EXACTLY these slugs as the keys of format_specs and the "format" values in format_distribution; do NOT rename, merge, substitute or omit any of them) ───
+${formatListBlock}
 
 Produce a JSON object with these exact sections:
 
@@ -307,12 +386,15 @@ Return ONLY the JSON object. No preamble, no markdown fences.`;
   // grouped formats → guarantee a schema for EVERY declared format.
   // canonicalize slugs -> force the analysed format set -> materialize schemas ->
   // guarantee grouped formats -> guarantee a schema for every declared format.
-  return ensureSchemaForEveryFormat(
+  // canonicalize slugs -> force the analysed format set -> materialize schemas ->
+  // guarantee grouped formats -> guarantee a schema for every format -> discard any
+  // template that contradicts its schema.
+  return dropContradictoryTemplates(ensureSchemaForEveryFormat(
     reconcileGroupedFormats(
       attachContentSchemas(reconcileToAnalysisFormats(canonicalizeGuidelines(guidelines), examFormat)),
       examFormat
     )
-  );
+  ));
 }
 
 // Deterministic reconciliation: whenever the analysis describes a shared-stimulus
