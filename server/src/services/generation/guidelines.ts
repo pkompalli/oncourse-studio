@@ -73,6 +73,61 @@ function attachContentSchemas(guidelines: Record<string, unknown>): Record<strin
   return guidelines;
 }
 
+
+/**
+ * The ANALYSIS is authoritative on WHICH formats this exam uses — it resolves them
+ * structurally (resolveFormat), so its question_types are already canonical. The
+ * guidelines LLM only INTERPRETS them; it must not re-pick the set. Left to itself
+ * it invents and substitutes: a CFA "Constructed-Response Item Set" came back from
+ * the analysis correctly as constructed_response and the guidelines re-labelled it
+ * task_based_simulation, silently dropping the format.
+ *
+ * This forces format_distribution to exactly the analysed set, carries the analysed
+ * percentages, and seeds each grouped format's sub-question bounds from
+ * items_per_unit — so a 4-question CFA vignette stops inheriting the generic
+ * "exactly 6 sub-questions" default.
+ */
+function reconcileToAnalysisFormats(g: Record<string, unknown>, examFormat: Record<string, unknown>): Record<string, unknown> {
+  const qts = Array.isArray(examFormat?.question_types) ? (examFormat.question_types as Array<Record<string, unknown>>) : [];
+  if (qts.length === 0) return g;
+
+  const want = new Map<string, Record<string, unknown>>();
+  for (const t of qts) {
+    const slug = canonicalizeFormatSlug(String(t.slug || ''));
+    if (slug) want.set(slug, t);
+  }
+  if (want.size === 0) return g;
+
+  const specs = (g.format_specs = (g.format_specs as Record<string, Record<string, unknown>>) || {});
+  const fd = Array.isArray(g.format_distribution) ? (g.format_distribution as Array<Record<string, unknown>>) : [];
+  const byFmt = new Map(fd.map((f) => [String(f.format || f.slug || ''), f]));
+
+  const out: Array<Record<string, unknown>> = [];
+  for (const [slug, t] of want) {
+    const existing = byFmt.get(slug) || {};
+    out.push({
+      ...existing,
+      format: slug,
+      percentage: Number(t.percentage) || Number(existing.percentage) || 0,
+      description: (existing.description as string) || (t.description as string) || '',
+    });
+    const spec = (specs[slug] = specs[slug] || {});
+    // The analysis knows how many scored questions one unit yields; that beats the
+    // generic contract default the guidelines tends to copy.
+    const ipu = Number(t.items_per_unit) || 0;
+    if (ipu > 1) {
+      const sp = (spec.schema_params = (spec.schema_params as Record<string, unknown>) || {});
+      sp.sub_question_min = ipu;
+      sp.sub_question_max = ipu;
+      delete spec.content_schema; // force a rebuild with the corrected bounds
+    }
+  }
+  // Drop anything the analysis never declared (LLM inventions/substitutions).
+  for (const k of Object.keys(specs)) if (!want.has(k)) delete specs[k];
+  g.format_distribution = out;
+  return g;
+}
+
 export async function generateGuidelines(
   courseName: string,
   structure: Record<string, unknown>,
@@ -250,8 +305,13 @@ Return ONLY the JSON object. No preamble, no markdown fences.`;
   const guidelines = await callAndParseJson(prompt, 0.3);
   // Pipeline: canonicalize slugs → materialize per-format schemas → guarantee
   // grouped formats → guarantee a schema for EVERY declared format.
+  // canonicalize slugs -> force the analysed format set -> materialize schemas ->
+  // guarantee grouped formats -> guarantee a schema for every declared format.
   return ensureSchemaForEveryFormat(
-    reconcileGroupedFormats(attachContentSchemas(canonicalizeGuidelines(guidelines)), examFormat)
+    reconcileGroupedFormats(
+      attachContentSchemas(reconcileToAnalysisFormats(canonicalizeGuidelines(guidelines), examFormat)),
+      examFormat
+    )
   );
 }
 
@@ -310,17 +370,30 @@ function extractJsonObject(raw: string): string {
  * COMPLETE, more concise object.
  */
 async function callAndParseJson(prompt: string, temperature: number): Promise<Record<string, unknown>> {
-  const r1 = await orCall(MODELS.STRUCTURE, '', prompt, { maxTokens: 24000, temperature });
-  try {
-    return JSON.parse(extractJsonObject(r1.content));
-  } catch {
-    const r2 = await orCall(
-      MODELS.STRUCTURE, '',
-      `${prompt}\n\nIMPORTANT: Return a COMPLETE, valid JSON object. Keep prose fields concise so the JSON is not truncated. Do not stop mid-string.`,
-      { maxTokens: 24000, temperature: Math.max(0, temperature - 0.2) }
-    );
-    return JSON.parse(extractJsonObject(r2.content));
+  // Retry on ANY failure, not just a bad parse. Guidelines generation is a long,
+  // expensive call and a single transient "fetch failed" used to abort the whole
+  // run, losing the work with nothing retried.
+  const nudge = `${prompt}\n\nIMPORTANT: Return a COMPLETE, valid JSON object. Keep prose fields concise so the JSON is not truncated. Do not stop mid-string.`;
+  const attempts = [
+    { p: prompt, t: temperature },
+    { p: nudge, t: Math.max(0, temperature - 0.2) },
+    { p: nudge, t: Math.max(0, temperature - 0.2) },
+  ];
+  let lastErr: unknown;
+  for (let i = 0; i < attempts.length; i++) {
+    try {
+      const r = await orCall(MODELS.STRUCTURE, '', attempts[i].p, { maxTokens: 24000, temperature: attempts[i].t });
+      return JSON.parse(extractJsonObject(r.content));
+    } catch (e) {
+      lastErr = e;
+      const msg = e instanceof Error ? e.message : String(e);
+      const cause = (e as { cause?: { message?: string; code?: string } })?.cause;
+      const detail = cause?.code || cause?.message || '';
+      console.warn(`  [Guidelines] attempt ${i + 1}/${attempts.length} failed: ${msg.slice(0, 100)}${detail ? ` (${detail})` : ''}`);
+      if (i < attempts.length - 1) await new Promise((r) => setTimeout(r, 3000 * (i + 1)));
+    }
   }
+  throw new Error(`Guidelines generation failed after ${attempts.length} attempts: ${lastErr instanceof Error ? lastErr.message : String(lastErr)}`);
 }
 
 export async function refineGuidelines(

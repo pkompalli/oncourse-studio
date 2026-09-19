@@ -111,7 +111,7 @@ export const FORMAT_CONTRACTS: Record<string, FormatContract> = {
     structure: 'case_narrative (with the data/evidence to analyze); topics[]; response_instructions; sub_questions[] (each a fully-formed question of its own format_type with its own answer key, rationale, and reasoning_step); overall explanation.',
     gradability: 'EVERY sub-question must carry the COMPLETE machine-readable answer scaffolding for ITS format (options/rows/columns/choices/items + a structured answer key). A sub-answer that exists only in rationale prose is INVALID.',
     syntax: [
-      'Exactly 6 sub-questions; at least 3 different sub-question format_types.',
+      'The number of sub-questions per set is whatever THIS exam uses (see schema_params.sub_question_min/max) — do not assume 6; use at least 2 different sub-question format_types where the exam mixes them.',
       'reasoning_step per sub-question using THIS exam\'s discipline taxonomy (no clinical steps on non-clinical exams).',
       'Reference exhibits by visible LABEL only — never an internal id/slug.',
       'Any rule/fact a key depends on must appear in the narrative or an exhibit.',

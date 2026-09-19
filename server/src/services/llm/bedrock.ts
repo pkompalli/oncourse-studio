@@ -166,14 +166,7 @@ async function mantleCall(
         throw new Error(`Mantle auth error: ${errMsg}`);
       }
 
-      if (attempt < MAX_RETRIES && (
-        errMsg.includes('ThrottlingException') ||
-        errMsg.includes('429') ||
-        errMsg.includes('500') ||
-        errMsg.includes('ServiceUnavailable') ||
-        errMsg.includes('ETIMEDOUT') ||
-        errMsg.includes('ECONNRESET')
-      )) {
+      if (attempt < MAX_RETRIES && isTransientLlmError(e)) {
         const delay = INITIAL_BACKOFF_MS * Math.pow(2, attempt);
         console.log(`  [Mantle] ${errMsg.slice(0, 80)} — retry ${attempt + 1} in ${delay}ms`);
         await new Promise((r) => setTimeout(r, delay));
@@ -258,14 +251,7 @@ async function converseCall(
         throw new Error(`Bedrock auth error: ${errMsg}`);
       }
 
-      if (attempt < MAX_RETRIES && (
-        errMsg.includes('ThrottlingException') ||
-        errMsg.includes('429') ||
-        errMsg.includes('500') ||
-        errMsg.includes('ServiceUnavailable') ||
-        errMsg.includes('ETIMEDOUT') ||
-        errMsg.includes('ECONNRESET')
-      )) {
+      if (attempt < MAX_RETRIES && isTransientLlmError(e)) {
         const delay = INITIAL_BACKOFF_MS * Math.pow(2, attempt);
         console.log(`  [Bedrock] ${errMsg.slice(0, 80)} — retry ${attempt + 1} in ${delay}ms`);
         await new Promise((r) => setTimeout(r, delay));
@@ -280,6 +266,24 @@ async function converseCall(
 }
 
 // ── Main call function — routes to Mantle or Converse ──
+
+
+/**
+ * Is this error worth retrying?
+ *
+ * undici surfaces network faults as a bare `TypeError: fetch failed` and hides the
+ * real reason in `error.cause` (HeadersTimeoutError / UND_ERR_HEADERS_TIMEOUT,
+ * socket hang up, ECONNREFUSED…). The old whitelist matched only the top-level
+ * message, so a transient blip on a long call threw straight out with no retry —
+ * which is how a single hiccup could kill an entire guidelines generation.
+ */
+function isTransientLlmError(e: unknown): boolean {
+  const err = e as { message?: string; code?: string; cause?: { message?: string; code?: string } };
+  const blob = [err?.message, err?.code, err?.cause?.message, err?.cause?.code]
+    .filter(Boolean).join(' | ');
+  return /ThrottlingException|429|\b5\d\d\b|ServiceUnavailable|ETIMEDOUT|ECONNRESET|fetch failed|HeadersTimeout|BodyTimeout|UND_ERR|socket hang up|ECONNREFUSED|ENOTFOUND|EPIPE|network|terminated|AbortError/i
+    .test(blob);
+}
 
 export async function brCall(
   model: string,
