@@ -45,11 +45,28 @@ function standaloneIssues(ft: string, c: Record<string, unknown>, q: Record<stri
   const out: string[] = [];
   const answer = (c.answer as Record<string, unknown>) || {};
   switch (ft) {
-    case 'constructed_response': case 'essay':
+    case 'constructed_response': case 'essay': {
       // Human-scored free text: the rubric is the answer key, so it is required.
       if (!_has(c.prompt) && !_has(c.stem) && !_has(q.question)) out.push('missing prompt');
       if (!_has(c.scoring_rubric)) out.push('missing scoring_rubric (the answer key for a human-scored response)');
+      // An ITEM SET's labelled parts are scored SEPARATELY, so each needs its own
+      // point value and rubric — otherwise the set cannot actually be marked.
+      const parts = Array.isArray(c.parts) ? (c.parts as Array<Record<string, unknown>>) : null;
+      if (parts) {
+        if (parts.length === 0) out.push('parts[] present but empty');
+        parts.forEach((pt, i) => {
+          const tag = `part ${(pt.label as string) || i + 1}`;
+          if (!_has(pt.prompt)) out.push(`${tag}: missing prompt`);
+          if (!_has(pt.label)) out.push(`${tag}: missing label`);
+          if (!(typeof pt.points === 'number' && pt.points > 0)) out.push(`${tag}: missing point value (parts are scored separately)`);
+          if (!_has(pt.scoring_rubric)) out.push(`${tag}: missing scoring_rubric`);
+        });
+        const sum = parts.reduce((n, pt) => n + (typeof pt.points === 'number' ? pt.points : 0), 0);
+        const total = typeof c.total_points === 'number' ? c.total_points : null;
+        if (total !== null && sum > 0 && total !== sum) out.push(`total_points ${total} does not equal the sum of part points (${sum})`);
+      }
       break;
+    }
     case 'performance_task':
       // Human-scored, closed-universe: the rubric IS the answer key and the
       // exhibits are the universe. Missing either makes the task unscorable.

@@ -279,7 +279,9 @@ Produce a JSON object with these exact sections:
         "sub_question_count": <exact sub-question count for case_study (e.g. 6); null if N/A>,
         "sub_question_min": <min sub-questions/tasks for TBS; null if N/A>,
         "sub_question_max": <max sub-questions/tasks for TBS; null if N/A>,
-        "exhibits_as_markdown": <true if TBS/case exhibits must be markdown; null if N/A>
+        "exhibits_as_markdown": <true if TBS/case exhibits must be markdown; null if N/A>,
+        "parts_min": <constructed_response ITEM SETS only: minimum labelled parts scored separately (e.g. CFA Level III sets); null for a single-prompt essay>,
+        "parts_max": <constructed_response ITEM SETS only: maximum labelled parts; null if N/A>
       }
     }
   },
@@ -370,6 +372,7 @@ IMPORTANT:
     • hot_spot: "stimulus_type", "targets"/"regions" with slug ids, "correct_ids": [...].
     • emq: "theme", "option_list": [...], "scenarios": [{"stem","correct_answer"}].
     • GROUPED formats (case_study, task_based_simulation, passage_set, or any shared-stimulus set): ONE object with the shared stimulus + a "sub_questions" array. Shared stimulus field: passage_set → "passage"; case_study → "case_narrative"; task_based_simulation → "exhibits":[{label,title,type,content(markdown)}]. Each sub-question: {"number","format_type","question", <that sub-format's answer scaffolding as above>, "rationale","difficulty"}.
+- If a constructed-response format is delivered as an ITEM SET (a shared vignette followed by labelled parts scored separately, as at CFA Level III), you MUST set schema_params.parts_min/parts_max to the real number of parts, and structure_requirements MUST state that each part carries its own point value and its own rubric, with total_points equal to their sum. Do not describe it as a single merged prompt.
 - STIMULUS COMPLETENESS: for any format whose questions can reference a passage/excerpt/figure/exhibit, structure_requirements MUST state that the stimulus is embedded in the question (reading passage in content.passage; TBS/case exhibits as markdown; figures as images) and validation_checks MUST include "a question that references a passage/figure/exhibit not present is ungradable — reject it".
 - anti_patterns MUST include an authenticity rule: questions must TEST each skill by making the candidate PERFORM it on real material (a real argument/passage/data/scenario), NOT ask ABOUT the skill. Explicitly forbid meta / definitional / test-strategy / study-skill questions (e.g. "what is a good reading technique?", "what is the definition of a necessary assumption?"). A topic name is the TASK the question must require, never a subject to describe.
 - explanation_guidelines.must_address_distractors MUST be true — every explanation must discuss why EACH wrong option is wrong, not just defend the correct answer

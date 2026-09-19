@@ -150,9 +150,13 @@ FORMAT_CONTRACTS.tbs = { ...FORMAT_CONTRACTS.task_based_simulation, slug: 'tbs' 
 FORMAT_CONTRACTS.constructed_response = {
   slug: 'constructed_response',
   label: 'Constructed Response / Essay (human-scored)',
-  structure: 'prompt (the writing task / question) + optional sample_response and scoring_rubric. There is no machine answer key — this format is scored by a human/rubric, not auto-graded.',
+  structure: 'prompt (the task framing) + scoring_rubric. For an ITEM SET (e.g. CFA Level III): also vignette (the shared scenario every part refers to), parts[] — each {label:"A", prompt, points, scoring_rubric, sample_response?} scored SEPARATELY — and total_points. A single-prompt essay omits vignette/parts. No machine answer key; scored by a human against the rubric.',
   gradability: 'Not auto-gradable by design, but NOT unscorable: a prompt AND a scoring_rubric are required. The rubric is this format\'s answer key — it states what earns credit, the point allocation across any labeled parts, and what earns none.',
-  syntax: ['State the task clearly.', 'Provide any source material the writer must respond to.'],
+  syntax: [
+    'State the task clearly and say what the response must contain.',
+    'Provide any source material / vignette the writer must respond to.',
+    'For an ITEM SET: label the parts A, B, C…, give EACH part its own point value and its own rubric, and set total_points to their sum. Parts are scored separately — never merge them into one prompt.',
+  ],
 };
 
 FORMAT_CONTRACTS.performance_task = {
@@ -311,6 +315,8 @@ export type SchemaParams = {
   subQuestionMin?: number;    // TBS lower bound
   subQuestionMax?: number;    // TBS upper bound
   exhibitsAsMarkdown?: boolean; // TBS/case exhibits carry markdown content (default true)
+  partsMin?: number;          // constructed_response item set: minimum labelled parts
+  partsMax?: number;          // constructed_response item set: maximum labelled parts
 };
 
 type JsonSchema = Record<string, unknown>;
@@ -336,6 +342,8 @@ export function normalizeSchemaParams(raw: unknown): SchemaParams {
     subQuestionMin: num(r.sub_question_min),
     subQuestionMax: num(r.sub_question_max),
     exhibitsAsMarkdown: typeof r.exhibits_as_markdown === 'boolean' ? (r.exhibits_as_markdown as boolean) : undefined,
+    partsMin: num(r.parts_min),
+    partsMax: num(r.parts_max),
   };
 }
 
@@ -405,10 +413,34 @@ export function buildContentSchema(format: string, p: SchemaParams = {}): JsonSc
     case 'constructed_response':
     case 'essay':
       // Human-scored free text — a prompt is the only required field; no answer key.
-      // The RUBRIC is the answer key — without it the item cannot be scored, so it
-      // is required just as it is for performance_task.
-      return { ...base, required: ['prompt', 'scoring_rubric'], properties: {
-        prompt: NON_EMPTY_STR, source_material: STR, sample_response: STR, scoring_rubric: NON_EMPTY_STR } };
+      // The RUBRIC is the answer key — without it the item cannot be scored.
+      //
+      // An ITEM SET (CFA Level III) is a shared vignette plus labelled parts scored
+      // SEPARATELY, so each part carries its own points and its own rubric. parts[]
+      // is optional (a plain essay has none) but strictly validated when present;
+      // an exam whose responses are always item sets sets parts_min.
+      {
+        const parts: JsonSchema = {
+          type: 'array',
+          items: {
+            type: 'object',
+            required: ['label', 'prompt', 'points', 'scoring_rubric'],
+            properties: {
+              label: NON_EMPTY_STR,
+              prompt: NON_EMPTY_STR,
+              points: { type: 'number', minimum: 1 },
+              scoring_rubric: NON_EMPTY_STR,
+              sample_response: STR,
+            },
+          },
+        };
+        if (p.partsMin) parts.minItems = p.partsMin;
+        if (p.partsMax) parts.maxItems = p.partsMax;
+        return { ...base, required: ['prompt', 'scoring_rubric', ...(p.partsMin ? ['parts'] : [])], properties: {
+          prompt: NON_EMPTY_STR, vignette: STR, source_material: STR,
+          parts, total_points: { type: 'number', minimum: 1 },
+          sample_response: STR, scoring_rubric: NON_EMPTY_STR } };
+      }
     case 'performance_task': {
       // Source-material exhibits + an extended constructed work product, human-scored.
       const exhibitContent: JsonSchema = p.exhibitsAsMarkdown === false ? STR : NON_EMPTY_STR;
