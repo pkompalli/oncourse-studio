@@ -247,6 +247,35 @@ async function runAuditBatch(questions: Record<string, unknown>[]): Promise<Reco
 
 // ── Main reprocess pipeline ──
 
+/**
+ * Statuses a reprocess candidate can be in, and the test for whether it actually
+ * needs re-running. ONE definition, used by BOTH the entry gate and the pipeline.
+ *
+ * They were separate copies and they drifted: the pipeline was taught about
+ * 'needs_review' (a question whose review call came back empty) but the gate was
+ * not — it neither selected that status nor matched it. So a CFA job with 28
+ * questions parked in needs_review showed 28 to reprocess in the UI and answered
+ * "No flagged questions to reprocess" the moment you pressed the button, because
+ * the gate counted zero and returned before the pipeline ever ran.
+ */
+export const REPROCESS_CANDIDATE_STATUSES = ['flagged', 'reviewed', 'approved', 'needs_review'];
+
+export function isEffectivelyFlagged(q: Record<string, any>): boolean {
+  if (q.status === 'flagged') return true;
+  // Review call previously failed (empty/truncated response) — retry it.
+  if (q.status === 'needs_review') return true;
+  // quality_score (from audit) is the primary indicator.
+  if (q.quality_score != null) return (q.quality_score as number) < 7;
+  if (q.validator_score != null && q.adversarial_score != null) {
+    return (q.validator_score as number) < 7 || (q.adversarial_score as number) < 7;
+  }
+  // Validator only (e.g. post-migration, pre-adversarial).
+  if (q.validator_score != null) return (q.validator_score as number) < 7;
+  // 'reviewed' with no scores at all — needs processing.
+  if (q.status === 'reviewed') return true;
+  return false;
+}
+
 async function runReprocessPipeline(jobId: string): Promise<void> {
   try {
     setStep(jobId, 'Loading flagged questions...');
@@ -262,29 +291,13 @@ async function runReprocessPipeline(jobId: string): Promise<void> {
         .from('qb_questions')
         .select('*')
         .eq('job_id', jobId)
-        .in('status', ['flagged', 'reviewed', 'approved', 'needs_review'])
+        .in('status', REPROCESS_CANDIDATE_STATUSES)
         .is('replaced_by_id', null)
         .order('question_number', { ascending: true })
         .range(from, to)
     );
 
-    // Apply the same flagging logic as the UI's displayStatus()
-    const flaggedQuestions = (candidateQuestions || []).filter((q) => {
-      if (q.status === 'flagged') return true;
-      // review call previously failed (empty/truncated response) — retry it
-      if (q.status === 'needs_review') return true;
-      // quality_score (from audit) is the primary indicator
-      if (q.quality_score != null) return (q.quality_score as number) < 7;
-      // validator + adversarial scores
-      if (q.validator_score != null && q.adversarial_score != null) {
-        return (q.validator_score as number) < 7 || (q.adversarial_score as number) < 7;
-      }
-      // validator only (e.g. post-migration, pre-adversarial)
-      if (q.validator_score != null) return (q.validator_score as number) < 7;
-      // status is 'reviewed' with no scores — needs processing
-      if (q.status === 'reviewed') return true;
-      return false;
-    });
+    const flaggedQuestions = (candidateQuestions || []).filter(isEffectivelyFlagged);
 
     if (flaggedQuestions.length === 0) {
       setStep(jobId, 'No flagged questions to reprocess');
@@ -741,22 +754,13 @@ export async function reprocessFlaggedForJob(jobId: string): Promise<{
       .from('qb_questions')
       .select('status, quality_score, validator_score, adversarial_score')
       .eq('job_id', jobId)
-      .in('status', ['flagged', 'reviewed', 'approved'])
+      .in('status', REPROCESS_CANDIDATE_STATUSES)
       .is('replaced_by_id', null)
       .order('id', { ascending: true })
       .range(from, to)
   );
 
-  const total = (candidates || []).filter((q) => {
-    if (q.status === 'flagged') return true;
-    if (q.quality_score != null) return (q.quality_score as number) < 7;
-    if (q.validator_score != null && q.adversarial_score != null) {
-      return (q.validator_score as number) < 7 || (q.adversarial_score as number) < 7;
-    }
-    if (q.validator_score != null) return (q.validator_score as number) < 7;
-    if (q.status === 'reviewed') return true;
-    return false;
-  }).length;
+  const total = (candidates || []).filter(isEffectivelyFlagged).length;
 
   if (total === 0) {
     return {
