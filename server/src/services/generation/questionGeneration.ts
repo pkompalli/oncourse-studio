@@ -5,6 +5,7 @@ import { startTracking, getStepTokens } from '../llm/tokenTracker.js';
 import { classifyQuestionType } from '../questionType.js';
 import { schemaErrorsFor } from './schemaValidate.js';
 import { canonicalizeFormatSlug } from './formatContracts.js';
+import { processAllImageQuestions, isImageGenerationAvailable } from '../images/imageGeneration.js';
 
 /**
  * Faithful port of V1's generation pipeline:
@@ -2165,6 +2166,204 @@ async function buildTopicWiseTasks(
 }
 
 // ── Main entry: start or check generation for a job ──
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Replacement — generate a fresh question to stand in for one that review could
+// not rescue.
+//
+// The UI has offered this since the beginning (Step5Replace calls next-batch with
+// phase 'replace', the schema carries a replaced_by_id self-FK, and QuestionStatus
+// lists 'replaced' and 'manual_review') but nothing on the server implemented it:
+// the phase fell through next-batch's default branch and returned the job status
+// unchanged. Repair was the only tool, so a question that was malformed from the
+// start — a CFA case study whose narrative and rationales disagreed about their own
+// numbers — could only be fixed toward a shape it never had, burning a full
+// review/audit cycle each pass.
+//
+// A replacement is generated to the SAME shape as the question it retires (subject,
+// topic, format, bloom level, difficulty, image requirement) so the exam's
+// distribution is preserved, enters as 'generated' so it is reviewed from scratch,
+// and the old row is kept and marked 'replaced' with replaced_by_id pointing at its
+// successor — every read path already filters on `replaced_by_id is null`, so the
+// history stays auditable without polluting counts or exports.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Questions replaced per next-batch call, so the phase stays incremental. */
+const REPLACE_BATCH_SIZE = Number(process.env.REPLACE_BATCH_SIZE) || 10;
+/** After this many failed attempts a question is parked for a human. */
+const MAX_REPLACE_ATTEMPTS = 2;
+
+const replacingJobs = new Set<string>();
+
+function countReplaceFailures(q: Record<string, unknown>): number {
+  const trail = Array.isArray(q.audit_trail) ? (q.audit_trail as Array<Record<string, unknown>>) : [];
+  return trail.filter((t) => t.phase === 'replace_failed').length;
+}
+
+/** Every question id currently in the job — used to identify the rows we just inserted. */
+async function questionIdsForJob(jobId: string): Promise<Set<string>> {
+  const rows = await fetchAllRows<{ id: string }>((from, to) =>
+    supabase.from('qb_questions').select('id').eq('job_id', jobId).order('id', { ascending: true }).range(from, to)
+  );
+  return new Set((rows || []).map((r) => r.id));
+}
+
+export async function replaceBatchForJob(
+  jobId: string
+): Promise<{ status: string; replaced: number; failed: number; manual_review: number; remaining: number; message?: string }> {
+  if (replacingJobs.has(jobId)) {
+    return { status: 'replacing', replaced: 0, failed: 0, manual_review: 0, remaining: 0, message: 'already running' };
+  }
+  replacingJobs.add(jobId);
+  try {
+    const { data: job, error: jobErr } = await supabase.from('qb_jobs').select('*').eq('id', jobId).single();
+    if (jobErr || !job) throw new Error(jobErr?.message || 'job not found');
+
+    const { data: course } = await supabase
+      .from('qb_courses').select('name,exam_format,generation_guidelines').eq('id', job.course_id).single();
+    const courseName = (course?.name as string) || 'exam preparation';
+    const guidelines = (course?.generation_guidelines || {}) as Record<string, unknown>;
+    const examFormat = (course?.exam_format || {}) as Record<string, unknown>;
+
+    // Candidates: still flagged after review could not rescue them, not already
+    // replaced, and not yet parked for a human.
+    const candidates = await fetchAllRows<Record<string, any>>((from, to) =>
+      supabase.from('qb_questions').select('*')
+        .eq('job_id', jobId).eq('status', 'flagged').is('replaced_by_id', null)
+        .order('question_number', { ascending: true }).range(from, to)
+    );
+    const pending = (candidates || []).filter((q) => countReplaceFailures(q) < MAX_REPLACE_ATTEMPTS);
+    if (pending.length === 0) {
+      return { status: 'complete', replaced: 0, failed: 0, manual_review: 0, remaining: 0, message: 'nothing to replace' };
+    }
+
+    const batch = pending.slice(0, REPLACE_BATCH_SIZE);
+    console.log(`\n♻️  Replacing ${batch.length} of ${pending.length} irreparable question(s) for "${courseName}"`);
+
+    // Keep the numbering clear of everything already in the job.
+    const { data: maxRow } = await supabase.from('qb_questions')
+      .select('question_number').eq('job_id', jobId)
+      .order('question_number', { ascending: false }).limit(1).single();
+    let subjectIndex = Math.floor((((maxRow?.question_number as number) || 0) + 100) / 100);
+
+    // One professor run per subject, so a replacement is written by the same
+    // subject-specialist prompt that wrote the original.
+    const bySubject = new Map<string, Record<string, any>[]>();
+    for (const q of batch) {
+      const s = (q.subject as string) || 'General';
+      if (!bySubject.has(s)) bySubject.set(s, []);
+      bySubject.get(s)!.push(q);
+    }
+
+    let replaced = 0, failed = 0, manualReview = 0;
+
+    for (const [subject, olds] of bySubject) {
+      const before = await questionIdsForJob(jobId);
+
+      // Mirror what we are retiring: same formats, same bloom mix, same image count.
+      const formatCounts = new Map<string, number>();
+      for (const q of olds) {
+        const slug = canonicalizeFormatSlug(((q.tags as Record<string, unknown>)?.format_type as string) || 'mcq_single');
+        formatCounts.set(slug, (formatCounts.get(slug) || 0) + 1);
+      }
+      const allocations: QuestionTypeAllocation[] = [...formatCounts].map(([slug, count]) => ({
+        slug, name: slug, count, percentage: Math.round((count / olds.length) * 100),
+      }));
+
+      const bloomCounts: Record<string, number> = {};
+      for (const q of olds) {
+        const b = (q.blooms_level as string) || 'apply';
+        bloomCounts[b] = (bloomCounts[b] || 0) + 1;
+      }
+
+      const qf = (examFormat.question_format || {}) as Record<string, unknown>;
+      const task: SubjectTask = {
+        subject,
+        num_questions: olds.length,
+        num_image_qs: olds.filter((q) => q.is_image_question).length,
+        bloom_counts: bloomCounts,
+        hyt_topics: [...new Set(olds.map((q) => (q.topic as string) || '').filter(Boolean))],
+        exam_params: {
+          style: (qf.style as string) || 'standard',
+          num_options: (qf.num_options as number) || 4,
+          marking: (examFormat.negative_marking as string) || 'Standard positive marking',
+        },
+        exam_pattern: examFormat.exam_pattern as Record<string, unknown>,
+        question_type_allocations: allocations,
+        guidelines,
+      };
+
+      let fresh: Record<string, unknown>[] = [];
+      try {
+        fresh = await professorGenerateQuestions(task, courseName);
+      } catch (e) {
+        console.error(`  [Replace] ${subject}: generation failed — ${e instanceof Error ? e.message : e}`);
+      }
+
+      if (fresh.length > 0) {
+        await insertSubjectQuestions(fresh, jobId, job.course_id, courseName, subjectIndex++, guidelines);
+      }
+
+      // Identify exactly what landed, then retire one original per replacement.
+      const after = await questionIdsForJob(jobId);
+      const newIds = [...after].filter((id) => !before.has(id));
+      const pairs = Math.min(newIds.length, olds.length);
+      if (newIds.length !== olds.length) {
+        console.warn(`  [Replace] ${subject}: asked for ${olds.length}, got ${newIds.length}`);
+      }
+
+      for (let i = 0; i < olds.length; i++) {
+        const old = olds[i];
+        if (i < pairs) {
+          const trail = [...(Array.isArray(old.audit_trail) ? old.audit_trail : []), {
+            phase: 'replaced',
+            replaced_by: newIds[i],
+            reason: 'Review could not rescue this question; a fresh one was generated to the same shape.',
+            timestamp: new Date().toISOString(),
+          }];
+          const { error } = await supabase.from('qb_questions')
+            .update({ status: 'replaced', replaced_by_id: newIds[i], audit_trail: trail })
+            .eq('id', old.id);
+          if (error) { console.error(`  [Replace] link failed for ${String(old.id).slice(0, 8)}: ${error.message}`); failed++; }
+          else replaced++;
+        } else {
+          const attempts = countReplaceFailures(old) + 1;
+          const parked = attempts >= MAX_REPLACE_ATTEMPTS;
+          const trail = [...(Array.isArray(old.audit_trail) ? old.audit_trail : []), {
+            phase: 'replace_failed',
+            attempt: attempts,
+            reason: 'The generator returned no replacement for this question.',
+            timestamp: new Date().toISOString(),
+          }];
+          await supabase.from('qb_questions')
+            .update({ status: parked ? 'manual_review' : 'flagged', audit_trail: trail })
+            .eq('id', old.id);
+          if (parked) manualReview++;
+          failed++;
+        }
+      }
+    }
+
+    // Replacements that need a figure have none yet; this only touches rows with
+    // is_image_question and a null image_url, so it cannot disturb existing images.
+    if (replaced > 0 && isImageGenerationAvailable()) {
+      const img = await processAllImageQuestions(jobId);
+      if (img.totalProcessed > 0) {
+        console.log(`  [Replace] images: ${img.totalSuccess}/${img.totalProcessed} generated`);
+      }
+    }
+
+    const remaining = Math.max(0, pending.length - batch.length);
+    console.log(`♻️  Replaced ${replaced}, failed ${failed} (${manualReview} parked for manual review), ${remaining} remaining\n`);
+    return {
+      status: remaining > 0 ? 'replacing' : 'complete',
+      replaced, failed, manual_review: manualReview, remaining,
+      message: `Replaced ${replaced} question(s)${remaining > 0 ? `, ${remaining} remaining` : ''}`,
+    };
+  } finally {
+    replacingJobs.delete(jobId);
+  }
+}
 
 export async function generateBatchForJob(
   jobId: string,
