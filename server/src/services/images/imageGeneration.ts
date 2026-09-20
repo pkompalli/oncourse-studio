@@ -53,6 +53,48 @@ function imageNeedsLabels(imageType: string, description: string): boolean {
     .test(`${imageType} ${description}`);
 }
 
+const STIMULUS_CHARS = 4000;
+const FIGURE_TASK_CHARS = 1500;
+
+/**
+ * The stimulus a figure must be consistent with — read from wherever THIS format
+ * keeps it, plus the sub-questions that are answered by reading the figure.
+ *
+ * This used to be `question || content.stem`, an mcq_single-shaped assumption. No
+ * grouped format stores its scenario in `stem`: a case_study keeps it in
+ * case_narrative, a passage_set in passage, a TBS in exhibits[], a
+ * constructed_response in vignette. For those, `question` holds only a pointer
+ * ("Use the Armand Family Portfolio vignette and Figure 1 to answer Questions
+ * 1-4."), so the generator received a sentence with no data in it and invented
+ * plausible numbers — which then contradicted the narrative and the answer key.
+ */
+function stimulusForImage(q: Record<string, unknown>): { stem: string; figureTasks: string } {
+  const c = (q.content as Record<string, unknown> | undefined) || {};
+  const str = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : '');
+
+  const exhibits = Array.isArray(c.exhibits)
+    ? (c.exhibits as Array<Record<string, unknown>>)
+        .map((e) => [str(e.label), str(e.title), str(e.content)].filter(Boolean).join(' — '))
+        .filter(Boolean).join('\n\n')
+    : '';
+
+  // Longest wins where several are present: a case_study carrying both a pointer
+  // `question` and a full case_narrative must use the narrative.
+  const stem = [
+    str(c.stem), str(c.case_narrative), str(c.passage), str(c.vignette),
+    str(c.source_material), str(c.prompt), exhibits, str(q.question),
+  ].sort((a, b) => b.length - a.length)[0] || '';
+
+  // Sub-questions (or labelled parts) are what the reader measures off the figure.
+  const subs = Array.isArray(c.sub_questions) ? (c.sub_questions as Array<Record<string, unknown>>)
+    : Array.isArray(c.parts) ? (c.parts as Array<Record<string, unknown>>) : [];
+  const figureTasks = subs
+    .map((sq, i) => `${i + 1}. ${str(sq.stem) || str(sq.question) || str(sq.prompt)}`)
+    .filter((l) => l.length > 3).join('\n');
+
+  return { stem, figureTasks };
+}
+
 export function buildImagePrompt(questionData: Record<string, unknown>, fixInstructions?: string): string {
   const imageType = (questionData.image_type as string) || '';
   const imageDesc = (questionData.image_description as string) || '';
@@ -61,9 +103,7 @@ export function buildImagePrompt(questionData: Record<string, unknown>, fixInstr
   // Pull the actual scenario from the question so the image depicts THIS
   // question, not a generic template. Prefer explicit description, then the
   // search terms, then the type as a last resort.
-  const stem = (questionData.question as string)
-    || ((questionData.content as Record<string, unknown> | undefined)?.stem as string)
-    || '';
+  const { stem, figureTasks } = stimulusForImage(questionData);
   const searchTerms = (questionData.image_search_terms as string[]) || [];
   const descParts = [imageDesc, searchTerms.join('; ')].filter(Boolean);
   const subject = descParts.join(' — ') || imageType || 'illustration';
@@ -74,7 +114,16 @@ export function buildImagePrompt(questionData: Record<string, unknown>, fixInstr
 IMAGE NEEDED: ${subject}${imageType && imageType !== subject ? `\nIMAGE TYPE: ${imageType}` : ''}`;
 
   if (stem) {
-    prompt += `\n\nQUESTION CONTEXT (the image must accurately depict the SPECIFIC scenario below — not a generic placeholder):\n${stem.slice(0, 1000)}`;
+    prompt += `\n\nQUESTION CONTEXT (the image must accurately depict the SPECIFIC scenario below — not a generic placeholder):\n${stem.slice(0, STIMULUS_CHARS)}`;
+    // The figure IS the data for these items: a chart whose plotted values disagree
+    // with the stimulus silently invalidates the answer key, and no text-only check
+    // can see it. Two CFA case studies failed exactly this way — one plotted a
+    // portfolio at 10% return against a narrative that said 8%, breaking the
+    // dominance the key depended on.
+    prompt += `\n\nDATA FIDELITY (critical): every number, label, series and data point you draw MUST be taken verbatim from the context above. Do NOT invent, round, re-scale or "improve" any value. If the context gives values, plot exactly those; anything a reader measures off this image must agree with the text.`;
+    if (figureTasks) {
+      prompt += `\n\nThe following questions are answered by READING THIS FIGURE, so the quantities they ask for must be plotted accurately and be legible:\n${figureTasks.slice(0, FIGURE_TASK_CHARS)}`;
+    }
     prompt += `\n\nIMPORTANT: Depict only the SCENARIO/SETUP. Do NOT draw, name, or hint at the correct answer, the solution, or the recommended procedure — the image sets up the question and must not give the answer away. Do not render the answer options.`;
   }
 
