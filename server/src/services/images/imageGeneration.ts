@@ -68,6 +68,26 @@ const FIGURE_TASK_CHARS = 1500;
  * 1-4."), so the generator received a sentence with no data in it and invented
  * plausible numbers — which then contradicted the narrative and the answer key.
  */
+/**
+ * Does this description actually carry the figure's DATA, or is it a label?
+ *
+ * The point of preferring image_description is to send ~400 characters instead of
+ * ~2600. That trade is only safe while the short text still contains the numbers —
+ * "a scatter plot of portfolio risk and return" is smaller AND useless, and a figure
+ * drawn from it contradicts the answer key exactly as before. So a description is
+ * trusted only when it carries at least as many distinct numeric values as the
+ * stimulus it would replace; otherwise we fall back to the full stimulus and pay the
+ * tokens. Non-quantitative figures (anatomy, a photograph) have no numbers in either,
+ * so they pass trivially — which is correct, there is nothing to lose.
+ */
+function carriesFigureData(desc: string, stimulus: string): boolean {
+  const nums = (t: string) => new Set((t.match(/-?\d+(?:[.,]\d+)?/g) || []));
+  const inStimulus = nums(stimulus);
+  if (inStimulus.size === 0) return true;
+  const inDesc = nums(desc);
+  return inDesc.size >= inStimulus.size;
+}
+
 function stimulusForImage(q: Record<string, unknown>): { stem: string; figureTasks: string } {
   const c = (q.content as Record<string, unknown> | undefined) || {};
   const str = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : '');
@@ -80,10 +100,17 @@ function stimulusForImage(q: Record<string, unknown>): { stem: string; figureTas
 
   // Longest wins where several are present: a case_study carrying both a pointer
   // `question` and a full case_narrative must use the narrative.
-  const stem = [
+  const full = [
     str(c.stem), str(c.case_narrative), str(c.passage), str(c.vignette),
     str(c.source_material), str(c.prompt), exhibits, str(q.question),
   ].sort((a, b) => b.length - a.length)[0] || '';
+
+  // Prefer the authored figure spec: the model that WROTE the scenario produced it
+  // while holding the numbers, so it is extraction at the source rather than a
+  // lossy summary made after the fact — and it is a fraction of the size. Guarded,
+  // because a spec that dropped the values is worse than the long version.
+  const desc = str(q.image_description) || str(c.image_description);
+  const stem = desc && carriesFigureData(desc, full) ? desc : full;
 
   // Sub-questions (or labelled parts) are what the reader measures off the figure.
   const subs = Array.isArray(c.sub_questions) ? (c.sub_questions as Array<Record<string, unknown>>)
