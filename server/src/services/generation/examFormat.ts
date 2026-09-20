@@ -16,7 +16,11 @@ import { resolveFormat } from './formatContracts.js';
 // ── Phase 1: Discover Question Types ──
 
 interface QuestionTypeInfo {
+  /** Typical scored questions one unit yields — the FLOOR when no max is given. */
   items_per_unit?: number;
+  /** Set length as a RANGE where the exam varies (a CFA vignette runs 4 OR 6). */
+  items_per_unit_min?: number;
+  items_per_unit_max?: number;
   slug: string;
   name: string;
   percentage: number;
@@ -50,6 +54,8 @@ Return ONLY a JSON array. Each element:
   "name": "<human-readable name — e.g. 'Select All That Apply (SATA)'>",
   "percentage": <integer — this type's share of the exam's SCORED WEIGHT / testing emphasis, NOT its raw item count. If a handful of long tasks consume roughly a third of scored time, that is ~33 even though they may be only 2 of 128 printed items. All percentages must sum to 100.>,
   "items_per_unit": <integer — how many SEPARATELY SCORED questions ONE item of this type yields: 1 for a standalone question or a single extended task; the typical number of sub-questions for an integrated set / case study / passage set (e.g. 6)>,
+  "items_per_unit_min": <integer or null — if set length VARIES on this exam, the smallest a set can be>,
+  "items_per_unit_max": <integer or null — if set length VARIES, the largest. Give the real RANGE rather than one number whenever the exam varies (a CFA Level II vignette carries 4 OR 6 items, so min 4 max 6). Set both equal ONLY where the exam fixes the length exactly. Leave BOTH null when you only know the typical size — a wrong maximum REJECTS valid longer sets>,
   "description": "<1-2 sentences: how this question type works in ${courseName} specifically>",
   "example_stem": "<a brief example stem pattern (without real content) showing the structure>",
   "answer_format": "<how the answer is structured — e.g. 'single letter A-D', 'multiple correct from list', 'ordered sequence', 'numeric value', 'click coordinates on image', 'free text'>",
@@ -90,7 +96,17 @@ RULES:
       if (existing) {
         existing.percentage = (existing.percentage || 0) + (t.percentage || 0);
       } else {
-        merged.set(slug, { ...t, slug, items_per_unit: Number(t.items_per_unit) > 0 ? Number(t.items_per_unit) : undefined });
+        const num = (v: unknown) => (Number(v) > 0 ? Number(v) : undefined);
+        const mn = num(t.items_per_unit_min);
+        const mx = num(t.items_per_unit_max);
+        merged.set(slug, {
+          ...t, slug,
+          items_per_unit: num(t.items_per_unit) ?? mn,
+          items_per_unit_min: mn,
+          // A max below the min is a modelling slip, not a cap — drop it rather than
+          // materialise a schema that rejects every set.
+          items_per_unit_max: mx && (!mn || mx >= mn) ? mx : undefined,
+        });
       }
     }
     const canon = [...merged.values()];
