@@ -46,11 +46,23 @@ const THINKING_MODELS = new Set([
   MODELS.AUDITOR,
 ]);
 
-const THINKING_BUDGET = parseInt(process.env.BR_THINKING_BUDGET || '4096', 10);
+// Claude 5 reasons adaptively and shares the output budget with its answer. Left
+// uncapped on a large review batch it spends the WHOLE budget thinking and returns
+// EMPTY text — measured: 16000/16000 output tokens, 0 characters, 0/10 questions
+// scored. maxReasoningEffort is the only cap type 'adaptive' honours (budgetTokens
+// is read only under type 'enabled', which this model rejects). At 'low' the same
+// batch scores 10/10 using ~6300 tokens INCLUDING the answer.
+const REASONING_EFFORT = (process.env.BR_REASONING_EFFORT || 'low') as 'low' | 'medium' | 'high';
+/** Budget for the one retry after an empty, reasoning-exhausted answer. */
+const EMPTY_ANSWER_RETRY_TOKENS = parseInt(process.env.BR_EMPTY_RETRY_TOKENS || '32000', 10);
 
 // Mantle config
 const MANTLE_REGION = process.env.MANTLE_REGION || 'us-east-1';
 const MANTLE_BASE = `https://bedrock-mantle.${MANTLE_REGION}.api.aws/openai/v1`;
+
+function isAnthropic(model: string): boolean {
+  return model.includes('anthropic');
+}
 
 function isMantleModel(model: string): boolean {
   return model.startsWith('openai.');
@@ -58,7 +70,7 @@ function isMantleModel(model: string): boolean {
 
 console.log(`[Bedrock] Converse: ${bedrockRegion}, Mantle: ${MANTLE_REGION}`);
 console.log(`[Bedrock] Generator: ${MODELS.GENERATOR} (${isMantleModel(MODELS.GENERATOR) ? 'Mantle' : 'Converse'})`);
-console.log(`[Bedrock] Reviewer:  ${MODELS.VALIDATOR} (thinking=${THINKING_MODELS.has(MODELS.VALIDATOR)}, budget=${THINKING_BUDGET})`);
+console.log(`[Bedrock] Reviewer:  ${MODELS.VALIDATOR} (thinking=${THINKING_MODELS.has(MODELS.VALIDATOR)}, effort=${REASONING_EFFORT})`);
 
 // ── Retry config ──
 
@@ -201,11 +213,19 @@ async function converseCall(
         model: bedrock(model),
         system: systemPrompt || undefined,
         maxOutputTokens: options?.maxTokens ?? 4096,
-        temperature: useThinking ? undefined : (options?.temperature ?? 0.7),
+        // Claude 5 rejects temperature outright ("`temperature` is deprecated for
+        // this model"), so it must never be sent to an Anthropic model — not just
+        // suppressed while thinking is on. Otherwise any thinking:false call to the
+        // reviewer throws, including the empty-answer fallback below.
+        temperature: (useThinking || isAnthropic(model)) ? undefined : (options?.temperature ?? 0.7),
         ...(useThinking ? {
           providerOptions: {
             bedrock: {
-              reasoningConfig: { type: 'adaptive', budgetTokens: THINKING_BUDGET },
+              // Claude 5 REQUIRES type 'adaptive' ('enabled' is rejected outright),
+              // and the provider reads budgetTokens only under 'enabled' — so the
+              // budgetTokens we used to pass here was silently discarded and
+              // reasoning ran uncapped. 'adaptive' takes maxReasoningEffort instead.
+              reasoningConfig: { type: 'adaptive', maxReasoningEffort: REASONING_EFFORT },
             },
           },
         } : {}),
@@ -238,6 +258,26 @@ async function converseCall(
       const pt = result.usage?.inputTokens ?? 0;
       const ct = result.usage?.outputTokens ?? 0;
       addTokens(pt, ct);
+
+      // An empty answer that burned the whole output budget is reasoning exhaustion,
+      // not a quality signal. It used to travel silently: callers parse '' into zero
+      // results and every question in the batch lands in needs_review with no error
+      // anywhere. Say so loudly, and buy the answer back by retrying without thinking
+      // — a review scored without reasoning beats no review at all.
+      const maxOut = options?.maxTokens ?? 4096;
+      if (!result.text && ct >= maxOut * 0.95 && maxOut < EMPTY_ANSWER_RETRY_TOKENS) {
+        // Reasoning ate the whole budget and the answer never arrived. This used to
+        // travel in total silence: callers parse '' into zero results and every
+        // question in the batch lands in needs_review with no error logged anywhere
+        // — 28 CFA questions sat in that state. Say so, and buy the answer back with
+        // a bigger budget. Turning thinking OFF is NOT a fallback: Claude 5 reasons
+        // adaptively regardless, and an empty answer comes back just the same.
+        console.warn(
+          `  [Bedrock] ${model} returned EMPTY text after ${ct}/${maxOut} output tokens ` +
+          `(reasoning consumed the budget on a ${pt}-token prompt) — retrying with ${EMPTY_ANSWER_RETRY_TOKENS}`
+        );
+        return converseCall(model, systemPrompt, userPrompt, { ...options, maxTokens: EMPTY_ANSWER_RETRY_TOKENS });
+      }
 
       return {
         content: result.text || '',
