@@ -1,8 +1,14 @@
 /**
  * Review Pipeline Orchestrator — V2 Step 3
  *
+ * Scope:
+ *   'pending' (default) — review only questions still at status='generated',
+ *      leaving every already-reviewed question and its scores untouched.
+ *   'all' — wipe every question's scores, trail and status back to 'generated'
+ *      and review the whole job from scratch. DESTRUCTIVE; opt in explicitly.
+ *
  * Flow:
- *   1. Fetch all questions with status='generated' for the job
+ *   1. Fetch the questions in scope
  *   2. Phase A — Validator: batch 10, parallel batches, fix flagged inline
  *   3. Phase B — Adversarial: re-fetch (fixed versions), batch 10, parallel, fix inline
  *   4. Mark all questions status='reviewed', job status='auditing'
@@ -602,22 +608,29 @@ async function runAdversarialPhase(
 
 // ── Main Pipeline ──
 
-async function runReviewPipeline(jobId: string): Promise<void> {
+async function runReviewPipeline(jobId: string, scope: ReviewScope): Promise<void> {
   try {
     startTracking(jobId, 'review');
     setStep(jobId, 'Loading course data...');
     const { name: courseName, examFormat, guidelines } = await getCourseInfo(jobId);
 
-    // ── Reset ALL questions for this job to 'generated' before fetching ──
-    // This ensures re-runs clear stale audit data (quality_score, status=approved/flagged)
-    setStep(jobId, 'Clearing stale review/audit data from any prior runs...');
-    await supabase.from('qb_questions').update({
-      audit_trail: [],
-      validator_score: null,
-      adversarial_score: null,
-      quality_score: null,
-      status: 'generated',
-    }).eq('job_id', jobId).is('replaced_by_id', null);
+    // A full re-review wipes every score, trail and status in the job. That is the
+    // right thing when re-reviewing a job from scratch and catastrophic otherwise:
+    // one resume call on a finished job reset 1,775 questions — 1,765 of them
+    // approved — to 'generated' with their scores and audit_trail cleared, and the
+    // content was never at fault. It is now opt-in, and never what a plain "review"
+    // does to a job that already has verdicts.
+    if (scope === 'all') {
+      setStep(jobId, 'Clearing ALL prior review/audit data for a full re-review...');
+      console.warn(`  [Review] FULL re-review of ${jobId}: clearing every score, trail and status in the job`);
+      await supabase.from('qb_questions').update({
+        audit_trail: [],
+        validator_score: null,
+        adversarial_score: null,
+        quality_score: null,
+        status: 'generated',
+      }).eq('job_id', jobId).is('replaced_by_id', null);
+    }
 
     setStep(jobId, 'Fetching questions from database...');
     const questions = await fetchJobQuestions(jobId, 'generated');
@@ -711,9 +724,14 @@ async function runReviewPipeline(jobId: string): Promise<void> {
     const s = runningReviews.get(jobId);
     if (s) s.subjects.forEach((subj) => { subj.status = 'done'; });
     setState(jobId, { phase: 'finalizing' });
-    setStep(jobId, 'Marking all questions as reviewed...');
-    await supabase.from('qb_questions').update({ status: 'reviewed' })
-      .eq('job_id', jobId).is('replaced_by_id', null);
+    // Mark only what this run actually reviewed. The blanket job-wide update this
+    // replaced demoted every approved question in the job back to 'reviewed'.
+    setStep(jobId, `Marking ${questions.length} reviewed question(s)...`);
+    const reviewedIds = questions.map((q) => q.id as string);
+    for (let i = 0; i < reviewedIds.length; i += 200) {
+      await supabase.from('qb_questions').update({ status: 'reviewed' })
+        .in('id', reviewedIds.slice(i, i + 200));
+    }
 
     const totalFixed = validatorResult.fixed + adversarialResult.fixed;
     const finalMsg = `Review complete — ${total} questions reviewed, ${totalFixed} fixed inline. Ready for audit.`;
@@ -751,7 +769,17 @@ async function runReviewPipeline(jobId: string): Promise<void> {
 
 // ── Entry point: start or poll ──
 
-export async function reviewBatchForJob(jobId: string): Promise<{
+/** Questions added after the job finished (a replacement enters at 'generated'). */
+async function countPendingReview(jobId: string): Promise<number> {
+  const { count } = await supabase
+    .from('qb_questions').select('*', { count: 'exact', head: true })
+    .eq('job_id', jobId).eq('status', 'generated').is('replaced_by_id', null);
+  return count || 0;
+}
+
+export type ReviewScope = 'pending' | 'all';
+
+export async function reviewBatchForJob(jobId: string, scope: ReviewScope = 'pending'): Promise<{
   status: string; phase: string; step: string;
   reviewed: number; fixed: number; total: number;
   batches_total: number; batches_done: number;
@@ -775,7 +803,15 @@ export async function reviewBatchForJob(jobId: string): Promise<{
     .from('qb_jobs').select('status, progress').eq('id', jobId).single();
   if (jobErr) throw new Error(jobErr.message);
 
-  if (job.status === 'auditing' || job.status === 'complete') {
+  // A finished job still has work when questions were added after it finished — a
+  // replacement enters at 'generated'. Answering "Review complete" from stored
+  // progress then strands them unscored, which is what happened to the three CFA
+  // replacements: the phase reported reviewed:2, batches_total:0, and ran nothing.
+  const pendingCount = await countPendingReview(jobId);
+  if ((job.status === 'auditing' || job.status === 'complete') && pendingCount > 0) {
+    console.log(`  [Review] job is ${job.status} but ${pendingCount} question(s) still need review — proceeding`);
+  }
+  if ((job.status === 'auditing' || job.status === 'complete') && pendingCount === 0) {
     const p = (job.progress || {}) as Record<string, unknown>;
     return {
       status: 'complete', phase: 'done', step: (p.step as string) || 'Review complete',
@@ -786,8 +822,9 @@ export async function reviewBatchForJob(jobId: string): Promise<{
     };
   }
 
-  // First call — kick off
-  const questions = await fetchJobQuestions(jobId);
+  // First call — kick off. A 'pending' review sizes itself on the questions that
+  // still need one; only a full re-review counts the whole job.
+  const questions = await fetchJobQuestions(jobId, scope === 'all' ? undefined : 'generated');
   const total = questions.length;
   const subjects = buildSubjectMap(questions);
 
@@ -800,7 +837,7 @@ export async function reviewBatchForJob(jobId: string): Promise<{
     subjects,
   });
 
-  runReviewPipeline(jobId).catch((e) => {
+  runReviewPipeline(jobId, scope).catch((e) => {
     console.error('runReviewPipeline failed:', e);
     const s = runningReviews.get(jobId);
     if (s) { s.status = 'failed'; s.phase = 'error'; s.step = e instanceof Error ? e.message : 'Review failed'; }

@@ -406,7 +406,9 @@ jobsRouter.post('/:id/next-batch', async (req, res, next) => {
       case 'review':
       case 'reviewing': {
         try {
-          const result = await reviewBatchForJob(jobId);
+          // scope:'all' wipes every score in the job — opt in, never the default.
+          const scope = (req.body || {}).scope === 'all' ? 'all' : 'pending';
+          const result = await reviewBatchForJob(jobId, scope);
           res.json({ status: result.status, batch_result: result });
         } catch (revErr) {
           const errMsg = revErr instanceof Error ? revErr.message : 'Review failed';
