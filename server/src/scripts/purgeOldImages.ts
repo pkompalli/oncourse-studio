@@ -13,6 +13,12 @@
  *   • ORPHANED — no qb_jobs row (already purged by cron or deleted), or
  *   • OLDER than the retention window (default 10 days)
  *
+ * A second pass then removes SUPERSEDED files inside the job folders it kept. The
+ * path carries an md5 of the image bytes, so regenerating an image writes a new
+ * file and strands the old one; a live job slowly fills with charts no question
+ * references. Pass 1 cannot see those — its unit is the whole folder, and the job
+ * is current.
+ *
  * NEVER delete these by removing rows from storage.objects: that drops only the
  * metadata and leaves the actual file in S3, reclaiming nothing.
  *
@@ -56,6 +62,7 @@ async function main() {
   const jobById = new Map((jobs || []).map((j) => [j.id as string, j.created_at as string]));
 
   let keptBytes = 0, freedBytes = 0, freedFiles = 0, freedFolders = 0;
+  const retained: Array<{ jobId: string; files: Array<{ name: string; size: number }> }> = [];
   for (const folder of folders) {
     const jobId = folder.name;
     const files = await listAll(`${ROOT}/${jobId}`);
@@ -65,7 +72,7 @@ async function main() {
       : new Date(created) < cutoff ? `older than ${DAYS}d (${created.slice(0, 10)})`
       : null;
 
-    if (!reason) { keptBytes += bytes; continue; }
+    if (!reason) { keptBytes += bytes; retained.push({ jobId, files }); continue; }
     console.log(`  ${jobId.slice(0, 8)}  ${String(files.length).padStart(4)} files  ${mb(bytes).padStart(8)}  ${reason}`);
     freedBytes += bytes; freedFiles += files.length; freedFolders++;
 
@@ -80,7 +87,48 @@ async function main() {
 
   console.log(`\n${APPLY ? 'freed' : 'would free'}: ${freedFolders} job folder(s), ${freedFiles} file(s), ${mb(freedBytes)}`);
   console.log(`retained: ${mb(keptBytes)}`);
-  if (!APPLY && freedFiles > 0) console.log('\nre-run with --apply to delete');
+
+  // ── Pass 2: superseded files inside LIVE job folders ────────────────────────
+  // The storage path carries an md5 of the image bytes, so regenerating an image
+  // writes a NEW file and leaves the old one behind — a live job accumulates dead
+  // charts no question references. Pass 1 cannot see these: its unit is the whole
+  // job folder, and the job is current.
+  let supBytes = 0, supFiles = 0;
+  for (const { jobId, files } of retained) {
+    const referenced = new Set<string>();
+    let rows = 0;
+    for (let off = 0; ; off += 1000) {
+      const { data, error } = await supabase.from('qb_questions')
+        .select('image_url').eq('job_id', jobId).order('id').range(off, off + 999);
+      if (error) { console.warn(`  ${jobId.slice(0, 8)}: question fetch failed (${error.message}) — SKIPPING folder`); rows = -1; break; }
+      if (!data || data.length === 0) break;
+      rows += data.length;
+      for (const r of data as Array<{ image_url: string | null }>) {
+        if (r.image_url) referenced.add(String(r.image_url).split('/').pop() as string);
+      }
+      if (data.length < 1000) break;
+    }
+    // A failed or empty read must never be read as "nothing is referenced" — that
+    // would delete every live image in the folder.
+    if (rows <= 0) { if (rows === 0) console.warn(`  ${jobId.slice(0, 8)}: no question rows — SKIPPING folder`); continue; }
+
+    const dead = files.filter((f) => !referenced.has(f.name));
+    if (dead.length === 0) continue;
+    const bytes = dead.reduce((sum, f) => sum + f.size, 0);
+    supBytes += bytes; supFiles += dead.length;
+    console.log(`  ${jobId.slice(0, 8)}  ${String(dead.length).padStart(4)} superseded of ${files.length}  ${mb(bytes).padStart(8)}  (${rows} questions, ${referenced.size} referenced)`);
+
+    if (APPLY) {
+      for (let i = 0; i < dead.length; i += 100) {
+        const paths = dead.slice(i, i + 100).map((f) => `${ROOT}/${jobId}/${f.name}`);
+        const { error } = await supabase.storage.from(BUCKET).remove(paths);
+        if (error) { console.warn(`    remove failed: ${error.message}`); break; }
+      }
+    }
+  }
+  console.log(`${APPLY ? 'freed' : 'would free'} (superseded in live jobs): ${supFiles} file(s), ${mb(supBytes)}`);
+
+  if (!APPLY && freedFiles + supFiles > 0) console.log('\nre-run with --apply to delete');
 }
 
 main().then(() => process.exit(0)).catch((e) => { console.error(e); process.exit(1); });
