@@ -135,24 +135,38 @@ function reconcileToAnalysisFormats(g: Record<string, unknown>, examFormat: Reco
     }
     // The analysis knows how many scored questions one unit yields; that beats the
     // generic contract default the guidelines tends to copy.
-    const ipu = Number(t.items_per_unit) || 0;
-    if (ipu > 1) {
+    // Set length comes from the analysis as a RANGE where the exam varies, or as a
+    // single typical number where it does not.
+    //
+    // Writing one number to BOTH bounds made the typical count mandatory: CFA came
+    // back 4, and the 748 generated case studies carrying the 6 sub-questions a real
+    // Level II vignette can have turned retroactively schema-invalid — scoring 9 on
+    // content and 3 on structure. Worse, the fixer is then told the set "must NOT
+    // have more than 4 items" and would delete good sub-questions to comply.
+    //
+    // Clearing the ceiling outright fixed that but cost the machinery a capability:
+    // no exam could express a maximum at all once its analysis supplied a number. A
+    // ceiling is now honoured when ASSERTED — by the analysis as a range, or by the
+    // guidelines above the floor — and dropped when it merely echoes the typical
+    // count, which is the case that caused the damage.
+    const ipuMin = Number(t.items_per_unit_min) || Number(t.items_per_unit) || 0;
+    // A ceiling below the floor is a modelling slip, not a cap. Materialising it
+    // gives a schema no question can satisfy (5..3 rejects every set), so ignore it
+    // here as well as at the analysis merge — exam_format also arrives from storage
+    // and from free-text interpretation, which never passed through that merge.
+    const rawMax = Number(t.items_per_unit_max) || 0;
+    const ipuMax = rawMax && (!ipuMin || rawMax >= ipuMin) ? rawMax : 0;
+    if (rawMax && rawMax !== ipuMax) {
+      console.warn(`  [Guidelines] ${slug}: items_per_unit_max ${rawMax} is below the floor ${ipuMin} — ignoring it`);
+    }
+    if (ipuMin > 1 || ipuMax > 1) {
       const sp = (spec.schema_params = (spec.schema_params as Record<string, unknown>) || {});
-      // items_per_unit is what ONE unit TYPICALLY yields — a floor, never an
-      // equality. Writing it to both bounds made the typical count mandatory: CFA
-      // came back 4, and the 748 generated case studies carrying the 6 sub-questions
-      // a real Level II vignette can have became retroactively schema-invalid,
-      // scoring 9 on content and 3 on structure. Worse, the fixer's instruction then
-      // reads "must NOT have more than 4 items" — it would delete good sub-questions
-      // to comply. Only an exam that genuinely fixes a ceiling should set the max,
-      // so clear a max/count this function previously derived from the same number.
-      // Clear the ceiling outright rather than only when it echoes ipu: the Bar's
-      // max/count (6) differed from its ipu (5), so an equality check left it pinned
-      // and the damage intact. When the analysis knows the unit size it owns these
-      // bounds; a genuine exam-imposed ceiling belongs in an explicit sub_question_max
-      // the reconciliation does not derive.
-      sp.sub_question_min = ipu;
-      sp.sub_question_max = null;
+      const declaredMax = Number(sp.sub_question_max) || Number(sp.sub_question_count) || 0;
+      const floor = ipuMin || 1;
+      sp.sub_question_min = floor;
+      sp.sub_question_max = ipuMax || (declaredMax > floor ? declaredMax : null);
+      if (Number(sp.sub_question_max) && Number(sp.sub_question_max) < floor) sp.sub_question_max = null;
+      // An exact length is expressed as min === max; a lone number stays a floor.
       sp.sub_question_count = null;
       delete spec.content_schema; // force a rebuild with the corrected bounds
     }
@@ -426,8 +440,10 @@ export async function generateGuidelines(
   const formatListBlock = qTypes.length > 0
     ? qTypes.map((t) => {
         const slug = canonicalizeFormatSlug(String(t.slug || ''));
-        const ipu = Number(t.items_per_unit) || 1;
-        return `  - ${slug} — ${t.percentage}% of scored weight${ipu > 1 ? `; ONE unit yields ${ipu} scored questions (use this for sub_question_min/max)` : ''}. ${String(t.description || '').slice(0, 220)}`;
+        const ipu = Number(t.items_per_unit_min) || Number(t.items_per_unit) || 1;
+        const ipuMax = Number(t.items_per_unit_max) || 0;
+        const ipuLabel = ipuMax && ipuMax !== ipu ? `${ipu}-${ipuMax}` : `${ipu}`;
+        return `  - ${slug} — ${t.percentage}% of scored weight${ipu > 1 || ipuMax > 1 ? `; ONE unit yields ${ipuLabel} scored questions (use this for sub_question_min/max; a single number is a FLOOR — set sub_question_max ONLY where the exam genuinely caps the set)` : ''}. ${String(t.description || '').slice(0, 220)}`;
       }).join('\n')
     : '  (none declared — infer from the specification above)';
 
