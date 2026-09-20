@@ -138,8 +138,22 @@ function reconcileToAnalysisFormats(g: Record<string, unknown>, examFormat: Reco
     const ipu = Number(t.items_per_unit) || 0;
     if (ipu > 1) {
       const sp = (spec.schema_params = (spec.schema_params as Record<string, unknown>) || {});
+      // items_per_unit is what ONE unit TYPICALLY yields — a floor, never an
+      // equality. Writing it to both bounds made the typical count mandatory: CFA
+      // came back 4, and the 748 generated case studies carrying the 6 sub-questions
+      // a real Level II vignette can have became retroactively schema-invalid,
+      // scoring 9 on content and 3 on structure. Worse, the fixer's instruction then
+      // reads "must NOT have more than 4 items" — it would delete good sub-questions
+      // to comply. Only an exam that genuinely fixes a ceiling should set the max,
+      // so clear a max/count this function previously derived from the same number.
+      // Clear the ceiling outright rather than only when it echoes ipu: the Bar's
+      // max/count (6) differed from its ipu (5), so an equality check left it pinned
+      // and the damage intact. When the analysis knows the unit size it owns these
+      // bounds; a genuine exam-imposed ceiling belongs in an explicit sub_question_max
+      // the reconciliation does not derive.
       sp.sub_question_min = ipu;
-      sp.sub_question_max = ipu;
+      sp.sub_question_max = null;
+      sp.sub_question_count = null;
       delete spec.content_schema; // force a rebuild with the corrected bounds
     }
   }
@@ -409,9 +423,9 @@ Produce a JSON object with these exact sections:
       "schema_params": {
         "num_options": <exact number of options this exam fixes for this format, e.g. 5 for LSAT; null if variable>,
         "option_keys": <array of exact option keys if fixed, e.g. ["A","B","C","D","E"]; null otherwise>,
-        "sub_question_count": <exact sub-question count for case_study (e.g. 6); null if N/A>,
-        "sub_question_min": <min sub-questions/tasks for TBS; null if N/A>,
-        "sub_question_max": <max sub-questions/tasks for TBS; null if N/A>,
+        "sub_question_count": <typical sub-questions per set, if this exam has one; treated as a FLOOR, not an exact count; null if N/A>,
+        "sub_question_min": <minimum sub-questions/tasks per set (case_study, passage_set, TBS); null if N/A>,
+        "sub_question_max": <maximum, ONLY if this exam genuinely caps it — leave null when sets vary in length (a CFA vignette runs 4 OR 6), since a max REJECTS longer sets>,
         "exhibits_as_markdown": <true if TBS/case exhibits must be markdown; null if N/A>,
         "parts_min": <constructed_response ITEM SETS only: minimum labelled parts scored separately (e.g. CFA Level III sets); null for a single-prompt essay>,
         "parts_max": <constructed_response ITEM SETS only: maximum labelled parts; null if N/A>

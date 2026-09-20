@@ -311,7 +311,7 @@ export function renderContractsForPrompt(slugs: Iterable<string>): string {
 export type SchemaParams = {
   numOptions?: number;        // exact option count (e.g. 5 for LSAT A–E)
   optionKeys?: string[];      // exact option keys, if the exam fixes them
-  subQuestionCount?: number;  // exact sub-question count (case_study: 6)
+  subQuestionCount?: number;  // typical sub-question count (case_study) — a FLOOR, not an equality
   subQuestionMin?: number;    // TBS lower bound
   subQuestionMax?: number;    // TBS upper bound
   exhibitsAsMarkdown?: boolean; // TBS/case exhibits carry markdown content (default true)
@@ -406,7 +406,13 @@ export function buildContentSchema(format: string, p: SchemaParams = {}): JsonSc
         explanation: STR } };
     case 'case_study': {
       const sub: JsonSchema = { type: 'array', items: { type: 'object', required: ['format_type'], properties: { format_type: NON_EMPTY_STR } } };
-      if (p.subQuestionCount) { sub.minItems = p.subQuestionCount; sub.maxItems = p.subQuestionCount; } else sub.minItems = 1;
+      // A typical sub-question count is a FLOOR, not an equality. Pinning
+      // minItems === maxItems from one number retroactively invalidated 748 CFA
+      // case studies that carry the 6 questions a real Level II vignette can have,
+      // against a schema built from the analysis's typical 4 — they scored 9 on
+      // content and 3 on structure. Only an explicit sub_question_max caps the top.
+      sub.minItems = p.subQuestionCount || p.subQuestionMin || 1;
+      if (p.subQuestionMax) sub.maxItems = p.subQuestionMax;
       return { ...base, required: ['case_narrative', 'sub_questions'], properties: {
         case_narrative: NON_EMPTY_STR, topics: { type: 'array' }, sub_questions: sub, response_instructions: STR, explanation: STR } };
     }
