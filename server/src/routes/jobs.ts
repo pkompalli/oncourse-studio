@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { supabase } from '../db/supabase.js';
-import { generateBatchForJob } from '../services/generation/questionGeneration.js';
+import { generateBatchForJob, replaceBatchForJob } from '../services/generation/questionGeneration.js';
 import { reviewBatchForJob } from '../services/review/reviewPipeline.js';
 import { auditBatchForJob } from '../services/audit/auditPipeline.js';
 import { processAllImageQuestions } from '../services/images/imageGeneration.js';
@@ -426,6 +426,24 @@ jobsRouter.post('/:id/next-batch', async (req, res, next) => {
           res.json({ status: result.status, batch_result: result });
         } catch (audErr) {
           const errMsg = audErr instanceof Error ? audErr.message : 'Audit failed';
+          await supabase
+            .from('qb_jobs')
+            .update({ status: 'failed', error: errMsg, progress: { message: errMsg } })
+            .eq('id', jobId);
+          res.json({ status: 'failed', batch_result: { error: errMsg } });
+        }
+        break;
+      }
+
+      // The UI has called this phase since Step5Replace existed; until now it fell
+      // through to `default` and silently returned the job status unchanged.
+      case 'replace':
+      case 'replacing': {
+        try {
+          const result = await replaceBatchForJob(jobId);
+          res.json({ status: result.status, batch_result: result });
+        } catch (repErr) {
+          const errMsg = repErr instanceof Error ? repErr.message : 'Replacement failed';
           await supabase
             .from('qb_jobs')
             .update({ status: 'failed', error: errMsg, progress: { message: errMsg } })
