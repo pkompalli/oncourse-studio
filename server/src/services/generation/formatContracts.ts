@@ -111,7 +111,8 @@ export const FORMAT_CONTRACTS: Record<string, FormatContract> = {
     structure: 'case_narrative (with the data/evidence to analyze); topics[]; response_instructions; sub_questions[] (each a fully-formed question of its own format_type with its own answer key, rationale, and reasoning_step); overall explanation.',
     gradability: 'EVERY sub-question must carry the COMPLETE machine-readable answer scaffolding for ITS format (options/rows/columns/choices/items + a structured answer key). A sub-answer that exists only in rationale prose is INVALID.',
     syntax: [
-      'The number of sub-questions per set is whatever THIS exam uses (see schema_params.sub_question_min/max) — do not assume 6; use at least 2 different sub-question format_types where the exam mixes them.',
+      'The number of sub-questions per set is whatever THIS exam uses (see schema_params.sub_question_min/max) — do not assume 6.',
+      'Sub-question format_types are whatever THIS exam uses — follow the spec, never a default. Where the exam uses ONE type throughout (a CFA item set is uniformly three-option A/B/C multiple choice), EVERY sub-question uses that one type; mixing types there produces a set that does not look like the exam. Mix only where the exam genuinely mixes (a CPA TBS combines entry, dropdown and grid tasks).',
       'reasoning_step per sub-question using THIS exam\'s discipline taxonomy (no clinical steps on non-clinical exams).',
       'Reference exhibits by visible LABEL only — never an internal id/slug.',
       'Any rule/fact a key depends on must appear in the narrative or an exhibit.',

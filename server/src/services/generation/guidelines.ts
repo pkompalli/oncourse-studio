@@ -339,6 +339,70 @@ function scrubForeignFieldNames(g: Record<string, unknown>): Record<string, unkn
   return g;
 }
 
+/**
+ * Make the sub-question COUNT prose agree with the schema's bounds.
+ *
+ * Unpinning the schema (sub_questions 4..4 -> 4..unpinned) stopped the deterministic
+ * gate rejecting CFA's six-item vignettes, but the guidelines PROSE still said
+ * "sub_questions must contain exactly four objects" in five places — so the LLM
+ * validator kept failing the same questions in words instead of by schema:
+ * "Structurally non-compliant case study: 6 sub-questions instead of required 4".
+ * Same drift, one layer up.
+ *
+ * Only the COUNT is rewritten. A spec that also fixes the sub-question FORMAT ("every
+ * sub-question must be mcq_single with options A-C") is left exactly as it is — that
+ * is true of CFA item sets, and relaxing it would bless questions that do not look
+ * like the exam, which is the opposite of the intent.
+ */
+const NUM_WORDS: Record<string, number> = {
+  one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10,
+};
+
+function reconcileCountProse(g: Record<string, unknown>): Record<string, unknown> {
+  const specs = g.format_specs as Record<string, Record<string, unknown>> | undefined;
+  if (!specs) return g;
+
+  for (const [slug, spec] of Object.entries(specs)) {
+    const sub = (spec?.content_schema as any)?.properties?.sub_questions;
+    if (!sub) continue;
+    const min = Number(sub.minItems) || 0;
+    const max = Number(sub.maxItems) || 0;
+    if (!min && !max) continue;
+    // Only worth rewriting when the schema no longer asserts an exact count.
+    if (min && max && min === max) continue;
+    const phrase = max ? `between ${min || 1} and ${max}` : `at least ${min}`;
+
+    let changed = 0;
+    const fix = (t: string): string => {
+      let out = t;
+      // "exactly four sub-questions" / "exactly 4 objects"
+      out = out.replace(/\b(?:exactly|precisely)\s+(\w+)\s+(sub[-\s_]?questions?|objects?|questions?|items?|tasks?)\b/gi,
+        (m, n, noun) => (NUM_WORDS[String(n).toLowerCase()] || Number(n) ? `${phrase} ${noun}` : m));
+      // "all four sub-questions" / "each of the four questions"
+      out = out.replace(/\b(all|each of the)\s+(\w+)\s+(sub[-\s_]?questions?|questions?|items?)\b/gi,
+        (m, lead, n, noun) => (NUM_WORDS[String(n).toLowerCase()] || Number(n)
+          // Keep the noun's NUMBER so the verb still agrees: "all four sub-questions
+          // use" must become "all sub-questions use", not "every sub-question use".
+          ? (String(lead).toLowerCase() === 'all' ? `all ${noun}` : `each ${String(noun).replace(/s$/, '')}`)
+          : m));
+      // "must contain exactly four objects" already handled; catch "contains four objects"
+      out = out.replace(/\b(contain|contains|have|has)\s+(\w+)\s+(sub[-\s_]?questions?|objects?)\b/gi,
+        (m, verb, n, noun) => (NUM_WORDS[String(n).toLowerCase()] || Number(n) ? `${verb} ${phrase} ${noun}` : m));
+      if (out !== t) changed++;
+      return out;
+    };
+
+    for (const key of ['structure_requirements', 'syntax_rules', 'validation_checks']) {
+      const arr = spec[key];
+      if (Array.isArray(arr)) spec[key] = arr.map((x) => (typeof x === 'string' ? fix(x) : x));
+    }
+    if (changed > 0) {
+      console.warn(`  [Guidelines] ${slug}: rewrote ${changed} exact sub-question count claim(s) to "${phrase}" to match the schema`);
+    }
+  }
+  return g;
+}
+
 export async function generateGuidelines(
   courseName: string,
   structure: Record<string, unknown>,
@@ -536,12 +600,12 @@ Return ONLY the JSON object. No preamble, no markdown fences.`;
   // schemas -> guarantee grouped formats -> guarantee a schema for every format ->
   // discard any template that contradicts its schema -> strip field names that
   // leaked in from a different format's spec.
-  return scrubForeignFieldNames(dropContradictoryTemplates(ensureSchemaForEveryFormat(
+  return reconcileCountProse(scrubForeignFieldNames(dropContradictoryTemplates(ensureSchemaForEveryFormat(
     reconcileGroupedFormats(
       attachContentSchemas(reconcileToAnalysisFormats(canonicalizeGuidelines(guidelines), examFormat)),
       examFormat
     )
-  )));
+  ))));
 }
 
 // Deterministic reconciliation: whenever the analysis describes a shared-stimulus
@@ -660,7 +724,7 @@ Return ONLY valid JSON. No preamble, no markdown fences.`;
   return {
     // Re-materialize schemas so an edit to num_options / sub-question counts /
     // exhibit rules updates the deterministic contract too.
-    updated_guidelines: updated ? scrubForeignFieldNames(attachContentSchemas(updated)) : null,
+    updated_guidelines: updated ? reconcileCountProse(scrubForeignFieldNames(attachContentSchemas(updated))) : null,
     response: (result.response as string) || 'Guidelines updated.',
   };
 }

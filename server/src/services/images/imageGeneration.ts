@@ -384,6 +384,25 @@ export async function processAllImageQuestions(jobId: string): Promise<{
   return { totalProcessed: imageQuestions.length, totalSuccess, totalFailed };
 }
 
+/**
+ * Which of these review issues say the IMAGE disagrees with the text?
+ *
+ * This defect class cannot be fixed by the fixer: it is a text model, so asked to
+ * reconcile a chart with its narrative it edits the narrative — or worse, writes the
+ * rationale's numbers INTO the text while the chart still shows different ones,
+ * making the contradiction sharper. One CFA fix said so outright: "the actual
+ * image_url file could not be regenerated as this requires image-generation
+ * capability outside this text-editing". The audit then re-flags it, forever.
+ *
+ * The cure is to redraw the figure from the corrected text instead.
+ */
+const IMAGE_WORD = /\b(image|figure|chart|graph|plot|diagram|exhibit|axis|axes|plotted|legend)\b/i;
+const CONTRADICTION_WORD = /\b(contradict\w*|mismatch\w*|inconsisten\w*|do(es)? not match|don't match|disagree\w*|differ\w*|not consistent|does not correspond|unverifiable)\b/i;
+
+export function imageContradictionIssues(issues: string[]): string[] {
+  return (issues || []).filter((i) => typeof i === 'string' && IMAGE_WORD.test(i) && CONTRADICTION_WORD.test(i));
+}
+
 // ── Re-generate image for a question after review fix ──
 // Called from the review pipeline when validator/adversarial flags image issues.
 
