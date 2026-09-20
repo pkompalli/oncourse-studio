@@ -14,7 +14,7 @@ import { fetchAllRows } from '../../db/pagination.js';
 import { fixQuestion } from './fixer.js';
 import { runValidatorBatch } from './validator.js';
 import { runAdversarialBatch } from './adversarial.js';
-import { processAllImageQuestions, regenerateQuestionImage, isImageGenerationAvailable } from '../images/imageGeneration.js';
+import { processAllImageQuestions, regenerateQuestionImage, isImageGenerationAvailable, imageContradictionIssues } from '../images/imageGeneration.js';
 import { orCall, MODELS } from '../llm/openrouter.js';
 import type { ContentPart } from '../llm/openrouter.js';
 import { formatQuestionsForReviewWithImages, extractJsonArray } from './shared.js';
@@ -276,6 +276,51 @@ export function isEffectivelyFlagged(q: Record<string, any>): boolean {
   return false;
 }
 
+
+/**
+ * Persist a fixer result. ONE definition for all three fix sites.
+ *
+ * They had drifted: the phase-1 site saved `content`, the validator and adversarial
+ * sites saved only question/options/correct_option/explanation. For every grouped
+ * format ALL the substance lives in content — sub_questions, case_narrative, parts,
+ * image_description — so those two sites recorded "changes_applied" in the trail and
+ * then threw the fix away. A CFA case study was re-flagged for the same image/text
+ * mismatch run after run while its adversarial fix reported success each time.
+ *
+ * Returns whether the image should now be redrawn: when the issues say the figure
+ * contradicts the text, the fixer has just corrected the TEXT (and image_description),
+ * and the figure must be regenerated from it — the fixer cannot draw.
+ */
+async function persistFix(
+  q: Record<string, unknown>,
+  fixedQ: Record<string, unknown>,
+  trail: unknown[],
+  issues: string[],
+  jobId: string
+): Promise<void> {
+  const update: Record<string, unknown> = { audit_trail: trail };
+  if (fixedQ.question != null) update.question = fixedQ.question;
+  if (fixedQ.options != null) update.options = fixedQ.options;
+  if (fixedQ.correct_option != null || fixedQ.correct_answer != null) {
+    update.correct_option = fixedQ.correct_option || fixedQ.correct_answer;
+  }
+  if (fixedQ.explanation != null) update.explanation = fixedQ.explanation;
+  if (fixedQ.content != null) update.content = fixedQ.content;
+  // image_description is a top-level column AND lives inside content; buildImagePrompt
+  // prefers the column, so leaving it stale would let the old spec win over the fix.
+  const desc = (fixedQ.image_description as string)
+    || ((fixedQ.content as Record<string, unknown> | undefined)?.image_description as string);
+  if (desc) update.image_description = desc;
+
+  await supabase.from('qb_questions').update(update).eq('id', q.id as string);
+
+  const contradictions = imageContradictionIssues(issues);
+  if (contradictions.length > 0 && q.image_url && isImageGenerationAvailable()) {
+    console.log(`    🖼  Image contradicts the text for Q${q.question_number} — redrawing from the corrected text`);
+    await regenerateQuestionImage(q.id as string, jobId, contradictions);
+  }
+}
+
 async function runReprocessPipeline(jobId: string): Promise<void> {
   try {
     setStep(jobId, 'Loading flagged questions...');
@@ -382,21 +427,7 @@ async function runReprocessPipeline(jobId: string): Promise<void> {
             timestamp: new Date().toISOString(),
           });
 
-          // Update all relevant fields from the fixed question (format-agnostic)
-          const fixUpdate: Record<string, unknown> = {
-            audit_trail: trail,
-          };
-          // Legacy fields (if present in fix)
-          if (fixedQ.question != null) fixUpdate.question = fixedQ.question;
-          if (fixedQ.options != null) fixUpdate.options = fixedQ.options;
-          if (fixedQ.correct_option != null || fixedQ.correct_answer != null) {
-            fixUpdate.correct_option = fixedQ.correct_option || fixedQ.correct_answer;
-          }
-          if (fixedQ.explanation != null) fixUpdate.explanation = fixedQ.explanation;
-          // Flexible content (if present in fix)
-          if (fixedQ.content != null) fixUpdate.content = fixedQ.content;
-
-          await supabase.from('qb_questions').update(fixUpdate).eq('id', q.id);
+          await persistFix(q, fixedQ, trail, issues, jobId);
           totalFixed++;
         }
       });
@@ -482,13 +513,7 @@ async function runReprocessPipeline(jobId: string): Promise<void> {
               changes_applied: fixResult.changesApplied || [],
               timestamp: new Date().toISOString(),
             }];
-            await supabase.from('qb_questions').update({
-              question: fixedQ.question,
-              options: fixedQ.options,
-              correct_option: fixedQ.correct_option || fixedQ.correct_answer,
-              explanation: fixedQ.explanation,
-              audit_trail: trail2,
-            }).eq('id', q.id);
+            await persistFix(q, fixedQ, trail2, changes, jobId);
           }
         }
       }
@@ -572,13 +597,7 @@ async function runReprocessPipeline(jobId: string): Promise<void> {
               changes_applied: fixResult.changesApplied || [],
               timestamp: new Date().toISOString(),
             }];
-            await supabase.from('qb_questions').update({
-              question: fixedQ.question,
-              options: fixedQ.options,
-              correct_option: fixedQ.correct_option || fixedQ.correct_answer,
-              explanation: fixedQ.explanation,
-              audit_trail: trail2,
-            }).eq('id', q.id);
+            await persistFix(q, fixedQ, trail2, changes, jobId);
           }
         }
       }
