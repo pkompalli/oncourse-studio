@@ -2353,6 +2353,20 @@ export async function replaceBatchForJob(
       }
     }
 
+    // A replacement enters as 'generated' and must still be reviewed and audited —
+    // but both phases short-circuit on a job whose status is 'complete', returning a
+    // synthesised "Review complete" from stored progress without running a batch. So
+    // replacing on a finished job would strand its own output: three replacements sat
+    // at status 'generated' with no scores while review reported success. Reopening
+    // the job to 'reviewing' is what lets them through.
+    if (replaced > 0) {
+      const { data: j } = await supabase.from('qb_jobs').select('status').eq('id', jobId).single();
+      if (j && (j.status === 'complete' || j.status === 'auditing')) {
+        await supabase.from('qb_jobs').update({ status: 'reviewing' }).eq('id', jobId);
+        console.log(`  [Replace] job reopened to 'reviewing' so the ${replaced} replacement(s) get scored`);
+      }
+    }
+
     const remaining = Math.max(0, pending.length - batch.length);
     console.log(`♻️  Replaced ${replaced}, failed ${failed} (${manualReview} parked for manual review), ${remaining} remaining\n`);
     return {
