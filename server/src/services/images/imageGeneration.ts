@@ -397,10 +397,18 @@ export async function processAllImageQuestions(jobId: string): Promise<{
  * The cure is to redraw the figure from the corrected text instead.
  */
 const IMAGE_WORD = /\b(image|figure|chart|graph|plot|diagram|exhibit|axis|axes|plotted|legend)\b/i;
+// Two vocabularies, because reviewers describe this defect in two registers. The
+// AUDIT reports it ("the image contradicts the rationale"); the VALIDATOR prescribes
+// a remedy ("Reconcile Figure 1 coordinates with the values used in Sub-Q1"). The
+// first version of this matched only the reporting register, so on a live run every
+// redraw silently failed to fire: "consistent between image and text" is not
+// "inconsisten\w*", and "to match" is the opposite of "does not match".
 const CONTRADICTION_WORD = /\b(contradict\w*|mismatch\w*|inconsisten\w*|do(es)? not match|don't match|disagree\w*|differ\w*|not consistent|does not correspond|unverifiable)\b/i;
+const REMEDY_WORD = /\b(reconcile|realign|align|replace|redraw|regenerate|relabel|re-?label|adjust|consistent|correspond\w*|matching|match the)\b/i;
 
 export function imageContradictionIssues(issues: string[]): string[] {
-  return (issues || []).filter((i) => typeof i === 'string' && IMAGE_WORD.test(i) && CONTRADICTION_WORD.test(i));
+  return (issues || []).filter((i) =>
+    typeof i === 'string' && IMAGE_WORD.test(i) && (CONTRADICTION_WORD.test(i) || REMEDY_WORD.test(i)));
 }
 
 // ── Re-generate image for a question after review fix ──
