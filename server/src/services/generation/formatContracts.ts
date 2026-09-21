@@ -139,7 +139,8 @@ export const FORMAT_CONTRACTS: Record<string, FormatContract> = {
     syntax: [
       'NOT an image question (is_image_question=false); exhibit data is MARKDOWN, never an image.',
       'Tasks reference exhibits by label ("Using Exhibit 1…").',
-      'Mix realistic task types (fill_blank, cloze_dropdown, matrix_grid, mcq_single, emq, ordered_response).',
+      'Tasks are WORK, not quiz items: the candidate enters values, picks from dropdowns, or classifies rows — fill_blank (numeric/text entry into a cell), cloze_dropdown (option lists inside a form or document), matrix_grid (classification or journal-entry style rows). Use ordered_response and plain lettered mcq_single ONLY if THIS exam genuinely uses them in a simulation — a CPA TBS does not: sequencing is not a CPA response type, and lettered multiple choice belongs to the MCQ testlets, not the work area.',
+      'Cover the task types this exam actually sets — for a CPA TBS those include document review, completing a form or schedule, recording journal entries, reconciliation, and researching authoritative literature for a citation.',
     ],
     stimulusRule: 'Exhibits are the shared stimulus and are REQUIRED, embedded as markdown.',
   },
@@ -239,6 +240,17 @@ export function resolveFormat(hint: { slug?: string; name?: string; description?
   const readingSignal = has('passage', 'reading comprehension', 'reading passage', 'excerpt');
   if (bySlug === 'passage_set' && !readingSignal) return 'case_study';
   if (bySlug === 'case_study' && has('reading passage', 'reading comprehension')) return 'passage_set';
+
+  // A grouped slug loses to a name that asserts a DIFFERENT answer model. CPA's
+  // analysis wrote slug 'case_study' under the name "Task-Based Simulation (TBS)",
+  // describing exhibits, forms, schedules and journal entries — and the slug won,
+  // because it was canonical and the fast-path below never looks further. 201
+  // simulations were then built and validated as case studies, where `exhibits` is
+  // optional rather than required.
+  const simulationSignal = /\b(task[\s-]?based|tbs|simulation)\b/.test(text);
+  if ((bySlug === 'case_study' || bySlug === 'passage_set') && simulationSignal && !readingSignal) {
+    return 'task_based_simulation';
+  }
 
   if (!ambiguousGrouped && FORMAT_CONTRACTS[bySlug]) return bySlug; // known canonical slug
 
