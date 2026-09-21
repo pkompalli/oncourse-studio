@@ -5,6 +5,7 @@
  */
 
 import { supabase } from '../db/supabase.js';
+import { fetchAllRows } from '../db/pagination.js';
 
 export type SnapshotStage = 'generated' | 'post_validator' | 'post_adversarial' | 'post_audit' | 'post_replace';
 
@@ -80,19 +81,27 @@ export async function saveSnapshots(
  * Fetches questions from DB and saves their current state.
  */
 export async function saveJobSnapshots(jobId: string, stage: SnapshotStage): Promise<void> {
-  const { data, error } = await supabase
-    .from('qb_questions')
-    .select('*')
-    .eq('job_id', jobId)
-    .is('replaced_by_id', null)
-    .order('question_number', { ascending: true });
-
-  if (error) {
-    console.error(`Failed to fetch questions for snapshot (${stage}):`, error.message);
+  // Paginate. PostgREST caps a plain select at 1000 rows, so a job larger than that
+  // was silently snapshotting only its first 1000 questions — and a snapshot is the
+  // safety net you reach for precisely when a bulk repair went wrong. The CPA job
+  // has 1258 questions and 1000 snapshots; 258 had no recovery point at all.
+  let data: Record<string, unknown>[];
+  try {
+    data = await fetchAllRows<Record<string, unknown>>((from, to) =>
+      supabase
+        .from('qb_questions')
+        .select('*')
+        .eq('job_id', jobId)
+        .is('replaced_by_id', null)
+        .order('question_number', { ascending: true })
+        .range(from, to)
+    );
+  } catch (e) {
+    console.error(`Failed to fetch questions for snapshot (${stage}):`, e instanceof Error ? e.message : e);
     return;
   }
 
-  await saveSnapshots(jobId, stage, (data || []) as Record<string, unknown>[]);
+  await saveSnapshots(jobId, stage, data);
 }
 
 /**
