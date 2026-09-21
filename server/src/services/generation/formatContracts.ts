@@ -169,7 +169,7 @@ FORMAT_CONTRACTS.performance_task = {
   syntax: [
     'State the task and deliverable clearly (what the examinee must produce).',
     'Provide the source materials as markdown exhibits referenced by the task.',
-    'Include a scoring_rubric describing what a strong response demonstrates.',
+    'scoring_rubric may be prose OR a marking scheme — {"criteria":[{"criterion":"...","points":5,"required_features":["..."],"acceptable_variations":["..."]}],"total_points":N}. Prefer the marking scheme where credit really is allocated per criterion; never serialise it into a string.',
   ],
   stimulusRule: 'The source materials (exhibits) are the shared stimulus the task operates on and should be embedded as markdown.',
 };
@@ -389,6 +389,50 @@ type JsonSchema = Record<string, unknown>;
 const NON_EMPTY_STR: JsonSchema = { type: 'string', minLength: 1 };
 const STR: JsonSchema = { type: 'string' };
 
+/**
+ * A rubric is either prose or a real marking scheme, and both are legitimate.
+ *
+ * Declaring it a bare string made the second kind illegal, and the model writes the
+ * second kind because that is what a rubric IS — criteria, points, what a response
+ * must contain. The fixer then satisfied "must be string" by JSON.stringify-ing the
+ * object, which passes the schema while producing something no one can use: a
+ * candidate sees raw JSON and the per-criterion points are no longer readable as
+ * data. 81 Bar rubrics were corrupted that way before this was caught.
+ *
+ * CFA never hit it because its parts[] carry points and a rubric per part, so the
+ * structure lives IN the schema instead of fighting it.
+ */
+/** The shape worth aiming for: credit allocated per criterion. */
+const CRITERION: JsonSchema = {
+  type: 'object',
+  required: ['criterion', 'points'],
+  properties: {
+    criterion: NON_EMPTY_STR,
+    points: { type: 'number', minimum: 0 },
+    required_features: { type: 'array', items: NON_EMPTY_STR },
+    acceptable_variations: { type: 'array', items: NON_EMPTY_STR },
+  },
+};
+/**
+ * A rubric is prose OR a marking scheme, and the marking scheme has no single
+ * canonical shape — real ones came back as {criteria[]}, {point_values[]},
+ * {prohibited_errors[]}, {total_points, <named criteria>} and {thesis, ...}. All
+ * are legitimate, and a human reads them.
+ *
+ * So the schema insists on what actually matters — the rubric is PRESENT and is not
+ * a stringified blob — and leaves its internal shape to the contract prose, which
+ * recommends CRITERION. Insisting on one key is what started this: declaring it a
+ * bare string made every structured rubric invalid, and the fixer "resolved" that by
+ * JSON.stringify-ing them, passing the schema while producing something unusable.
+ */
+const RUBRIC: JsonSchema = {
+  anyOf: [
+    { type: 'string', minLength: 1 },
+    { type: 'object', minProperties: 1 },
+    { type: 'array', minItems: 1, items: CRITERION },
+  ],
+};
+
 function optionsArraySchema(p: SchemaParams): JsonSchema {
   const item: JsonSchema = { type: 'object', required: ['key', 'text'], properties: { key: NON_EMPTY_STR, text: NON_EMPTY_STR } };
   const s: JsonSchema = { type: 'array', items: item };
@@ -501,7 +545,7 @@ export function buildContentSchema(format: string, p: SchemaParams = {}): JsonSc
               label: NON_EMPTY_STR,
               prompt: NON_EMPTY_STR,
               points: { type: 'number', minimum: 1 },
-              scoring_rubric: NON_EMPTY_STR,
+              scoring_rubric: RUBRIC,
               sample_response: STR,
             },
           },
@@ -511,7 +555,7 @@ export function buildContentSchema(format: string, p: SchemaParams = {}): JsonSc
         return { ...base, required: ['prompt', 'scoring_rubric', ...(p.partsMin ? ['parts'] : [])], properties: {
           prompt: NON_EMPTY_STR, vignette: STR, source_material: STR,
           parts, total_points: { type: 'number', minimum: 1 },
-          sample_response: STR, scoring_rubric: NON_EMPTY_STR } };
+          sample_response: STR, scoring_rubric: RUBRIC } };
       }
     case 'performance_task': {
       // Source-material exhibits + an extended constructed work product, human-scored.
@@ -523,7 +567,7 @@ export function buildContentSchema(format: string, p: SchemaParams = {}): JsonSc
         prompt: NON_EMPTY_STR,
         exhibits: { type: 'array', minItems: 1, items: { type: 'object', required: ['label', 'content'],
           properties: { label: NON_EMPTY_STR, title: STR, type: STR, content: exhibitContent } } },
-        scoring_rubric: NON_EMPTY_STR, sample_response: STR } };
+        scoring_rubric: RUBRIC, sample_response: STR } };
     }
     case 'passage_set': {
       const sub: JsonSchema = { type: 'array', minItems: p.subQuestionMin || 2,
