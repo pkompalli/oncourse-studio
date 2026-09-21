@@ -139,7 +139,7 @@ export const FORMAT_CONTRACTS: Record<string, FormatContract> = {
     syntax: [
       'NOT an image question (is_image_question=false); exhibit data is MARKDOWN, never an image.',
       'Tasks reference exhibits by label ("Using Exhibit 1…").',
-      'Tasks are WORK, not quiz items: the candidate enters values, picks from dropdowns, or classifies rows — fill_blank (numeric/text entry into a cell), cloze_dropdown (option lists inside a form or document), matrix_grid (classification or journal-entry style rows). Use ordered_response and plain lettered mcq_single ONLY if THIS exam genuinely uses them in a simulation — a CPA TBS does not: sequencing is not a CPA response type, and lettered multiple choice belongs to the MCQ testlets, not the work area.',
+      'Tasks are WORK, not quiz items: the candidate enters values, picks from dropdowns, or classifies rows — data_entry_grid (a form, schedule, reconciliation or journal entry the candidate completes cell by cell), document_review (correct the passages of a real document), research_citation (find the governing authority), fill_blank (a single numeric/text value), cloze_dropdown (option lists inside prose), matrix_grid (classification). Use ordered_response and plain lettered mcq_single ONLY if THIS exam genuinely uses them in a simulation — a CPA TBS does not: sequencing is not a CPA response type, and lettered multiple choice belongs to the MCQ testlets, not the work area.',
       'Cover the task types this exam actually sets — for a CPA TBS those include document review, completing a form or schedule, recording journal entries, reconciliation, and researching authoritative literature for a citation.',
     ],
     stimulusRule: 'Exhibits are the shared stimulus and are REQUIRED, embedded as markdown.',
@@ -172,6 +172,59 @@ FORMAT_CONTRACTS.performance_task = {
     'Include a scoring_rubric describing what a strong response demonstrates.',
   ],
   stimulusRule: 'The source materials (exhibits) are the shared stimulus the task operates on and should be embedded as markdown.',
+};
+
+// ── Work-product response models ─────────────────────────────────────────────
+// A simulation asks the candidate to DO the work — fill a form, edit a document,
+// find the governing rule — not to pick a lettered option. None of the selection
+// formats above can express that: matrix_grid is classification (one column per
+// row, no values), fill_blank holds a single value. These three cover the four
+// response types the AICPA Blueprints define for a Task-Based Simulation
+// (free-response numeric entry, option list, journal entry, document review) plus
+// research, and they are stated generically — a form to complete, a document to
+// correct and an authority to cite are not accounting-specific ideas.
+
+FORMAT_CONTRACTS.data_entry_grid = {
+  slug: 'data_entry_grid',
+  label: 'Data Entry Grid (form / schedule / journal entry / reconciliation)',
+  structure: 'stem (the task); grid_kind ("option_grid"|"numeric_entry"|"journal_entry"|"form"|"schedule"|"reconciliation"|"generic"); columns[] (each {key,label,input:"select"|"number"|"text", options[] when select, unit/precision/tolerance when number}); rows[] (each {id, label?}); answer (per-cell: {rowId: {columnKey: value}}); constraints[] (optional, e.g. {type:"balanced",columns:["debit","credit"]} or {type:"column_total",column:"amount",value:N}); explanation.',
+  gradability: 'EVERY cell the candidate must complete needs a keyed value in answer[rowId][columnKey]. A select column grades against its own options list; a number column grades to its precision/tolerance. A grid whose answer is described only in prose is INVALID.',
+  syntax: [
+    'Columns declare the INPUT, not the content: "select" renders a dropdown of its options, "number" a numeric cell, "text" a free-text cell.',
+    'The commonest shape is grid_kind "option_grid": a table of rows, each row answered from its own dropdown. "numeric_entry" is the same table with computed amounts typed in and no options supplied.',
+    'A journal entry is grid_kind "journal_entry" with columns [account(select from the chart of accounts), debit(number), credit(number)] and constraint {type:"balanced"}. Line order is NOT graded — a correct entry in a different row order is still correct.',
+    'Give every number column a unit and a precision; state a tolerance where rounding is legitimate.',
+    'Rows are the lines to complete. Label them where the form does (a schedule line, an account caption); leave the label out where the candidate supplies it (a journal entry line).',
+  ],
+  stimulusRule: 'Every figure a cell requires must be derivable from the stimulus or an exhibit — never from outside knowledge.',
+};
+
+FORMAT_CONTRACTS.document_review = {
+  slug: 'document_review',
+  label: 'Document Review (correct the document)',
+  structure: 'stem (the review task); document (the full document as MARKDOWN, with each reviewable passage marked [[span:id]]…[[/span]]); spans[] (each {id, text, options[], correct}); explanation.',
+  gradability: 'Every span id in the document MUST have a spans[] entry, and every spans[] entry MUST have a correct value drawn from its own options[]. The options for a span MUST include an explicit no-change choice ("No change is required"), because a span that is already correct is a real answer, not an omission.',
+  syntax: [
+    'The document reads as the real artefact — an engagement letter, memo, footnote, invoice, workpaper — not as a quiz about a document.',
+    'Mark only passages whose correctness genuinely turns on the exhibits; every other word stays plain.',
+    'Each span offers its own option list; options are alternative wordings or values, never "A/B/C".',
+    'At least one span should be already correct, so "no change" is a live answer rather than a giveaway.',
+  ],
+  stimulusRule: 'The document is the stimulus and is REQUIRED; the evidence that decides each span must appear in the document or an exhibit.',
+};
+
+FORMAT_CONTRACTS.applied_research = {
+  slug: 'applied_research',
+  label: 'Applied Research (apply a supplied standards excerpt)',
+  structure: 'stem (the task framing); source (which standard the excerpt is from, e.g. "FASB ASC 606-10-25", "AU-C 240", "IRC §162"); excerpt (the authoritative text itself, verbatim, as MARKDOWN) or exhibit_label (the exhibit carrying it); items[] — each {id, prompt, options[]?, answer} is ONE scored response to that shared excerpt; explanation. A single-response task may instead carry answer/options directly.',
+  gradability: 'The excerpt MUST be present — in `excerpt` or in the exhibit named by exhibit_label — and every answer must follow from it. Each items[] entry needs its own answer; where it offers options[], the answer must be one of them. A task with neither items[] nor a top-level answer is unscorable.',
+  syntax: [
+    'The excerpt is SUPPLIED, not searched for. Do NOT ask the candidate to find or cite a reference — that is a literature search, which this is not.',
+    'Quote the authority verbatim and attribute it in `source`; the candidate applies it to the facts.',
+    'Ask what the standard REQUIRES on these facts, not what the standard says in the abstract.',
+    'Several questions may hang off ONE excerpt — put them in items[], each separately scored. Do not split them into separate tasks: the simulation is a single item.',
+  ],
+  stimulusRule: 'The excerpt is the stimulus and is REQUIRED; the facts it is applied to come from the scenario or an exhibit.',
 };
 
 // ── Canonical format slugs ──────────────────────────────────────────────────
@@ -491,6 +544,46 @@ export function buildContentSchema(format: string, p: SchemaParams = {}): JsonSc
           properties: { label: NON_EMPTY_STR, title: STR, type: STR, content: exhibitContent } } },
         sub_questions: sub, response_instructions: STR, explanation: STR } };
     }
+    case 'data_entry_grid': {
+      const colInput = { enum: ['select', 'number', 'text'] };
+      return { ...base, required: ['stem', 'columns', 'rows', 'answer'], properties: {
+        stem: NON_EMPTY_STR,
+        grid_kind: { enum: ['option_grid', 'numeric_entry', 'journal_entry', 'form', 'schedule', 'reconciliation', 'generic'] },
+        columns: { type: 'array', minItems: 1, items: { type: 'object', required: ['key', 'label', 'input'],
+          properties: { key: NON_EMPTY_STR, label: NON_EMPTY_STR, input: colInput,
+            options: { type: 'array', items: NON_EMPTY_STR }, unit: STR,
+            precision: { type: 'integer' }, tolerance: { type: 'number' } } } },
+        rows: { type: 'array', minItems: 1, items: { type: 'object', required: ['id'],
+          properties: { id: NON_EMPTY_STR, label: STR } } },
+        // answer[rowId][columnKey] — a value for every cell the candidate completes.
+        answer: { type: 'object', minProperties: 1 },
+        constraints: { type: 'array', items: { type: 'object', required: ['type'],
+          properties: { type: NON_EMPTY_STR, columns: { type: 'array', items: NON_EMPTY_STR },
+            column: STR, value: { type: 'number' } } } },
+        explanation: STR } };
+    }
+    case 'document_review':
+      return { ...base, required: ['stem', 'document', 'spans'], properties: {
+        stem: NON_EMPTY_STR,
+        document: NON_EMPTY_STR,
+        spans: { type: 'array', minItems: 1, items: { type: 'object', required: ['id', 'options', 'correct'],
+          properties: { id: NON_EMPTY_STR, text: STR,
+            options: { type: 'array', minItems: 2, items: NON_EMPTY_STR }, correct: NON_EMPTY_STR } } },
+        explanation: STR } };
+    case 'applied_research':
+      return { ...base, required: ['stem', 'source'], properties: {
+        stem: NON_EMPTY_STR,
+        source: NON_EMPTY_STR,
+        excerpt: STR,
+        exhibit_label: STR,
+        items: { type: 'array', minItems: 1, items: { type: 'object', required: ['prompt', 'answer'],
+          properties: { id: STR, prompt: NON_EMPTY_STR,
+            options: { type: 'array', items: NON_EMPTY_STR },
+            answer: { anyOf: [{ type: 'string', minLength: 1 }, { type: 'number' }] } } } },
+        answer: { anyOf: [{ type: 'object', minProperties: 1 }, { type: 'string', minLength: 1 }] },
+        options: { type: 'array', items: NON_EMPTY_STR },
+        explanation: STR },
+        anyOf: [{ required: ['items'] }, { required: ['answer'] }] };
     default:
       return base; // unknown/new format — no structural constraints (gate still applies)
   }

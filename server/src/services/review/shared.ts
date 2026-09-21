@@ -30,6 +30,56 @@ function subQuestionIssues(sq: Record<string, unknown>, n: number): string[] {
     case 'matrix_grid': if (!_has(sq.rows)) out.push(`${tag}: missing rows`); if (!_has(sq.columns)) out.push(`${tag}: missing columns`); if (!_has(key)) out.push(`${tag}: missing correct_answer`); break;
     case 'cloze_dropdown': if (!_has(sq.choices) && !_has(sq.blanks)) out.push(`${tag}: missing choices`); if (!_has(key)) out.push(`${tag}: missing correct_answer`); break;
     case 'fill_blank': if (!_has(key)) out.push(`${tag}: missing correct_answer (answer only in prose is invalid)`); break;
+    case 'data_entry_grid': {
+      if (!_has(sq.columns)) out.push(`${tag}: missing columns`);
+      if (!_has(sq.rows)) out.push(`${tag}: missing rows`);
+      if (!_has(key)) out.push(`${tag}: missing the per-cell answer key`);
+      // A select column that offers nothing cannot be answered.
+      const cols = Array.isArray(sq.columns) ? (sq.columns as Array<Record<string, unknown>>) : [];
+      for (const col of cols) {
+        if (col.input === 'select' && !_has(col.options)) out.push(`${tag}: select column "${String(col.key || col.label)}" has no options`);
+      }
+      if (String(sq.grid_kind) === 'journal_entry' && cols.length && !cols.some((c2) => c2.input === 'select')) {
+        out.push(`${tag}: a journal entry needs an account column the candidate selects from`);
+      }
+      break;
+    }
+    case 'document_review': {
+      if (!_has(sq.document)) out.push(`${tag}: missing document`);
+      const spans = Array.isArray(sq.spans) ? (sq.spans as Array<Record<string, unknown>>) : [];
+      if (spans.length === 0) out.push(`${tag}: missing spans`);
+      spans.forEach((sp, i) => {
+        const st = `${tag} span ${String(sp.id || i + 1)}`;
+        if (!_has(sp.options)) out.push(`${st}: no options`);
+        if (!_has(sp.correct)) out.push(`${st}: no correct choice`);
+        const opts = Array.isArray(sp.options) ? (sp.options as unknown[]).map(String) : [];
+        if (opts.length && _has(sp.correct) && !opts.includes(String(sp.correct))) {
+          out.push(`${st}: correct choice is not one of its options`);
+        }
+      });
+      break;
+    }
+    case 'applied_research': {
+      if (!_has(sq.source)) out.push(`${tag}: missing source (which standard the excerpt is from)`);
+      // The excerpt is SUPPLIED, so it must actually be here — inline or in a named exhibit.
+      if (!_has(sq.excerpt) && !_has(sq.exhibit_label)) out.push(`${tag}: the standards excerpt is neither included nor pointed at an exhibit`);
+      const items = Array.isArray(sq.items) ? (sq.items as Array<Record<string, unknown>>) : null;
+      if (items) {
+        items.forEach((it, i) => {
+          const itag = `${tag} item ${String(it.id || i + 1)}`;
+          if (!_has(it.prompt)) out.push(`${itag}: missing prompt`);
+          if (!_has(it.answer)) out.push(`${itag}: missing answer`);
+          const io2 = Array.isArray(it.options) ? (it.options as unknown[]).map(String) : [];
+          if (io2.length && _has(it.answer) && !io2.includes(String(it.answer))) out.push(`${itag}: answer is not one of its options`);
+        });
+      } else if (!_has(key) && !_has(sq.answer)) {
+        out.push(`${tag}: missing answer`);
+      }
+      const opts = Array.isArray(sq.options) ? (sq.options as unknown[]).map(String) : [];
+      const ans = key ?? sq.answer;
+      if (!items && opts.length && _has(ans) && !opts.includes(String(ans))) out.push(`${tag}: answer is not one of its options`);
+      break;
+    }
     case 'ordered_response': case 'drag_drop': if (!_has(sq.items)) out.push(`${tag}: missing items`); if (!_has(sq.correct_order)) out.push(`${tag}: missing correct_order`); break;
     case 'emq': if (!_has(sq.response_options)) out.push(`${tag}: missing response_options`); if (!_has(key) && !_has(sq.items)) out.push(`${tag}: missing answers`); break;
     case 'hot_spot': if (!_has(sq.stimulus)) out.push(`${tag}: missing stimulus`); if (!_has(sq.answer) && !_has(key)) out.push(`${tag}: missing answer`); break;
@@ -89,6 +139,26 @@ function standaloneIssues(ft: string, c: Record<string, unknown>, q: Record<stri
     case 'fill_blank':
       if (!_has(answer.value) && !_has(answer.text) && !_has(answer.acceptable_range) && !_has(q.correct_answer_value) && !_has(q.correct_answer)) out.push('missing answer');
       break;
+    case 'data_entry_grid': {
+      if (!_has(c.stem) && !_has(q.question)) out.push('missing stem');
+      if (!_has(c.columns)) out.push('missing columns');
+      if (!_has(c.rows)) out.push('missing rows');
+      if (!_has(c.answer)) out.push('missing the per-cell answer key');
+      break;
+    }
+    case 'document_review': {
+      if (!_has(c.stem) && !_has(q.question)) out.push('missing stem');
+      if (!_has(c.document)) out.push('missing document');
+      if (!_has(c.spans)) out.push('missing spans');
+      break;
+    }
+    case 'applied_research': {
+      if (!_has(c.stem) && !_has(q.question)) out.push('missing stem');
+      if (!_has(c.source)) out.push('missing source');
+      if (!_has(c.excerpt) && !_has(c.exhibit_label)) out.push('the standards excerpt is neither included nor pointed at an exhibit');
+      if (!_has(c.items) && !_has(c.answer)) out.push('missing answer');
+      break;
+    }
     case 'matrix_grid':
       if (!_has(c.row_headers) && !_has(c.rows)) out.push('missing row_headers');
       if (!_has(c.column_headers) && !_has(c.columns)) out.push('missing column_headers');
