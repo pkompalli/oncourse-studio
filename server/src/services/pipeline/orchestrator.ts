@@ -31,7 +31,22 @@ const orchestrating = new Set<string>();
 // server restart but whose questions are already persisted). Generous, because
 // generation now also runs the full image pipeline to completion before it flips
 // to 'reviewing' — this is only a backstop for a genuinely stuck job.
-const GENERATION_TIMEOUT_MS = 45 * 60 * 1000;
+/**
+ * A phase is stalled when it stops MAKING PROGRESS, not when it has been running a
+ * while. A 1088-question Bar run outlived the old 45-minute generation timeout, so
+ * the orchestrator declared it stalled, flipped the job to 'reviewing' "with
+ * whatever was generated", and review took its snapshot mid-run: five subjects were
+ * finished, five were not. Generation carried on and delivered the rest, but they
+ * arrived after review had already chosen its set — 640 of 1088 questions were
+ * never reviewed, audited or flagged, and the job reported complete.
+ *
+ * Elapsed time cannot tell "still working" from "dead". Progress can: generation
+ * writes to the job's progress on every batch, so a progress object that has not
+ * changed for STALL_MS is genuinely stuck, at any total size.
+ */
+const STALL_MS = 20 * 60 * 1000;
+/** Absolute backstop, so a pathological job cannot pin the driver forever. */
+const GENERATION_TIMEOUT_MS = 6 * 60 * 60 * 1000;
 // Review/audit of a large job (1000+ questions) can run a long time; give each
 // phase a generous ceiling before the orchestrator stops babysitting it.
 const PHASE_TIMEOUT_MS = 90 * 60 * 1000;
@@ -123,7 +138,10 @@ async function runPipeline(jobId: string): Promise<void> {
 // to 'reviewing' when all subjects finish. Poll until that happens (or the job
 // fails / generation stalls).
 async function waitForGeneration(jobId: string): Promise<void> {
-  const deadline = Date.now() + GENERATION_TIMEOUT_MS;
+  const ceiling = Date.now() + GENERATION_TIMEOUT_MS;
+  let lastSeen = '';
+  let lastChange = Date.now();
+
   while (true) {
     await sleep(POLL_INTERVAL_MS);
     const job = await getJob(jobId);
@@ -132,20 +150,40 @@ async function waitForGeneration(jobId: string): Promise<void> {
     // Generation self-transitioned (reviewing/auditing/complete) — done waiting.
     if (job.status !== 'generating' && job.status !== 'pending') return;
 
-    // Fast path: all subjects reported done but status never flipped (e.g. the
-    // in-memory generation task died on a restart) — flip it ourselves.
     const p = job.progress || {};
     const completed = (p.completed as number) ?? 0;
     const total = (p.total as number) ?? 0;
+
+    // All subjects reported done but the status never flipped (e.g. the in-memory
+    // generation task died on a restart) — flip it ourselves. This is the ONLY
+    // path that should move a healthy job forward.
     if (total > 0 && completed >= total) {
       console.warn(`[orchestrator] Job ${jobId} generation complete (${completed}/${total}) but not transitioned — forcing 'reviewing'`);
       await supabase.from('qb_jobs').update({ status: 'reviewing' }).eq('id', jobId);
       return;
     }
 
-    if (Date.now() > deadline) {
-      console.warn(`[orchestrator] Job ${jobId} generation stalled past timeout — forcing 'reviewing' with whatever was generated`);
-      await supabase.from('qb_jobs').update({ status: 'reviewing' }).eq('id', jobId);
+    // Any change to the progress object counts as being alive — generation writes
+    // to it on every batch, not only when a subject finishes.
+    const seen = JSON.stringify(p);
+    if (seen !== lastSeen) { lastSeen = seen; lastChange = Date.now(); }
+
+    const idleMs = Date.now() - lastChange;
+    if (idleMs > STALL_MS || Date.now() > ceiling) {
+      const why = idleMs > STALL_MS
+        ? `no progress for ${Math.round(idleMs / 60000)} min`
+        : `past the ${Math.round(GENERATION_TIMEOUT_MS / 3600000)}h ceiling`;
+      // Moving on abandons everything generated after this instant: review takes a
+      // one-off snapshot of what is at status 'generated'. Say how much is being
+      // left behind rather than reporting a clean completion.
+      console.error(
+        `[orchestrator] Job ${jobId} generation ${why} at ${completed}/${total} subjects — forcing 'reviewing'. ` +
+        `Questions generated after this point will NOT be reviewed; re-run the review phase to pick them up.`
+      );
+      await supabase.from('qb_jobs').update({
+        status: 'reviewing',
+        error: `Generation was cut short (${why}) at ${completed}/${total} subjects; later questions need a second review pass.`,
+      }).eq('id', jobId);
       return;
     }
   }
@@ -155,14 +193,27 @@ async function waitForGeneration(jobId: string): Promise<void> {
 // disappeared) or the timeout elapses. Used to await fire-and-forget phases whose
 // completion is signalled only via the DB job status.
 async function waitWhileStatus(jobId: string, phase: string, timeoutMs: number): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
+  const ceiling = Date.now() + timeoutMs;
+  let lastSeen = '';
+  let lastChange = Date.now();
   while (true) {
     await sleep(POLL_INTERVAL_MS);
     const job = await getJob(jobId);
     if (!job) return;
     if (job.status !== phase) return;
-    if (Date.now() > deadline) {
-      console.warn(`[orchestrator] Job ${jobId} stuck in '${phase}' past timeout — stopping driver`);
+
+    // Same rule as generation: a phase that is still writing progress is working,
+    // however long it has been at it. Only silence means stuck.
+    const seen = JSON.stringify(job.progress || {});
+    if (seen !== lastSeen) { lastSeen = seen; lastChange = Date.now(); }
+
+    const idleMs = Date.now() - lastChange;
+    if (idleMs > STALL_MS || Date.now() > ceiling) {
+      console.warn(
+        `[orchestrator] Job ${jobId} stuck in '${phase}' (` +
+        (idleMs > STALL_MS ? `no progress for ${Math.round(idleMs / 60000)} min` : 'past ceiling') +
+        `) — stopping driver`
+      );
       return;
     }
   }
