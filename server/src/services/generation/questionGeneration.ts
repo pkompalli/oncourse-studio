@@ -1435,7 +1435,7 @@ function deslugExhibits(s: unknown): unknown {
     .replace(/\b(?:[a-z0-9]+[-_])+exhibit\b/gi, 'Exhibit 1');
 }
 
-function enrichSubQuestion(sq: Record<string, unknown>, idx: number): Record<string, unknown> {
+export function enrichSubQuestion(sq: Record<string, unknown>, idx: number): Record<string, unknown> {
   const base: Record<string, unknown> = {
     number: sq.number ?? idx + 1,
     question: deslugExhibits(sq.question || sq.prompt || sq.stem || ''),
@@ -1444,10 +1444,20 @@ function enrichSubQuestion(sq: Record<string, unknown>, idx: number): Record<str
     options: sq.options,                 // mcq_single / sata
     choices: sq.choices,                 // cloze_dropdown: { blankId: [opts] }
     response_options: sq.response_options, // emq
-    items: sq.items,                     // ordered_response / emq
+    items: sq.items,                     // ordered_response / emq; applied_research items[]
     rows: sq.rows,                       // matrix_grid
     columns: sq.columns,                 // matrix_grid
     blanks: sq.blanks,                   // cloze (alt shape)
+    // work-product scaffolding — without these the task cannot be rendered or graded
+    // grid_kind belongs to data_entry_grid alone; carried on any other format it is
+    // an invented label that fragments every later grouping by format.
+    grid_kind: (sq.format_type === 'data_entry_grid' ? sq.grid_kind : undefined),
+    constraints: sq.constraints,         // data_entry_grid (e.g. debits == credits)
+    document: sq.document,               // document_review
+    spans: sq.spans,                     // document_review
+    source: sq.source,                   // applied_research
+    excerpt: sq.excerpt,                 // applied_research (the supplied standards text)
+    exhibit_label: sq.exhibit_label,     // applied_research (excerpt lives in this exhibit)
     correct_order: sq.correct_order,
     stimulus: sq.stimulus,               // hot_spot
     rationale: deslugExhibits(sq.rationale || sq.explanation || ''),
