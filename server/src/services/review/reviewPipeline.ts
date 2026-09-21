@@ -705,7 +705,12 @@ async function runReviewPipeline(jobId: string, scope: ReviewScope): Promise<voi
     setStep(jobId, 'Validator done. Re-fetching questions with fixes applied for adversarial review...');
     await pushProgress(jobId);
 
-    const freshQuestions = await fetchJobQuestions(jobId);
+    // Re-read the questions THIS run reviewed, to pick up the validator's inline
+    // fixes — not the whole job. Fetching everything sent the adversarial phase at
+    // all 1258 CPA questions when the validator had correctly handled 201, which
+    // would have rescored 1057 already-approved MCQs that were never in scope.
+    const inScope = new Set(questions.map((q) => q.id as string));
+    const freshQuestions = (await fetchJobQuestions(jobId)).filter((q) => inScope.has(q.id as string));
     // Skip structural failures in adversarial too (already auto-scored)
     const freshValid = freshQuestions.filter(q => {
       if (q.is_image_question && !q.image_url) return false;
