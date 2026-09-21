@@ -19,6 +19,41 @@ export interface FixResult {
  * - Do NOT rewrite, rephrase, or "improve" any text that isn't flagged
  * - Keep original wording, structure, and style for all non-flagged parts
  */
+/**
+ * Undo structure the fixer flattened on its way past.
+ *
+ * The fixer rewrites a whole question to change one thing, and while reconstructing
+ * the JSON it sometimes serialises a nested object into a string it was never asked
+ * to touch. A rubric came back as "{\"criteria\": [...]}" after a fix for an
+ * unrelated blank-stem complaint — schema-valid, and useless: a candidate sees raw
+ * JSON and the per-criterion points stop being readable as data.
+ *
+ * This is distinct from the schema bug that first caused it (scoring_rubric was
+ * declared a bare string, so structured rubrics were rejected and the fixer was
+ * explicitly told to stringify them). That is fixed; this guards the incidental
+ * case, which can hit any structured field during any repair.
+ */
+function unflatten(node: unknown): void {
+  if (!node || typeof node !== 'object') return;
+  const obj = node as Record<string, unknown>;
+  for (const [k, v] of Object.entries(obj)) {
+    if (typeof v === 'string') {
+      const t = v.trim();
+      if (t.startsWith('{') || t.startsWith('[')) {
+        try {
+          const parsed = JSON.parse(t);
+          // Only rescue real structure; a stem that merely begins with a brace stays.
+          if (parsed && typeof parsed === 'object') obj[k] = parsed;
+        } catch { /* genuine prose — leave it */ }
+      }
+    } else if (Array.isArray(v)) {
+      v.forEach((x) => unflatten(x));
+    } else if (v && typeof v === 'object') {
+      unflatten(v);
+    }
+  }
+}
+
 export async function fixQuestion(
   question: Record<string, unknown>,
   changesRequired: string[],
@@ -87,8 +122,10 @@ Return ONLY valid JSON. No preamble, no markdown fences.`;
 
       const wrapper = JSON.parse(raw);
       if (typeof wrapper === 'object' && wrapper.question) {
+        unflatten(wrapper.question);
         return { fixed: true, question: wrapper.question, changesApplied: wrapper.changes_applied || [] };
       }
+      unflatten(wrapper);
       return { fixed: true, question: wrapper, changesApplied: [] };
     } catch (e) {
       lastErr = e instanceof Error ? e.message : 'Fix failed';
