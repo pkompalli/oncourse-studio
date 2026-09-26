@@ -1,6 +1,6 @@
 import { orCall, MODELS } from '../llm/openrouter.js';
 import { supabase } from '../../db/supabase.js';
-import { resolveFormat } from './formatContracts.js';
+import { resolveFormat, resolveQuestionType } from './formatContracts.js';
 
 /**
  * MODULE 2: Exam Format Analyzer
@@ -563,8 +563,20 @@ RULES:
 
   const parsed = JSON.parse(text);
 
-  // Ensure format registry has entries for discovered types
+  // Resolve slugs to the canonical registry BEFORE anything is persisted. This path
+  // wrote whatever the LLM invented straight into qb_courses.exam_format and then
+  // auto-created a qb_question_formats row from it, so a mislabelled slug became
+  // permanent — the same way CPA ended up with 'case_study' named "Task-Based
+  // Simulation (TBS)". Merge any types that collapse together, as the analysis does.
   if (parsed.question_types && Array.isArray(parsed.question_types)) {
+    const merged = new Map<string, QuestionTypeInfo>();
+    for (const t of parsed.question_types as QuestionTypeInfo[]) {
+      const slug = resolveQuestionType(t as unknown as Record<string, unknown>);
+      const existing = merged.get(slug);
+      if (existing) existing.percentage = (existing.percentage || 0) + (t.percentage || 0);
+      else merged.set(slug, { ...t, slug });
+    }
+    parsed.question_types = [...merged.values()];
     await ensureFormatsExist(parsed.question_types);
   }
 

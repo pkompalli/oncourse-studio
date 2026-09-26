@@ -172,7 +172,7 @@ export default function Step1bGuidelines() {
                   <div className="text-sm text-slate-700">{fmt.description}</div>
                 </div>
                 <span className="text-sm font-medium text-slate-600 shrink-0">
-                  {fmt.count} ({fmt.percentage}%)
+                  {fmt.count != null ? `${fmt.count} (${fmt.percentage}%)` : `${fmt.percentage}%`}
                 </span>
               </div>
             ))}

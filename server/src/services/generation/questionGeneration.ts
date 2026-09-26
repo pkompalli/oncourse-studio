@@ -4,7 +4,7 @@ import { fetchAllRows } from '../../db/pagination.js';
 import { startTracking, getStepTokens } from '../llm/tokenTracker.js';
 import { classifyQuestionType } from '../questionType.js';
 import { schemaErrorsFor } from './schemaValidate.js';
-import { canonicalizeFormatSlug } from './formatContracts.js';
+import { canonicalizeFormatSlug, resolveQuestionType, GROUPED_SLUGS } from './formatContracts.js';
 import { processAllImageQuestions, isImageGenerationAvailable } from '../images/imageGeneration.js';
 
 /**
@@ -149,8 +149,13 @@ function allocateQuestionTypes(
   const allocations: QuestionTypeAllocation[] = [];
   let remaining = numQ;
 
-  // Sort by percentage descending — primary type gets remainder
-  const sorted = [...questionTypes].sort((a, b) => b.percentage - a.percentage);
+  // Sort by percentage descending — primary type gets remainder.
+  // Resolve each slug structurally first: this reads exam_format straight from storage,
+  // so a stale slug (CPA's 'case_study' named "Task-Based Simulation (TBS)") would
+  // otherwise flow untouched into the allocation and pick the wrong output template.
+  const sorted = [...questionTypes]
+    .map((qt) => ({ ...qt, slug: resolveQuestionType(qt) }))
+    .sort((a, b) => b.percentage - a.percentage);
 
   for (let i = 0; i < sorted.length; i++) {
     const qt = sorted[i];
@@ -172,7 +177,7 @@ function allocateQuestionTypes(
 }
 
 // Grouped/shared-stimulus formats and the analysis stimulus_type → format mapping.
-const GROUPED_FORMATS = new Set(['passage_set', 'case_study', 'task_based_simulation', 'tbs']);
+const GROUPED_FORMATS = GROUPED_SLUGS;
 const STIMULUS_TO_FORMAT: Record<string, string> = {
   reading_passage: 'passage_set',
   case_scenario: 'case_study',

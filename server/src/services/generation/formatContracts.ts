@@ -247,6 +247,9 @@ const FORMAT_ALIASES: Array<[RegExp, string]> = [
   [/single|best[_\s-]?answer|one[_\s-]?best|standard[_\s-]?mcq|mcq|multiple[_\s-]?choice/, 'mcq_single'],
 ];
 
+/** Formats that carry a shared stimulus feeding several scored sub-questions. */
+export const GROUPED_SLUGS = new Set(['passage_set', 'case_study', 'task_based_simulation', 'tbs']);
+
 /** Map any (possibly LLM-invented) format slug to a canonical registry slug. */
 export function canonicalizeFormatSlug(raw: string): string {
   const s = String(raw || '').toLowerCase().trim().replace(/\s+/g, '_');
@@ -319,12 +322,40 @@ export function resolveFormat(hint: { slug?: string; name?: string; description?
     return 'case_study';
   }
 
+  // Everything below is WEAK inference on prose. A slug that already names a grouped
+  // format is stronger evidence than any of it, so never DEMOTE one to a standalone
+  // format here. LSAT's "Reading Comprehension Shared-Stimulus Multiple Choice"
+  // (slug mcq_shared_stimulus → passage_set) fell through to mcq_single on the
+  // "single best answer" test below, collapsing a 5-8 question passage set into
+  // standalone MCQs, because severalQuestions does not recognise "typically 5-8 per
+  // set". The deliberate overrides above still outrank the slug — this only guards
+  // the guesswork.
+  if (GROUPED_SLUGS.has(bySlug)) return bySlug;
+
   // Remaining constructed / selected-answer signals.
   if (extendedConstructed || has('constructed response', 'essay', 'short answer')) return 'constructed_response';
   if (has('select all', 'more than one', 'multiple correct', 'select each')) return 'sata';
   if (has('single best answer', 'best answer', 'multiple-choice', 'multiple choice', 'four options', 'one correct', 'select the correct')) return 'mcq_single';
 
   return bySlug;
+}
+
+/**
+ * Resolve ONE declared question type using every field it carries.
+ *
+ * Use this for any exam_format that may not have passed through analyzeQuestionTypes —
+ * a record loaded from storage, one interpreted from free text, one round-tripped by a
+ * refine. Passing `name` is the whole point: CPA's analysis wrote slug 'case_study'
+ * under the name "Task-Based Simulation (TBS)", and every place that dropped the name
+ * resolved it back to a case study.
+ */
+export function resolveQuestionType(t: Record<string, unknown> | undefined): string {
+  return resolveFormat({
+    slug: String(t?.slug || ''),
+    name: String(t?.name || ''),
+    description: String(t?.description || ''),
+    answer_format: String(t?.answer_format || ''),
+  });
 }
 
 /** Resolve a set of (possibly messy) format slugs to their contracts, de-duped. */
@@ -652,8 +683,23 @@ export function extractFormatSlugs(examFormat: Record<string, unknown> | undefin
       }
     }
   };
+  // question_types is where an ANALYSED exam declares its formats, and for many stored
+  // records it is the ONLY place. Missing it returned [] for the whole CPA course, and
+  // renderContractsForPrompt then fell back to its generic ['mcq_single','sata',
+  // 'case_study'] set — shipping the case_study contract and NO TBS contract into the
+  // guidelines prompt. Resolve structurally so a stale slug does not reinstate itself.
+  if (Array.isArray(examFormat.question_types)) {
+    for (const t of examFormat.question_types as Array<Record<string, unknown>>) {
+      const slug = resolveQuestionType(t);
+      if (slug) out.push(slug);
+    }
+  }
   pushFrom(examFormat.format_distribution, ['format', 'slug', 'type']);
   pushFrom(examFormat.question_formats, ['slug', 'type', 'format']);
+  // Singular `question_format` is the shape the analysis actually stores.
+  if (examFormat.question_format && typeof examFormat.question_format === 'object') {
+    pushFrom([examFormat.question_format], ['slug', 'type', 'format']);
+  }
   pushFrom(examFormat.question_type_allocations, ['slug', 'type', 'format']);
   pushFrom(examFormat.formats, ['slug', 'type', 'format']);
   // Also scan per-subject allocations if present.

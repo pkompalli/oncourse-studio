@@ -4,7 +4,7 @@
  */
 
 import { orCall, MODELS } from '../llm/openrouter.js';
-import { extractFormatSlugs, renderContractsForPrompt, buildContentSchema, normalizeSchemaParams, canonicalizeFormatSlug, resolveFormat, FORMAT_CONTRACTS } from './formatContracts.js';
+import { extractFormatSlugs, renderContractsForPrompt, buildContentSchema, normalizeSchemaParams, canonicalizeFormatSlug, resolveFormat, resolveQuestionType, FORMAT_CONTRACTS } from './formatContracts.js';
 
 /** Canonicalize every format slug in the guidelines (format_specs keys +
  *  format_distribution) so the whole pipeline uses the fixed registry vocabulary. */
@@ -93,7 +93,15 @@ function reconcileToAnalysisFormats(g: Record<string, unknown>, examFormat: Reco
 
   const want = new Map<string, Record<string, unknown>>();
   for (const t of qts) {
-    const slug = canonicalizeFormatSlug(String(t.slug || ''));
+    // Resolve by STRUCTURE, not by slug alone. The comment above assumes the analysis
+    // already did this, which holds only for a record produced by a FRESH
+    // analyzeQuestionTypes run — exam_format also arrives from storage and from
+    // free-text interpretation, neither of which passed through that merge. CPA's
+    // stored record is slug 'case_study' named "Task-Based Simulation (TBS)": taking
+    // the slug re-imposed case_study over the task_based_simulation that
+    // canonicalizeGuidelines had just resolved correctly, and the resulting key
+    // mismatch also dropped `count` from the distribution.
+    const slug = resolveQuestionType(t);
     if (slug) want.set(slug, t);
   }
   if (want.size === 0) return g;
@@ -433,13 +441,13 @@ export async function generateGuidelines(
 
   // Turn the analysis's described question-grouping into an explicit instruction:
   // map each shared-stimulus group onto a concrete grouped machine format.
-  // The analysis already resolved these structurally, so they are canonical and
-  // authoritative. Naming them explicitly stops the model substituting a similar
-  // format (a constructed-response set re-labelled task_based_simulation, say).
+  // Resolve each one structurally here — a stored or free-text exam_format never went
+  // through the analysis merge. Naming them explicitly stops the model substituting a
+  // similar format (a constructed-response set re-labelled task_based_simulation, say).
   const qTypes = Array.isArray(examFormat.question_types) ? (examFormat.question_types as Array<Record<string, unknown>>) : [];
   const formatListBlock = qTypes.length > 0
     ? qTypes.map((t) => {
-        const slug = canonicalizeFormatSlug(String(t.slug || ''));
+        const slug = resolveQuestionType(t);
         const ipu = Number(t.items_per_unit_min) || Number(t.items_per_unit) || 1;
         const ipuMax = Number(t.items_per_unit_max) || 0;
         const ipuLabel = ipuMax && ipuMax !== ipu ? `${ipu}-${ipuMax}` : `${ipu}`;
