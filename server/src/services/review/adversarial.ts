@@ -97,8 +97,8 @@ Flag only if one of these is true:
    c. If the explanation only defends the correct answer without discussing distractors → flag as "explanation_contradictions" and score ≤ 6
 6. IMAGE: actively misleading (wrong pathology/anatomy shown) OR absent when the stem explicitly references it — a question that says "shown below" or "Image 1" with no image present is educationally broken and scores ≤ 4
 7. CASE STUDY STRUCTURE — for format_type "case_study":
-   a. Must have exactly 6 sub-questions (flag if fewer)
-   b. Must use at least 3 different format_types across sub-questions
+   a. Must carry the number of sub-questions THIS exam's guidelines require — do NOT assume six. Some exams define more than one valid shape: a NextGen Bar drafting set is ONE constructed_response component and is correct that way, while a counselling set has six. Flag a count only when it contradicts the exam's own rules.
+   b. Where the exam's rules require a MIX of formats, must use at least 3 different format_types. A shape the rules define as single-component is exempt — do NOT flag it for lacking multiple-choice components.
    c. Each sub-question MUST have its own "rationale" explaining correct answer + why distractors are wrong
    d. Each sub-question MUST have a "reasoning_step" tag (legacy: "cjmm_step") using a step taxonomy appropriate to this exam's discipline — do NOT require the nursing Clinical-Judgment labels for non-clinical exams
    e. Hot-spot answers must be structured objects, not prose strings
@@ -143,7 +143,7 @@ Return a JSON ARRAY — one object per question:
     "ambiguities": [<genuine confusion that would lead most candidates astray — empty if none>],
     "distractor_defenses": [<only if a distractor is actually defensible as correct — empty if none>],
     "explanation_contradictions": [<if explanation only defends the correct answer without discussing distractors, or logically fails to justify — empty if none>],
-    "case_study_issues": [<if case_study: missing sub-question rationales, too few sub-questions, too few formats, missing reasoning_step, prose hot_spot answers — empty if none or not case_study>],
+    "case_study_issues": [<if case_study: missing sub-question rationales, a sub-question count or format mix that contradicts THIS exam's own rules (never assume six), missing reasoning_step, prose hot_spot answers — empty if none or not case_study>],
     "triviality_clues": [<only if answer is obvious without clinical reasoning — empty if none>],
     "concept_overlap": "<if this question tests the same concept as another Q in the batch, state which Q and suggest differentiation — null if unique>",
     "answer_key_issue": "<if this question contributes to skewed answer distribution, suggest changing to a different key — null if fine>",

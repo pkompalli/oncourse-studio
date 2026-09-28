@@ -163,8 +163,8 @@ ${structuralChecks.map((s) => `   • ${s}`).join('\n')}`;
   if (hasCaseStudy) {
     formatSpecificChecks += `
 8. CASE STUDY COMPLIANCE (for format_type = "case_study"):
-   a. Does the case have exactly 6 sub-questions? If fewer, flag and set needs_revision true.
-   b. Does the case use at least 3 DIFFERENT format_types across sub-questions? If only 1-2, flag.
+   a. Does the case carry the number of sub-questions THIS exam's format_specs require? Judge against the PER-FORMAT COMPLIANCE rules above, which may permit more than one shape — a NextGen Bar drafting set is ONE constructed_response component and is correct that way. Flag a count only when it contradicts those rules; never assume six.
+   b. Where those rules require a MIX of formats, does the case use at least 3 different format_types? A set the rules define as single-component is exempt — do NOT flag it for lacking multiple-choice components.
    c. Does EACH sub-question have its own "rationale" field? If any rationale is missing or empty, flag.
    d. Does each sub-question have a "reasoning_step" tag (legacy: "cjmm_step")? If missing, flag. Accept any step taxonomy appropriate to this exam's discipline — do NOT require the nursing Clinical-Judgment labels for non-clinical exams.${hasHotSpot ? `
    e. Hot_spot sub-questions must use the stimulus+correct_ids contract (see check 11).` : ''}`;
@@ -194,7 +194,7 @@ ${structuralChecks.map((s) => `   • ${s}`).join('\n')}`;
 
   // Build format-specific output fields
   const caseStudyField = hasCaseStudy
-    ? `\n    "case_study_issues": [<flag if: fewer than 6 sub-questions, fewer than 3 format types, missing sub-question rationales, missing reasoning_step tags${hasHotSpot ? ', hot_spot answers are prose' : ''} — empty if none or not a case_study>],`
+    ? `\n    "case_study_issues": [<flag if: the sub-question count or format mix contradicts THIS exam's format_specs (never assume six), missing sub-question rationales, missing reasoning_step tags${hasHotSpot ? ', hot_spot answers are prose' : ''} — empty if none or not a case_study>],`
     : '';
   const hotspotField = hasHotSpot
     ? `\n    "hotspot_issues": [<flag if: hot_spot contract violations — HS001-HS011 codes with specific fix instructions — empty if not hot_spot or no violations>],`
