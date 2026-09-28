@@ -4,8 +4,9 @@ import { fetchAllRows } from '../../db/pagination.js';
 import { startTracking, getStepTokens } from '../llm/tokenTracker.js';
 import { classifyQuestionType } from '../questionType.js';
 import { schemaErrorsFor } from './schemaValidate.js';
-import { canonicalizeFormatSlug, resolveQuestionType, GROUPED_SLUGS } from './formatContracts.js';
-import { processAllImageQuestions, isImageGenerationAvailable } from '../images/imageGeneration.js';
+import { canonicalizeFormatSlug, resolveQuestionType, GROUPED_SLUGS, FORMAT_CONTRACTS } from './formatContracts.js';
+import { rescaleToTotal, readExamSize, subjectExamMap, groupByExam } from './examSize.js';
+import { processAllImageQuestions, isImageGenerationAvailable, toStringArray } from '../images/imageGeneration.js';
 
 /**
  * Faithful port of V1's generation pipeline:
@@ -116,6 +117,8 @@ interface QuestionTypeAllocation {
 
 interface SubjectTask {
   subject: string;
+  /** Which exam of a multi-exam course this subject belongs to (CPA: AUD, FAR, …). */
+  exam?: string;
   num_questions: number;
   num_image_qs: number;
   bloom_counts: Record<string, number>;
@@ -218,6 +221,263 @@ function subjectAwareGroupedAllocation(subject: string, numQ: number, guidelines
   return null;
 }
 
+/**
+ * Force the exam-wide format mix to the ITEM COUNTS the guidelines declare.
+ *
+ * Per-subject allocation cannot hit an exam-wide target by construction:
+ * allocationsFromGuidelines splits each subject's budget by percentage independently, so
+ * a CPA section wanting exactly 7 simulations across 22 subjects gets ~10% of each
+ * subject instead — 9 simulations against a 100-question exam, in the run that prompted
+ * this. Percentages cannot express the real thing either: a section's MCQs are ~92% of
+ * its ITEMS but 50% of its SCORE.
+ *
+ * So this runs once, after the per-subject mix is settled, and moves items between
+ * formats WITHIN a task until the exam-wide totals match. Each task's num_questions is
+ * invariant — only the split inside it changes. A format is only ever grown in a task
+ * that already hosts it, which preserves the subject routing
+ * subjectAwareGroupedAllocation chose: that decides WHICH subjects carry a grouped
+ * format, this decides HOW MANY.
+ *
+ * No-op when the guidelines carry no counts, so a course without a declared size keeps
+ * today's percentage behaviour.
+ */
+export function allocateFormatsAcrossTasks(tasks: SubjectTask[], guidelines: Record<string, unknown>): void {
+  // A course covering several exams is several PAPERS with different mixes — CPA's ISC is
+  // 82 MCQ + 6 TBS where AUD is 78 + 7. Balance each exam against its OWN counts; pooling
+  // them would average the mixes and leave every individual paper wrong.
+  const sizes = readExamSize(guidelines).exam_sizes;
+  if (sizes && tasks.some((t) => t.exam && sizes[t.exam])) {
+    for (const [exam, group] of groupByExam(tasks, (t) => (t.exam && sizes[t.exam] ? t.exam : ''))) {
+      const counts = exam ? sizes[exam]?.format_question_counts : undefined;
+      if (!exam || !counts) continue; // no per-exam counts — leave this group as built
+      allocateFormatsForGroup(group, counts, exam);
+    }
+    return;
+  }
+
+  const fd = Array.isArray(guidelines?.format_distribution)
+    ? (guidelines.format_distribution as Array<Record<string, unknown>>) : [];
+  const declared: Record<string, number> = {};
+  for (const f of fd) {
+    const slug = canonicalizeFormatSlug(String(f.format || f.slug || ''));
+    const n = Number(f.count);
+    if (slug && Number.isFinite(n) && n > 0) declared[slug] = n;
+  }
+  if (Object.keys(declared).length === 0 || tasks.length === 0) return;
+  allocateFormatsForGroup(tasks, declared, '');
+}
+
+/**
+ * How well a batch of generated questions satisfies the mix that was asked for.
+ *
+ * Counts questions that fill a requested format slot, so an attempt holding the one scarce
+ * simulation beats a longer all-MCQ attempt that overshoots on a format already satisfied.
+ * Raw length is the tie-breaker, scaled small so it can never outweigh a missing format.
+ */
+export function scoreAgainstAllocation(
+  qs: Record<string, unknown>[],
+  allocations: QuestionTypeAllocation[] | undefined
+): number {
+  if (!allocations || allocations.length === 0) return qs.length;
+  const want = new Map<string, number>();
+  for (const a of allocations) want.set(canonicalizeFormatSlug(a.slug), a.count);
+
+  const produced = new Map<string, number>();
+  for (const q of qs) {
+    const slug = canonicalizeFormatSlug(String(q.format_type || 'mcq_single'));
+    produced.set(slug, (produced.get(slug) || 0) + 1);
+  }
+
+  // COVERAGE dominates: an attempt that includes the one requested simulation beats a longer
+  // all-MCQ attempt, which is exactly the swap that destroyed them. Counting filled slots alone
+  // is not enough — [4 mcq + 1 tbs] and [6 mcq] both fill 5 slots against [5 mcq, 1 tbs], and
+  // raw length would then hand it to the attempt with no simulation.
+  let covered = 0, filled = 0;
+  for (const [slug, n] of want) {
+    const got = Math.min(produced.get(slug) || 0, n);
+    filled += got;
+    if (got > 0) covered += 1;
+  }
+  return covered * 1_000_000 + filled * 1_000 + qs.length;
+}
+
+/**
+ * Lay each format's exact item count across a pool of tasks, proportional to subject size.
+ *
+ * Largest remainder, so the counts sum to exactly what was asked for. A grouped format is
+ * placed in the FEWEST tasks that can hold it (biggest subjects first) rather than smeared
+ * one-per-subject: a CPA section wants 7 simulations across 4 subjects, and concentrating them
+ * keeps each subject's simulation count meaningful instead of rounding to zero everywhere —
+ * which is what made the per-batch splitter drop them entirely.
+ */
+function layOutFormats(tasks: SubjectTask[], target: Record<string, number>, label: string): void {
+  const bySize = [...tasks].sort((a, b) => (b.num_questions || 0) - (a.num_questions || 0));
+  const capacity = new Map<SubjectTask, number>(bySize.map((t) => [t, t.num_questions || 0]));
+  const out = new Map<SubjectTask, QuestionTypeAllocation[]>(bySize.map((t) => [t, []]));
+
+  // Grouped formats first: they are the scarce, chunky ones, so they get their pick of room.
+  const slugs = Object.keys(target).sort((a, b) => {
+    const ga = GROUPED_FORMATS.has(a) ? 0 : 1, gb = GROUPED_FORMATS.has(b) ? 0 : 1;
+    return ga !== gb ? ga - gb : (target[b] || 0) - (target[a] || 0);
+  });
+
+  const remaining: Record<string, number> = {};
+  for (const s of slugs) remaining[s] = target[s] || 0;
+  const give = (t: SubjectTask, slug: string, n: number) => {
+    if (n <= 0) return;
+    const row = out.get(t)!.find((a) => a.slug === slug);
+    if (row) row.count += n; else out.get(t)!.push({ slug, name: slug, count: n, percentage: 0 });
+    capacity.set(t, (capacity.get(t) || 0) - n);
+    remaining[slug] -= n;
+  };
+
+  // Phase 1 — grouped formats, spread by largest remainder so a section's 7 simulations
+  // land as 2/2/2/1 across its subjects rather than all in one or rounded to zero in each.
+  const totalSize = bySize.reduce((n, t) => n + (t.num_questions || 0), 0) || 1;
+  for (const slug of slugs.filter((s) => GROUPED_FORMATS.has(s))) {
+    const want = remaining[slug];
+    if (want <= 0) continue;
+    const exact = bySize.map((t) => ({ t, v: (want * (t.num_questions || 0)) / totalSize }));
+    const base = exact.map((e) => ({ ...e, n: Math.min(Math.floor(e.v), capacity.get(e.t) || 0) }));
+    let placed = base.reduce((n, e) => n + e.n, 0);
+    for (const e of base) give(e.t, slug, e.n);
+    // Hand out the remainder to the largest fractional parts that still have room.
+    for (const e of [...base].sort((a, b) => (b.v - Math.floor(b.v)) - (a.v - Math.floor(a.v)))) {
+      if (placed >= want) break;
+      if ((capacity.get(e.t) || 0) <= 0) continue;
+      give(e.t, slug, 1); placed += 1;
+    }
+    // Anything still unplaced goes wherever there is room at all.
+    for (const t of bySize) {
+      while (placed < want && (capacity.get(t) || 0) > 0) { give(t, slug, 1); placed += 1; }
+    }
+  }
+
+  // Phase 2 — fill every task's remaining room from the standalone formats, always taking
+  // from the one that still owes the most. Σtargets equals Σcapacities, so this lands exactly.
+  const standalone = slugs.filter((s) => !GROUPED_FORMATS.has(s));
+  for (const t of bySize) {
+    while ((capacity.get(t) || 0) > 0) {
+      const next = standalone.filter((s) => remaining[s] > 0).sort((a, b) => remaining[b] - remaining[a])[0];
+      if (!next) break;
+      give(t, next, Math.min(capacity.get(t) || 0, remaining[next]));
+    }
+  }
+
+  for (const t of bySize) {
+    const allocs = out.get(t)!.filter((a) => a.count > 0);
+    if (allocs.length === 0) continue;
+    // Keep the richer metadata (name, num_options, answer_format) the previous allocation had.
+    for (const a of allocs) {
+      const prior = (t.question_type_allocations || []).find((p) => canonicalizeFormatSlug(p.slug) === a.slug);
+      if (prior) { a.name = prior.name; a.description = prior.description; a.answer_format = prior.answer_format; a.num_options = prior.num_options; }
+    }
+    const n = allocs.reduce((s, a) => s + a.count, 0) || 1;
+    for (const a of allocs) a.percentage = Math.round((a.count / n) * 1000) / 10;
+    t.question_type_allocations = allocs;
+  }
+
+  const placed: Record<string, number> = {};
+  for (const t of tasks) for (const a of t.question_type_allocations || []) placed[a.slug] = (placed[a.slug] || 0) + a.count;
+  const short = Object.keys(target).filter((s) => (placed[s] || 0) !== (target[s] || 0));
+  if (short.length > 0) {
+    console.warn(`  [Alloc] ${label || 'exam'}: could not place ${short.map((s) => `${s} ${placed[s] || 0}/${target[s]}`).join(', ')}`);
+  }
+}
+
+/** Balance one pool of tasks onto one set of per-format item counts. */
+function allocateFormatsForGroup(tasks: SubjectTask[], declared: Record<string, number>, label: string): void {
+  if (Object.keys(declared).length === 0 || tasks.length === 0) return;
+
+  // Scale the declared counts onto the budget actually being generated. They describe
+  // the whole exam; a job scoped to one section (or a partial batch) generates less.
+  const budget = tasks.reduce((n, t) => n + (t.num_questions || 0), 0);
+  if (budget <= 0) return;
+  const target = rescaleToTotal(declared, budget, 0);
+
+  // BUILD the allocation rather than repair one. The incoming per-task split came from
+  // allocationsFromGuidelines, which converts a grouped format's share into UNITS — one
+  // simulation standing for several scored sub-questions — so it deliberately sums to less
+  // than the budget (REG: 77 against 80). The move-based pass below can only shift items
+  // between formats, and with mcq_single already at 72/72 there was no format above target
+  // to donate from, so it moved nothing and CPA shipped 24 simulations instead of 42.
+  //
+  // Declared ITEM counts are a complete specification of the paper, so lay them out directly:
+  // each format's count spread across the group's tasks in proportion to subject size, by
+  // largest remainder. Allocations then sum to the budget and hit the targets by construction.
+  layOutFormats(tasks, target, label);
+
+  const current: Record<string, number> = {};
+  const template = new Map<string, QuestionTypeAllocation>();
+  for (const t of tasks) {
+    for (const a of t.question_type_allocations || []) {
+      const slug = canonicalizeFormatSlug(a.slug);
+      current[slug] = (current[slug] || 0) + (a.count || 0);
+      if (!template.has(slug)) template.set(slug, a);
+    }
+  }
+
+  const allocOf = (t: SubjectTask, slug: string) =>
+    (t.question_type_allocations || []).find((a) => canonicalizeFormatSlug(a.slug) === slug);
+
+  // Move one item from a format that is over its target to one that is under it, inside
+  // a single task, until every format lands. Bounded so a pathological mix cannot spin.
+  let guard = budget * 4 + 16;
+  const delta = (slug: string) => (target[slug] || 0) - (current[slug] || 0);
+  while (guard-- > 0) {
+    const slugs = new Set([...Object.keys(target), ...Object.keys(current)]);
+    const over = [...slugs].filter((s) => delta(s) < 0).sort((a, b) => delta(a) - delta(b));
+    const under = [...slugs].filter((s) => delta(s) > 0).sort((a, b) => delta(b) - delta(a));
+    if (over.length === 0 || under.length === 0) break;
+
+    let moved = false;
+    for (const to of under) {
+      for (const from of over) {
+        // A transfer has to happen INSIDE one task to keep that task's total intact, so
+        // the donor set is the tasks holding the shrinking format. Among those, prefer
+        // one that already hosts the growing format — that keeps a grouped format in the
+        // subjects subjectAwareGroupedAllocation chose — then the largest donor.
+        // Preferring hosts must not RESTRICT to them: doing so stranded the transfer in
+        // a single task and left 4 simulations where 7 were asked for.
+        const donors = tasks.filter((t) => (allocOf(t, from)?.count || 0) > 0);
+        if (donors.length === 0) continue;
+        donors.sort((a, b) => {
+          const ah = (allocOf(a, to)?.count || 0) > 0 ? 1 : 0;
+          const bh = (allocOf(b, to)?.count || 0) > 0 ? 1 : 0;
+          if (ah !== bh) return bh - ah;
+          return (allocOf(b, from)?.count || 0) - (allocOf(a, from)?.count || 0);
+        });
+        const task = donors[0];
+        const src = allocOf(task, from)!;
+        src.count -= 1;
+        let dst = allocOf(task, to);
+        if (!dst) {
+          const tpl = template.get(to);
+          dst = { ...(tpl || { slug: to, name: to, percentage: 0 }), slug: to, count: 0 } as QuestionTypeAllocation;
+          (task.question_type_allocations = task.question_type_allocations || []).push(dst);
+        }
+        dst.count += 1;
+        current[from] = (current[from] || 0) - 1;
+        current[to] = (current[to] || 0) + 1;
+        moved = true;
+        break;
+      }
+      if (moved) break;
+    }
+    if (!moved) break; // nothing transferable — leave the mix as the per-subject pass built it
+  }
+
+  // Drop emptied formats and restate each task's percentages against its own budget.
+  for (const t of tasks) {
+    t.question_type_allocations = (t.question_type_allocations || []).filter((a) => a.count > 0);
+    const n = t.question_type_allocations.reduce((s, a) => s + a.count, 0) || 1;
+    for (const a of t.question_type_allocations) a.percentage = Math.round((a.count / n) * 1000) / 10;
+  }
+
+  const summary = Object.keys(target).sort().map((s) => `${s}=${current[s] || 0}/${target[s]}`).join(', ');
+  console.log(`  [Alloc] ${label || 'exam'}: format counts across ${tasks.length} subjects (${budget} questions): ${summary}`);
+}
+
 // Guidelines are authoritative on the format MIX (per the describe→derive→generate
 // design): when generation_guidelines carry a format_distribution, derive the
 // per-subject allocations from it. With excludeGrouped, grouped formats are dropped
@@ -263,6 +523,48 @@ function allocationsFromGuidelines(numQ: number, guidelines: Record<string, unkn
     }
   }
   return out.filter((a) => a.count > 0);
+}
+
+/**
+ * A mock exam takes its per-subject question counts from exam_format.subject_distribution,
+ * which only fetchMockExamSpecs writes (via the /:id/exam-format route). A course whose
+ * exam_format was never built through that path has no such key — CPA's has exam_pattern,
+ * question_types, blooms and the per-subject image/exhibit percentages but no distribution —
+ * so buildSubjectTasks iterated an empty object, produced zero tasks, and the job died with
+ * "No subjects found to generate questions for". It only surfaced when CPA was first run as a
+ * mock exam; topic_wise takes the other branch and reads the course structure instead.
+ *
+ * The guidelines already carry the same distribution, derived from THIS course's structure and
+ * shown to the user before they approved it. Prefer that over failing, and over re-deriving a
+ * different split behind their back. exam_format still supplies the per-subject image
+ * percentage, which the guidelines do not model.
+ */
+function examFormatWithSubjectDistribution(
+  examFormat: Record<string, unknown>,
+  guidelines: Record<string, unknown>
+): Record<string, unknown> {
+  const existing = examFormat.subject_distribution as Record<string, unknown> | undefined;
+  if (existing && typeof existing === 'object' && Object.keys(existing).length > 0) return examFormat;
+
+  const fromGuidelines = guidelines?.subject_distribution as Record<string, Record<string, number>> | undefined;
+  if (!fromGuidelines || typeof fromGuidelines !== 'object') return examFormat;
+
+  const imagePct = (examFormat.image_percentage_by_subject as Record<string, number>) || {};
+  const dist: Record<string, { questions: number; percentage: number; image_pct: number }> = {};
+  for (const [subject, d] of Object.entries(fromGuidelines)) {
+    const questions = Math.round(Number(d?.questions) || 0);
+    if (questions <= 0) continue;
+    dist[subject] = {
+      questions,
+      percentage: Number(d?.percentage) || 0,
+      image_pct: Number(imagePct[subject]) || 0,
+    };
+  }
+  if (Object.keys(dist).length === 0) return examFormat;
+
+  const totalQ = Object.values(dist).reduce((n, d) => n + d.questions, 0);
+  console.log(`  [Alloc] exam_format has no subject_distribution — using the guidelines' (${Object.keys(dist).length} subjects, ${totalQ} questions)`);
+  return { ...examFormat, subject_distribution: dist };
 }
 
 export async function buildSubjectTasks(
@@ -316,6 +618,9 @@ export async function buildSubjectTasks(
   };
 
   const subjectDist = (mockSpecs.subject_distribution as Record<string, Record<string, number>>) || {};
+  // Which exam each subject belongs to, so a multi-exam course can be sized and allocated
+  // per exam rather than as one blended paper.
+  const examOfSubject = subjectExamMap(courseStructure);
   const tasks: SubjectTask[] = [];
 
   for (const [subjName, dist] of Object.entries(subjectDist)) {
@@ -341,6 +646,7 @@ export async function buildSubjectTasks(
 
     tasks.push({
       subject: subjName,
+      exam: examOfSubject[subjName],
       num_questions: numQ,
       num_image_qs: numImageQ,
       bloom_counts: bloomCounts,
@@ -708,8 +1014,9 @@ TASK-BASED SIMULATION RULES (MANDATORY):
   • This is NOT an image question. Set is_image_question=false. Provide ALL exhibit data as MARKDOWN text/tables — NEVER as an image.
   • Provide 2-5 "exhibits": the documents/data the candidate must analyze (contracts, financial statements, schedules, filings, correspondence, trial balances, etc.). Each exhibit's "content" is MARKDOWN (use markdown tables for tabular/numeric data).
   • Provide 4-8 "sub_questions" (tasks) that reference the exhibits BY LABEL (e.g. "Using Exhibit 1…"). EVERY fact a task needs (dates, amounts, terms, names) MUST actually appear in an exhibit's markdown — do not reference data that isn't shown.
-  • Use realistic TBS task types across the sub-questions: fill_blank (numeric/date entry), cloze_dropdown (with "choices"), matrix_grid (with "rows"/"columns" — classify Correct/Incorrect), mcq_single (with "options"), emq (with "items"/"response_options" — matching), ordered_response (with "items").
-  • Each sub-question MUST have its own "rationale" (why correct + why alternatives wrong) and a "reasoning_step" appropriate to the exam's discipline.
+  • ONE simulation is ONE work area of ONE format — "sub_questions" holds EXACTLY ONE entry. It is NOT a set of mini-questions. The scoring points are the ROWS / SPANS / ITEMS inside that single work area (4-18 of them, typically 8-9), each earning partial credit.
+  • The work area is one of exactly three shapes — data_entry_grid (a form, schedule, reconciliation or journal entry completed cell by cell; carries grid_kind, "columns", "rows", "correct_answer"), document_review (a document whose reviewable passages are wrapped [[span:1]]…[[/span]], with "spans"), or applied_research (a SUPPLIED standards "excerpt" plus scored "items"). Never a lettered mcq_single, sequencing, fill_blank, cloze_dropdown or matrix_grid — those belong to the MCQ testlets, not the work area.
+  • The work area MUST have its own "rationale" (why correct + why alternatives wrong) and a "reasoning_step" appropriate to the exam's discipline.
 {
   "format_type": "task_based_simulation",
   "question": "<the scenario / directions the candidate reads first — the memo/task context>",
@@ -717,11 +1024,17 @@ TASK-BASED SIMULATION RULES (MANDATORY):
     { "label": "Exhibit 1", "title": "<short title>", "type": "document|table|financials|correspondence|schedule", "content": "<exhibit content as MARKDOWN; use md tables for tabular data>" }
   ],
   "sub_questions": [
-    { "number": 1, "prompt": "<task referencing an exhibit by label>", "format_type": "fill_blank", "keyed_answer": "<answer>", "rationale": "<why correct + why alternatives wrong>", "bloom_level": "3_apply", "reasoning_step": "<step>" },
-    { "number": 2, "prompt": "<...>", "format_type": "cloze_dropdown", "choices": { "<blank_id>": ["opt1","opt2","opt3"] }, "keyed_answer": { "<blank_id>": "opt1" }, "rationale": "<...>", "bloom_level": "4_analyze", "reasoning_step": "<step>" },
-    { "number": 3, "prompt": "<...>", "format_type": "matrix_grid", "rows": ["<statement 1>","<statement 2>"], "columns": ["Correct","Incorrect"], "keyed_answer": { "<statement 1>": "Correct" }, "rationale": "<...>", "bloom_level": "4_analyze", "reasoning_step": "<step>" },
-    { "number": 4, "prompt": "<...>", "format_type": "mcq_single", "options": ["A. …","B. …","C. …","D. …"], "keyed_answer": "C", "rationale": "<...>", "bloom_level": "4_analyze", "reasoning_step": "<step>" }
+    { "number": 1, "question": "<the work the candidate does, referencing exhibits by label>", "format_type": "data_entry_grid", "grid_kind": "option_grid",
+      "columns": [ { "key": "answer", "label": "<what is chosen>", "input": "select", "options": ["<opt1>","<opt2>","<opt3>"] } ],
+      "rows": [ { "id": "1", "label": "<the item being judged>" }, { "id": "2", "label": "<…>" } ],
+      "correct_answer": { "1": { "answer": "<one of the options>" }, "2": { "answer": "<…>" } },
+      "rationale": "<why each answer is correct + why the alternatives are wrong>", "bloom_level": "4_analyze", "reasoning_step": "<step>" }
   ],
+  // ^ EXACTLY ONE entry. For a numeric grid use "input":"number" with "unit"/"precision";
+  //   for a journal entry add an account select column plus debit and credit number columns
+  //   and "constraints":[{"type":"balanced","columns":["debit","credit"]}].
+  //   For document_review instead: "document" (markdown with [[span:1]]…[[/span]]) + "spans":[{"id","text","options","correct"}].
+  //   For applied_research instead: "source", "excerpt" (quoted verbatim) + "items":[{"id","prompt","options","answer"}].
   "response_instructions": "<how to enter answers — date format, dollar format, selection rules>",
   "explanation": "<overall reasoning thread across the simulation — 3-5 sentences>",
   "difficulty": "<medium|hard>",
@@ -1277,7 +1590,7 @@ function salvageQuestionObjects(text: string): Record<string, unknown>[] {
 
 // ── Generate questions for one subject (V1 lines 1305-1446) ──
 
-async function professorGenerateQuestions(
+export async function professorGenerateQuestions(
   subjectTask: SubjectTask,
   courseName: string
 ): Promise<Record<string, unknown>[]> {
@@ -1287,6 +1600,10 @@ async function professorGenerateQuestions(
   const allQuestions: Record<string, unknown>[] = [];
   const numBatches = Math.ceil(numQ / PROFESSOR_BATCH_SIZE);
   const bloomRemaining = { ...subjectTask.bloom_counts };
+  /** What each format still owes, decremented by what was actually produced. */
+  const formatRemaining = new Map<string, number>(
+    (subjectTask.question_type_allocations || []).map((a) => [a.slug, a.count])
+  );
 
   for (let b = 0; b < numBatches; b++) {
     const batchSize = Math.min(PROFESSOR_BATCH_SIZE, numQ - allQuestions.length);
@@ -1307,25 +1624,37 @@ async function professorGenerateQuestions(
     const imgPerBatch = Math.ceil(subjectTask.num_image_qs / numBatches);
     const batchImgQ = Math.min(imgPerBatch, subjectTask.num_image_qs - allQuestions.filter((q) => q.is_image_question).length);
 
-    // Scale question_type_allocations for this batch
+    // Draw this batch from a LEDGER of what each format still owes, the way bloomRemaining
+    // already works for cognitive levels.
+    //
+    // The previous split recomputed each batch from `percentage` and never looked at what had
+    // actually been produced, which lost formats two ways. A format below ~8.3% of the mix
+    // rounded to zero in every batch — round(6 * 0.07) = 0, and the `percentage >= 10` floor
+    // did not catch it — so a CPA subject's simulations were never requested at all, silently.
+    // And the last format in the list (always the smallest, since they are sorted descending)
+    // only received `batchRemaining`, so a tail batch the MCQs filled dropped it too.
+    //
+    // A ledger cannot do either: a format that still owes items keeps being asked for until it
+    // has them, and a scarce format is asked for FIRST rather than last.
     let batchAllocations: QuestionTypeAllocation[] | undefined;
     if (subjectTask.question_type_allocations && subjectTask.question_type_allocations.length > 1) {
-      const allocs = subjectTask.question_type_allocations;
       batchAllocations = [];
       let batchRemaining = batchSize;
-      for (let i = 0; i < allocs.length; i++) {
-        const alloc = allocs[i];
-        if (i === allocs.length - 1) {
-          if (batchRemaining > 0) batchAllocations.push({ ...alloc, count: batchRemaining });
-        } else {
-          const cnt = Math.max(alloc.percentage >= 10 ? 1 : 0, Math.round(batchSize * alloc.percentage / 100));
-          const actual = Math.min(cnt, batchRemaining);
-          if (actual > 0) {
-            batchAllocations.push({ ...alloc, count: actual });
-            batchRemaining -= actual;
-          }
-        }
+      // Scarcest first: a format with 2 left across 4 batches must not lose its slot to MCQs.
+      const owed = [...formatRemaining.entries()]
+        .filter(([, n]) => n > 0)
+        .sort((a, b) => a[1] - b[1]);
+      for (const [slug, left] of owed) {
+        if (batchRemaining <= 0) break;
+        const alloc = subjectTask.question_type_allocations.find((a) => a.slug === slug);
+        if (!alloc) continue;
+        // Spread what is owed over the batches that remain, but never round a live debt to zero.
+        const fairShare = Math.ceil(left / Math.max(1, numBatches - b));
+        const take = Math.min(batchRemaining, left, Math.max(1, fairShare));
+        batchAllocations.push({ ...alloc, count: take });
+        batchRemaining -= take;
       }
+      if (batchAllocations.length === 0) batchAllocations = undefined;
     }
 
     const batchTask: SubjectTask = {
@@ -1366,7 +1695,15 @@ async function professorGenerateQuestions(
         const response2 = await orCall(MODELS.GENERATOR, '', prompt, { maxTokens: 20000, temperature: 0.5 });
         try {
           const qs2 = parseQuestions(response2.content);
-          if (qs2.length > qs.length) qs = qs2;
+          // Judge the retry by how well it MATCHES THE REQUESTED MIX, not by raw count.
+          // Swapping on count alone systematically destroyed grouped formats: a simulation
+          // object is 10-20x larger than an MCQ, so it is what gets truncated and salvaged
+          // away — which is what made the batch short — and then an all-MCQ retry with one
+          // more item replaced the attempt that held the only simulation. That is how 24
+          // allocated CPA simulations became 6.
+          if (scoreAgainstAllocation(qs2, batchAllocations) > scoreAgainstAllocation(qs, batchAllocations)) {
+            qs = qs2;
+          }
         } catch {
           // keep original qs
         }
@@ -1374,6 +1711,15 @@ async function professorGenerateQuestions(
 
       enrichQuestions(qs, subject, courseName, hyt, topicCounter);
       allQuestions.push(...qs);
+
+      // Subtract what this batch ACTUALLY produced from each format's debt, so a format the
+      // model skipped is asked for again next batch instead of being quietly written off.
+      for (const q of qs) {
+        const slug = canonicalizeFormatSlug(String(q.format_type || ''));
+        for (const [k, left] of formatRemaining) {
+          if (canonicalizeFormatSlug(k) === slug && left > 0) { formatRemaining.set(k, left - 1); break; }
+        }
+      }
 
       // Subtract bloom counts
       for (const level of Object.keys(bloomRemaining)) {
@@ -1412,8 +1758,20 @@ const runningJobs = new Map<string, { status: string; completed: number; total: 
 
 // ── Resolve format_id by slug (cached) ──
 const _formatIdCache = new Map<string, string>();
-async function getFormatId(slug: string): Promise<string | null> {
+/**
+ * Resolve a format slug to its qb_question_formats row, creating the row if the registry has
+ * never seen it.
+ *
+ * This was an exact-slug lookup that returned null for anything unregistered, and the caller's
+ * `|| formatIds['mcq_single']` then stamped EVERY task-based simulation with the Single Best
+ * Answer id — the registry had no simulation row at all, because ensureFormatsExist only runs
+ * during exam-format discovery and never from generation. Canonicalizing first also makes
+ * `tbs` resolve like `task_based_simulation`, the aliasing contentSchemaFor already does.
+ */
+async function getFormatId(rawSlug: string): Promise<string | null> {
+  const slug = canonicalizeFormatSlug(rawSlug) || rawSlug;
   if (_formatIdCache.has(slug)) return _formatIdCache.get(slug)!;
+
   const { data } = await supabase
     .from('qb_question_formats')
     .select('id')
@@ -1423,7 +1781,34 @@ async function getFormatId(slug: string): Promise<string | null> {
     _formatIdCache.set(slug, data.id);
     return data.id;
   }
-  return null;
+
+  // Register it rather than silently mislabelling the question as an MCQ.
+  const contract = FORMAT_CONTRACTS[slug];
+  if (!contract) return null;
+  const { data: created, error } = await supabase
+    .from('qb_question_formats')
+    .insert({
+      slug,
+      name: contract.label,
+      description: contract.structure,
+      schema: {},
+      display: {},
+      prompt_guide: contract.gradability,
+      // The column is `source` ('builtin' | 'user_defined' | 'ai_discovered'), NOT
+      // `is_builtin` — 003_flexible_question_formats.sql:27. ensureFormatsExist has carried
+      // the wrong name since it was written, so every auto-registration it attempted failed
+      // silently and the registry never gained a single discovered format.
+      source: 'ai_discovered',
+    })
+    .select('id')
+    .maybeSingle();
+  if (error || !created?.id) {
+    console.warn(`  [Format] could not register "${slug}" — ${error?.message || 'no id returned'}`);
+    return null;
+  }
+  console.log(`  [Format] registered missing format "${slug}" (${contract.label})`);
+  _formatIdCache.set(slug, created.id);
+  return created.id;
 }
 
 // ── Build content JSONB from LLM output (format-aware) ──
@@ -1746,6 +2131,12 @@ function deriveFormatType(declared: string, raw: Record<string, unknown>): strin
   const hasExhibits = Array.isArray(raw.exhibits) && (raw.exhibits as unknown[]).length > 0;
   // Shared stimulus + sub-questions => a grouped format, whatever the slug said.
   if (hasSubs && !GROUPED_FORMATS.has(canon)) {
+    // EXHIBITS + tasks is a task-based simulation, not a case study — the difference the
+    // whole TBS contract turns on. This branch used to return case_study for anything with
+    // sub-questions, so a simulation whose format_type the model omitted (enrichQuestions
+    // defaults a missing one to mcq_single) was re-tagged as a case study and validated
+    // against the wrong contract, where exhibits are optional.
+    if (hasExhibits) return 'task_based_simulation';
     return raw.passage ? 'passage_set' : 'case_study';
   }
   // An assigned task over supplied source documents => a performance task.
@@ -1755,18 +2146,25 @@ function deriveFormatType(declared: string, raw: Record<string, unknown>): strin
   return canon;
 }
 
-async function insertSubjectQuestions(
+export async function insertSubjectQuestions(
   questions: Record<string, unknown>[],
   jobId: string,
   courseId: string,
   courseName: string,
   subjectIndex: number,
-  guidelines?: Record<string, unknown>
+  guidelines?: Record<string, unknown>,
+  exam?: string
 ) {
   if (questions.length === 0) return;
 
   // Pre-resolve all unique format_ids needed
-  const slugs = [...new Set(questions.map((q) => (q.format_type as string) || 'mcq_single'))];
+  // Resolve ids for the DERIVED formats, not the declared ones. Keying by the declared slug
+  // left formatIds[derivedFormat] undefined whenever deriveFormatType corrected the shape, and
+  // the `|| mcq_single` fallback below then stamped the row as a Single Best Answer — which is
+  // how every simulation in the CPA job ended up with the MCQ format id.
+  const slugs = [...new Set(questions.map((q) =>
+    canonicalizeFormatSlug(deriveFormatType((q.format_type as string) || 'mcq_single', q))
+  ))];
   const formatIds: Record<string, string | null> = {};
   for (const slug of slugs) {
     formatIds[slug] = await getFormatId(slug);
@@ -1822,12 +2220,17 @@ async function insertSubjectQuestions(
       image_url: (q.image_url as string) || null,
       image_type: isImage ? ((q.image_type as string) || null) : null,
       image_description: isImage ? ((q.image_description as string) || null) : null,
-      image_search_terms: isImage ? ((q.image_search_terms as string[]) || []) : [],
+      // Normalize on the way IN too: the model returns this as an array or as one string,
+      // and storing the string form is what broke image generation downstream.
+      image_search_terms: isImage ? toStringArray(q.image_search_terms) : [],
       // Flexible format columns
-      format_id: formatIds[formatType] || formatIds['mcq_single'],
+      format_id: formatIds[canonicalizeFormatSlug(formatType)] ?? formatIds['mcq_single'] ?? null,
       content,
       tags: {
         subject: q.subject as string,
+        // Which exam of a multi-exam course this belongs to, so one section can be
+        // reviewed and exported on its own.
+        ...(exam ? { exam } : {}),
         // For multi-topic cases, route by the case's actual topic (its first
         // covered topic), not the generic subject-task topic (which mis-routes).
         topic: (Array.isArray(content.topics) && (content.topics as string[])[0]) || (q.topic as string) || '',
@@ -1947,7 +2350,7 @@ async function runAllProfessors(
   const promises = tasks.map(async (task, idx) => {
     try {
       const questions = await generateSubjectPaper(task, courseName);
-      await insertSubjectQuestions(questions, jobId, courseId, courseName, idx, task.guidelines);
+      await insertSubjectQuestions(questions, jobId, courseId, courseName, idx, task.guidelines, task.exam);
 
       // Update progress as each professor finishes
       completedSubjects.push(task.subject);
@@ -2235,8 +2638,10 @@ export async function replaceBatchForJob(
     if (jobErr || !job) throw new Error(jobErr?.message || 'job not found');
 
     const { data: course } = await supabase
-      .from('qb_courses').select('name,exam_format,generation_guidelines').eq('id', job.course_id).single();
+      .from('qb_courses').select('name,structure,exam_format,generation_guidelines').eq('id', job.course_id).single();
     const courseName = (course?.name as string) || 'exam preparation';
+    // A replacement belongs to the same exam as the question it replaces.
+    const examOfSubject = subjectExamMap((course?.structure || {}) as Record<string, unknown>);
     const guidelines = (course?.generation_guidelines || {}) as Record<string, unknown>;
     const examFormat = (course?.exam_format || {}) as Record<string, unknown>;
 
@@ -2294,6 +2699,7 @@ export async function replaceBatchForJob(
       const qf = (examFormat.question_format || {}) as Record<string, unknown>;
       const task: SubjectTask = {
         subject,
+        exam: examOfSubject[subject],
         num_questions: olds.length,
         num_image_qs: olds.filter((q) => q.is_image_question).length,
         bloom_counts: bloomCounts,
@@ -2316,7 +2722,7 @@ export async function replaceBatchForJob(
       }
 
       if (fresh.length > 0) {
-        await insertSubjectQuestions(fresh, jobId, job.course_id, courseName, subjectIndex++, guidelines);
+        await insertSubjectQuestions(fresh, jobId, job.course_id, courseName, subjectIndex++, guidelines, task.exam);
       }
 
       // Identify exactly what landed, then retire one original per replacement.
@@ -2503,9 +2909,10 @@ export async function generateBatchForJob(
 
   // Step 1: Build subject tasks — topic-wise uses course structure directly, mock exam uses exam format
   console.log(`Building subject tasks for ${courseName} (${jobType})...`);
+  const mockSpecs = examFormatWithSubjectDistribution(examFormat, guidelines);
   const tasks = jobType === 'topic_wise' || jobType === 'topic_qbank'
     ? await buildTopicWiseTasks(structure, examFormat, courseName, (jobConfig.questions_per_topic as number) || 5)
-    : await buildSubjectTasks(examFormat, structure, examFormat, courseName);
+    : await buildSubjectTasks(mockSpecs, structure, examFormat, courseName);
 
   // Attach guidelines to each task, and let the guidelines drive the format mix
   // (guidelines are authoritative on formats). Grouped formats (passage_set, …) are
@@ -2543,6 +2950,8 @@ export async function generateBatchForJob(
       if (gAlloc && gAlloc.length > 0) task.question_type_allocations = gAlloc;
     }
   }
+
+  allocateFormatsAcrossTasks(tasks, guidelines);
 
   const totalSubjects = tasks.length;
 
