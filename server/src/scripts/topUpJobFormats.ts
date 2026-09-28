@@ -56,7 +56,7 @@ const LIMIT = Number((process.argv.find((a) => a.startsWith('--limit=')) || '').
 /** Extra instruction appended to the generation prompt for the rebuilt rows. */
 const SHAPE = (process.argv.find((a) => a.startsWith('--shape=')) || '').split('=').slice(1).join('=') || '';
 
-interface Row { id: string; subject: string; status: string; content?: Record<string, unknown> | null; tags: Record<string, unknown> | null; quality_score: number | null; combined_score: number | null; validator_score: number | null }
+interface Row { id: string; subject: string; topic?: string | null; status: string; content?: Record<string, unknown> | null; tags: Record<string, unknown> | null; quality_score: number | null; combined_score: number | null; validator_score: number | null }
 
 async function main() {
   const { data: job, error: jobErr } = await supabase.from('qb_jobs').select('*').eq('id', JOB).single();
@@ -90,13 +90,27 @@ async function main() {
   }
 
   const rows = await fetchAllRows<Row>((from, to) =>
-    supabase.from('qb_questions').select('id,subject,status,content,tags,quality_score,combined_score,validator_score')
+    supabase.from('qb_questions').select('id,subject,topic,status,content,tags,quality_score,combined_score,validator_score')
       .eq('job_id', JOB).is('replaced_by_id', null).range(from, to)
   );
   const live = rows.filter((r) => r.status !== 'replaced');
   console.log(`${courseName} job ${JOB.slice(0, 8)} — ${live.length} live questions across ${Object.keys(sizes).length} exams\n`);
 
   const examOfSubject = subjectExamMap(structure);
+
+  /** The topics a subject actually uses, so regenerated questions are tagged like their peers. */
+  const structureTopics = new Map<string, string[]>(
+    ((structure.subjects as Array<Record<string, unknown>>) || []).map((s) => [
+      String(s?.name || ''),
+      ((s?.topics as Array<Record<string, unknown>>) || []).map((t) => String(t?.name || '')).filter(Boolean),
+    ])
+  );
+  const topicsForSubject = (subject: string): string[] => {
+    const fromBank = [...new Set(
+      rows.filter((r) => r.subject === subject && r.topic).map((r) => String(r.topic))
+    )];
+    return fromBank.length > 0 ? fromBank : (structureTopics.get(subject) || []);
+  };
   const examOf = (r: Row) => String((r.tags || {}).exam || examOfSubject[r.subject] || '');
   const fmtOf = (r: Row) => canonicalizeFormatSlug(String((r.tags || {}).format_type || 'mcq_single'));
 
@@ -206,7 +220,12 @@ async function main() {
         num_questions: count,
         num_image_qs: 0,
         bloom_counts: { '3_apply': Math.ceil(count / 2), '4_analyze': Math.floor(count / 2) },
-        hyt_topics: [],
+        // enrichQuestions DELETES the model's own topic and assigns round-robin from this
+        // list, so an empty one leaves every generated question with topic ''. The 30
+        // mcq_multi and 2 case_study rows this script made for the Bar bank all came out
+        // untagged. Seed it from the subject's existing questions, falling back to the
+        // course structure's topics for a subject that has none yet.
+        hyt_topics: topicsForSubject(subject),
         exam_params: {
           style: (qf.type as string) || 'standard',
           num_options: (qf.num_options as number) || 4,
