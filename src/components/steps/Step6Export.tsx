@@ -136,17 +136,24 @@ export default function Step6Export() {
 
   const [exporting, setExporting] = useState(false);
 
-  const handleExport = async () => {
+  // A course spanning several exams (CPA's six sections, CFA's levels) is several papers.
+  // Offer each on its own as well as the whole bank, since one exam is what a candidate sits.
+  const examNames = [...new Set(
+    questions.map((q) => String((q.tags as Record<string, unknown>)?.exam || '')).filter(Boolean)
+  )].sort();
+
+  const handleExport = async (exam?: string) => {
     if (!job) return;
     setExporting(true);
     try {
-      const payload = await exportApi.json(job.id);
+      const payload = await exportApi.json(job.id, exam);
       const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
       const courseName = (job as Record<string, unknown>)?.course_name || questions[0]?.course || 'export';
-      a.download = `qbank_${String(courseName).replace(/\s+/g, '_').toLowerCase()}_${new Date().toISOString().slice(0, 10)}.json`;
+      const slug = (s: string) => String(s).replace(/[^a-z0-9]+/gi, '_').replace(/^_|_$/g, '').toLowerCase();
+      a.download = `qbank_${slug(String(courseName))}${exam ? `_${slug(exam)}` : ''}_${new Date().toISOString().slice(0, 10)}.json`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -517,15 +524,34 @@ export default function Step6Export() {
         <div className="max-w-6xl mx-auto flex items-center justify-between">
           <div className="text-sm text-slate-500">
             {questions.length} questions ({approvedCount} approved, {flaggedCount} flagged)
+            {examNames.length > 1 && <span className="ml-1">· {examNames.length} exams</span>}
           </div>
-          <button
-            onClick={handleExport}
-            disabled={questions.length === 0 || exporting}
-            className="flex items-center gap-2 px-6 py-2.5 bg-indigo-600 text-white rounded-lg font-medium hover:bg-indigo-700 disabled:opacity-50 transition-colors shadow-lg"
-          >
-            {exporting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
-            {exporting ? 'Packaging images...' : 'Export JSON'}
-          </button>
+          <div className="flex items-center gap-2 flex-wrap justify-end">
+            {/* One button per exam: a multi-exam bank is several papers, and a candidate
+                sits one of them. */}
+            {examNames.length > 1 && examNames.map((e) => {
+              const n = questions.filter((q) => (q.tags as Record<string, unknown>)?.exam === e).length;
+              return (
+                <button
+                  key={e}
+                  onClick={() => handleExport(e)}
+                  disabled={exporting}
+                  title={`Export only ${e} (${n} questions)`}
+                  className="px-3 py-2 text-sm border border-slate-300 rounded-lg hover:bg-slate-50 disabled:opacity-50"
+                >
+                  {e.length > 22 ? `${e.slice(0, 22)}…` : e} ({n})
+                </button>
+              );
+            })}
+            <button
+              onClick={() => handleExport()}
+              disabled={questions.length === 0 || exporting}
+              className="flex items-center gap-2 px-6 py-2.5 bg-indigo-600 text-white rounded-lg font-medium hover:bg-indigo-700 disabled:opacity-50 transition-colors shadow-lg"
+            >
+              {exporting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
+              {exporting ? 'Packaging images...' : examNames.length > 1 ? 'Export all' : 'Export JSON'}
+            </button>
+          </div>
         </div>
       </div>
     </div>

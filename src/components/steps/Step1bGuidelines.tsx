@@ -23,6 +23,96 @@ export default function Step1bGuidelines() {
 
   const guidelines = course?.generation_guidelines as GenerationGuidelines | undefined;
 
+  // Exam size — shown so a wrong total is visible before generating, and editable
+  // because the analysis researches it rather than knowing it.
+  const [totalDraft, setTotalDraft] = useState('');
+  const [savingTotal, setSavingTotal] = useState(false);
+  useEffect(() => {
+    setTotalDraft(guidelines?.total_questions ? String(guidelines.total_questions) : '');
+  }, [guidelines?.total_questions]);
+
+  const subjectSum = Object.values(guidelines?.subject_distribution || {})
+    .reduce((n, d) => n + (Number(d?.questions) || 0), 0);
+  const formatSum = (guidelines?.format_distribution || [])
+    .reduce((n, f) => n + (Number(f?.count) || 0), 0);
+
+  const handleSaveTotal = async () => {
+    if (!course) return;
+    const total = Number(totalDraft);
+    if (!(total > 0)) return;
+    setSavingTotal(true);
+    setError('');
+    try {
+      const res = await courses.patchGuidelines(course.id, { total_questions: total });
+      setCourse(res.course as Course);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to update the exam size');
+    } finally {
+      setSavingTotal(false);
+    }
+  };
+
+  // A course spanning several exams is several papers, each with its own length.
+  const examSizes = guidelines?.exam_sizes;
+  const [examDrafts, setExamDrafts] = useState<Record<string, string>>({});
+  const [savingExam, setSavingExam] = useState('');
+  useEffect(() => {
+    setExamDrafts(Object.fromEntries(
+      Object.entries(examSizes || {}).map(([exam, e]) => [exam, String(e.total_questions)])
+    ));
+  }, [examSizes]);
+
+  const handleSaveExamTotal = async (exam: string) => {
+    if (!course || !examSizes) return;
+    const total = Number(examDrafts[exam]);
+    if (!(total > 0)) return;
+    setSavingExam(exam);
+    setError('');
+    try {
+      // Send the whole map with this exam changed; the server rescales only its subjects.
+      const next = { ...examSizes, [exam]: { ...examSizes[exam], total_questions: total } };
+      const res = await courses.patchGuidelines(course.id, { exam_sizes: next });
+      setCourse(res.course as Course);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to update the exam size');
+    } finally {
+      setSavingExam('');
+    }
+  };
+
+  // A grouped format is ONE row carrying several scored questions — an LSAT passage set holds
+  // 6-8, a CFA Level II vignette 4. So the totals on this screen are ITEMS, and "80 items"
+  // is a ~101-question LSAT. Showing only the item count reads as a too-short exam, which is
+  // exactly the wrong impression; show what those items actually deliver.
+  const scoredQuestionsFor = (counts: Array<{ format?: string; count?: number }>) => {
+    const specs = (guidelines?.format_specs || {}) as Record<string, { schema_params?: Record<string, unknown> }>;
+    let scored = 0;
+    let expands = false;
+    for (const f of counts) {
+      const n = Number(f?.count) || 0;
+      if (!n) continue;
+      const sp = specs[String(f.format || '')]?.schema_params || {};
+      const lo = Number(sp.sub_question_min) || 0;
+      const hi = Number(sp.sub_question_max) || lo;
+      const per = lo > 1 ? Math.round((lo + hi) / 2) : 1;
+      if (per > 1) expands = true;
+      scored += n * per;
+    }
+    return expands ? scored : 0;
+  };
+  const scoredTotal = scoredQuestionsFor((guidelines?.format_distribution || []) as Array<{ format?: string; count?: number }>);
+
+  // Per-exam subject sums, so a mismatch is visible per paper rather than only in aggregate.
+  const examSubjectSums: Record<string, number> = {};
+  const subjectExam = Object.fromEntries(
+    ((course?.structure?.subjects || []) as Array<{ name: string; exam?: string }>)
+      .filter((s) => s.exam).map((s) => [s.name, s.exam as string])
+  );
+  for (const [subj, d] of Object.entries(guidelines?.subject_distribution || {})) {
+    const exam = subjectExam[subj];
+    if (exam) examSubjectSums[exam] = (examSubjectSums[exam] || 0) + (Number(d?.questions) || 0);
+  }
+
   // Auto-generate on mount if no guidelines
   useEffect(() => {
     if (course && !course.generation_guidelines && !loading) {
@@ -132,6 +222,111 @@ export default function Step1bGuidelines() {
 
       {error && (
         <div className="p-3 rounded-lg border border-red-200 bg-red-50 text-red-700 text-sm">{error}</div>
+      )}
+
+      {/* Per-exam sizes — a course covering several exams is several papers, each with
+          its own real length. Editable per exam; saving rescales only that exam. */}
+      {examSizes && Object.keys(examSizes).length > 0 ? (
+        <div className="rounded-lg border border-slate-200 bg-slate-50 overflow-hidden">
+          <div className="px-4 py-2.5 border-b border-slate-200 flex items-center justify-between">
+            <span className="text-sm font-medium text-slate-700">
+              {Object.keys(examSizes).length} exams · {guidelines.total_questions ?? 0} questions total
+            </span>
+            <span className="text-xs text-slate-500">Each exam is a separate paper</span>
+          </div>
+          <div className="divide-y divide-slate-200">
+            {Object.entries(examSizes).map(([exam, e]) => {
+              const sum = examSubjectSums[exam] ?? 0;
+              const matches = sum === e.total_questions;
+              // CFA Level II's "22" is 22 vignettes carrying 88 questions — say so.
+              const examScored = scoredQuestionsFor(
+                Object.entries(e.format_question_counts || {}).map(([format, count]) => ({ format, count }))
+              );
+              return (
+                <div key={exam} className="px-4 py-2.5 flex flex-wrap items-center gap-x-4 gap-y-2">
+                  <span className="text-sm font-medium text-slate-700 min-w-[7rem]">{exam}</span>
+                  <input
+                    type="number"
+                    min={1}
+                    value={examDrafts[exam] ?? ''}
+                    onChange={(ev) => setExamDrafts({ ...examDrafts, [exam]: ev.target.value })}
+                    className="w-20 px-2 py-1 text-sm border border-slate-300 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  />
+                  <span className="text-xs text-slate-500">{examScored > 0 ? 'items' : 'questions'}</span>
+                  {examScored > 0 && (
+                    <span className="text-xs font-medium text-indigo-700">≈ {examScored} scored</span>
+                  )}
+                  {examDrafts[exam] !== String(e.total_questions) && (
+                    <button
+                      onClick={() => handleSaveExamTotal(exam)}
+                      disabled={savingExam === exam || !(Number(examDrafts[exam]) > 0)}
+                      className="px-2.5 py-1 text-sm bg-indigo-600 text-white rounded-md hover:bg-indigo-700 disabled:opacity-50"
+                    >
+                      {savingExam === exam ? 'Saving…' : 'Save'}
+                    </button>
+                  )}
+                  {e.time_minutes ? <span className="text-xs text-slate-500">{e.time_minutes} min</span> : null}
+                  {e.format_question_counts && (
+                    <span className="text-xs text-slate-500">
+                      {Object.entries(e.format_question_counts).map(([s, n]) => `${n} ${s}`).join(' · ')}
+                    </span>
+                  )}
+                  <span className={`text-xs ml-auto ${matches ? 'text-slate-400' : 'text-amber-700 font-medium'}`}>
+                    subjects sum to {sum}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      ) : (
+      /* Single exam — the number of questions this mock exam will produce. Editable
+         because the analysis researches it and can be wrong; saving rescales the
+         subject and format counts to match. */
+      <div className="flex flex-wrap items-center gap-x-6 gap-y-3 p-4 rounded-lg border border-slate-200 bg-slate-50">
+        <div className="flex items-center gap-2">
+          <label htmlFor="exam-total" className="text-sm font-medium text-slate-700">
+            {scoredTotal > 0 ? 'Items to generate' : 'Total questions'}
+          </label>
+          <input
+            id="exam-total"
+            type="number"
+            min={1}
+            value={totalDraft}
+            onChange={(e) => setTotalDraft(e.target.value)}
+            className="w-24 px-2 py-1 text-sm border border-slate-300 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500"
+          />
+          {totalDraft !== String(guidelines.total_questions ?? '') && (
+            <button
+              onClick={handleSaveTotal}
+              disabled={savingTotal || !(Number(totalDraft) > 0)}
+              className="px-2.5 py-1 text-sm bg-indigo-600 text-white rounded-md hover:bg-indigo-700 disabled:opacity-50"
+            >
+              {savingTotal ? 'Saving…' : 'Save'}
+            </button>
+          )}
+        </div>
+        {scoredTotal > 0 && (
+          <span className="text-sm font-medium text-indigo-700">
+            ≈ {scoredTotal} scored questions
+          </span>
+        )}
+        {guidelines.time_minutes ? (
+          <span className="text-sm text-slate-500">{guidelines.time_minutes} min</span>
+        ) : null}
+        <span className={`text-sm ${subjectSum === guidelines.total_questions ? 'text-slate-500' : 'text-amber-700 font-medium'}`}>
+          subjects sum to {subjectSum}
+          {guidelines.total_questions && subjectSum !== guidelines.total_questions ? ` (expected ${guidelines.total_questions})` : ''}
+        </span>
+        {formatSum > 0 && (
+          <span className={`text-sm ${formatSum === guidelines.total_questions ? 'text-slate-500' : 'text-amber-700 font-medium'}`}>
+            formats sum to {formatSum}
+          </span>
+        )}
+        {!guidelines.total_questions && (
+          <span className="text-sm text-amber-700">No exam size on record — set one, or Regenerate to research it.</span>
+        )}
+      </div>
       )}
 
       {/* Guidelines sections */}
@@ -410,6 +605,11 @@ export default function Step1bGuidelines() {
       <div className="fixed bottom-0 left-0 right-0 bg-white/95 backdrop-blur border-t border-slate-200 px-6 py-4 z-50">
         <div className="max-w-6xl mx-auto flex items-center justify-between">
           <p className="text-sm text-slate-500">
+            {guidelines.total_questions
+              ? (scoredTotal > 0
+                  ? `${guidelines.total_questions} items ≈ ${scoredTotal} questions · `
+                  : `${guidelines.total_questions} questions · `)
+              : ''}
             {Object.keys(guidelines.subject_distribution || {}).length} subjects,{' '}
             {(guidelines.format_distribution || []).length} formats configured
           </p>

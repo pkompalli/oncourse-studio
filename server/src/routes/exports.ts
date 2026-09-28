@@ -3,6 +3,7 @@ import { supabase } from '../db/supabase.js';
 import { fetchAllRows } from '../db/pagination.js';
 import { classifyQuestionType, needsMarkdownRegeneration } from '../services/questionType.js';
 import { gradabilityIssues } from '../services/review/shared.js';
+import { subjectExamMap } from '../services/generation/examSize.js';
 
 export const exportRouter = Router();
 
@@ -10,6 +11,8 @@ export const exportRouter = Router();
 exportRouter.get('/json/:jobId', async (req, res, next) => {
   try {
     const { jobId } = req.params;
+    /** ?exam=<name> exports ONE exam of a multi-exam course on its own. */
+    const wantExam = String(req.query.exam || '').trim();
 
     const questions = await fetchAllRows<Record<string, any>>((from, to) =>
       supabase
@@ -26,6 +29,26 @@ exportRouter.get('/json/:jobId', async (req, res, next) => {
       res.json({ questions: [], exported_at: new Date().toISOString() });
       return;
     }
+
+    // A course can span several exams (CPA's six sections, CFA's levels), and a bank that
+    // mixes them is not a sittable paper. Resolve each question's exam so the export can be
+    // read — or taken — one exam at a time.
+    //
+    // tags.exam is stamped at generation, but questions made before that carry none, so fall
+    // back to the course structure's subject -> exam map. Subject names are unique across a
+    // course's exams, which is what makes that lookup safe.
+    const { data: job } = await supabase.from('qb_jobs').select('course_id').eq('id', jobId).single();
+    const { data: course } = job?.course_id
+      ? await supabase.from('qb_courses').select('name,structure').eq('id', job.course_id).single()
+      : { data: null };
+    const structure = (course?.structure || {}) as Record<string, unknown>;
+    const examOfSubject = subjectExamMap(structure);
+    const examMeta = new Map<string, string>(
+      ((structure.exams as Array<Record<string, unknown>>) || [])
+        .map((e) => [String(e.name || ''), String(e.code || '')])
+    );
+    const examOf = (q: Record<string, any>): string =>
+      String(q.tags?.exam || examOfSubject[q.subject] || '');
 
     // Fetch images in parallel and embed as base64
     const items = await Promise.all(
@@ -86,6 +109,7 @@ exportRouter.get('/json/:jobId', async (req, res, next) => {
           content,                               // stem/exhibits/sub_questions/options/answer/explanation
           media,                                 // images (base64 + url), [] if none
           tags: {
+            ...(examOf(q) ? { exam: examOf(q), exam_code: examMeta.get(examOf(q)) || undefined } : {}),
             subject: q.subject,
             topic: q.topic,
             ...(topics ? { topics } : {}),       // multi-topic cases carry the full set
@@ -101,9 +125,48 @@ exportRouter.get('/json/:jobId', async (req, res, next) => {
       })
     );
 
+    // Narrow to one exam when asked, so a single section can be handed off as its own paper.
+    const selected = wantExam
+      ? items.filter((it) => String(it.tags?.exam || '').toLowerCase() === wantExam.toLowerCase())
+      : items;
+
+    // Summarise the exams present, with each one's own format mix. A single-exam course
+    // produces a one-entry list, so consumers have one shape to read either way.
+    const byExam = new Map<string, typeof selected>();
+    for (const it of selected) {
+      const e = String(it.tags?.exam || '');
+      const list = byExam.get(e);
+      if (list) list.push(it); else byExam.set(e, [it]);
+    }
+    const exams = [...byExam.entries()]
+      .filter(([name]) => name)
+      .map(([name, list]) => ({
+        name,
+        code: examMeta.get(name) || undefined,
+        question_count: list.length,
+        formats: list.reduce<Record<string, number>>((acc, it) => {
+          const f = String(it.format || 'mcq_single');
+          acc[f] = (acc[f] || 0) + 1;
+          return acc;
+        }, {}),
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+
+    // Questions generated before the exam tag existed, or whose subject was renamed by a
+    // later restructure, resolve to no exam. Say so rather than letting the summary imply a
+    // clean split: CFA's bank attributes 196 of 1774, and a block listing only the three
+    // Level III variants would read as though that were the whole exam.
+    const unassigned = (byExam.get('') || []).length;
+
     res.json({
-      question_count: items.length,
-      questions: items,
+      course: course?.name,
+      question_count: selected.length,
+      // Present only when the questions actually resolve to exams, so a course with no
+      // exam dimension exports exactly as it did before.
+      ...(exams.length > 0 ? { exams } : {}),
+      ...(exams.length > 0 && unassigned > 0 ? { unassigned_question_count: unassigned } : {}),
+      ...(wantExam ? { exam: wantExam } : {}),
+      questions: selected,
       exported_at: new Date().toISOString(),
     });
   } catch (e) {

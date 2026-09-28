@@ -54,6 +54,14 @@ export const courses = {
       method: 'PUT',
       body: JSON.stringify({ message }),
     }),
+
+  /** Set guidelines fields directly (e.g. the exam's total_questions) — no LLM call.
+   *  The server rescales the subject and format counts onto the new total. */
+  patchGuidelines: (id: string, patch: Record<string, unknown>) =>
+    request<{ course: unknown; chat_response: string }>(`/courses/${id}/guidelines`, {
+      method: 'PUT',
+      body: JSON.stringify({ patch }),
+    }),
 };
 
 // ── Jobs ────────────────────────────────────────────────────
@@ -149,6 +157,15 @@ export const formats = {
 export const exportApi = {
   create: (data: { job_id: string; format: string }) =>
     request<{ export: unknown }>('/export', { method: 'POST', body: JSON.stringify(data) }),
-  json: (jobId: string) =>
-    request<{ question_count: number; questions: unknown[]; exported_at: string }>(`/export/json/${jobId}`),
+  /** Pass `exam` to export one exam of a multi-exam course on its own. */
+  json: (jobId: string, exam?: string) =>
+    request<{
+      course?: string;
+      question_count: number;
+      /** One entry per exam the bank spans (a single-exam course yields one). */
+      exams?: Array<{ name: string; code?: string; question_count: number; formats: Record<string, number> }>;
+      exam?: string;
+      questions: unknown[];
+      exported_at: string;
+    }>(`/export/json/${jobId}${exam ? `?exam=${encodeURIComponent(exam)}` : ''}`),
 };

@@ -58,6 +58,16 @@ export interface Course {
 // ── Generation Guidelines ─────────────────────────────────
 
 export interface GenerationGuidelines {
+  /** The real exam's item count. Set from the analysis; subject_distribution sums to it. */
+  total_questions?: number;
+  time_minutes?: number;
+  /** One entry per exam when a course spans several (CPA: AUD, FAR, REG, BAR, ISC, TCP).
+   *  Each exam is its own paper, so each is sized against its own blueprint. */
+  exam_sizes?: Record<string, {
+    total_questions: number;
+    time_minutes?: number;
+    format_question_counts?: Record<string, number>;
+  }>;
   subject_distribution: Record<string, { questions: number; percentage: number }>;
   format_distribution: Array<{ format: string; percentage: number; count: number; description: string }>;
   stem_guidelines: {
