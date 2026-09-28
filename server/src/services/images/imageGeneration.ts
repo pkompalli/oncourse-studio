@@ -122,6 +122,13 @@ function stimulusForImage(q: Record<string, unknown>): { stem: string; figureTas
   return { stem, figureTasks };
 }
 
+/** Whatever the model gave us for a "list of terms", as a list of non-empty strings. */
+export function toStringArray(v: unknown): string[] {
+  if (Array.isArray(v)) return v.map((x) => String(x ?? '').trim()).filter(Boolean);
+  if (typeof v === 'string') return v.split(/\s*[;,]\s*/).map((s) => s.trim()).filter(Boolean);
+  return [];
+}
+
 export function buildImagePrompt(questionData: Record<string, unknown>, fixInstructions?: string): string {
   const imageType = (questionData.image_type as string) || '';
   const imageDesc = (questionData.image_description as string) || '';
@@ -131,7 +138,13 @@ export function buildImagePrompt(questionData: Record<string, unknown>, fixInstr
   // question, not a generic template. Prefer explicit description, then the
   // search terms, then the type as a last resort.
   const { stem, figureTasks } = stimulusForImage(questionData);
-  const searchTerms = (questionData.image_search_terms as string[]) || [];
+  // The model returns image_search_terms as an array OR as a single string, and a cast
+  // cannot tell the difference: `(x as string[]) || []` leaves a string intact and .join()
+  // then throws. That throw happened BEFORE the try block in generateImageWithOpenAI, so it
+  // propagated to Promise.allSettled and was counted as a failure with nothing logged —
+  // five CFA images "failed immediately" with no error anywhere, looking like a connection
+  // fault. Coerce instead of casting.
+  const searchTerms = toStringArray(questionData.image_search_terms);
   const descParts = [imageDesc, searchTerms.join('; ')].filter(Boolean);
   const subject = descParts.join(' — ') || imageType || 'illustration';
   const needsLabels = imageNeedsLabels(imageType, subject);
@@ -360,9 +373,17 @@ export async function processAllImageQuestions(jobId: string): Promise<{
     const results = await Promise.allSettled(
       batch.map((q) => generateAndStoreImage(q, jobId))
     );
-    for (const r of results) {
-      if (r.status === 'fulfilled' && r.value) totalSuccess++;
-      else totalFailed++;
+    for (let k = 0; k < results.length; k++) {
+      const r = results[k];
+      if (r.status === 'fulfilled' && r.value) { totalSuccess++; continue; }
+      totalFailed++;
+      // A REJECTED promise used to be counted and discarded, so anything thrown before
+      // generateImageWithOpenAI's try block vanished without a trace. Say what happened.
+      if (r.status === 'rejected') {
+        const q = batch[k] as Record<string, unknown>;
+        const msg = r.reason instanceof Error ? r.reason.message : String(r.reason);
+        console.error(`    ✗ Q${q?.question_number}: image generation threw — ${msg.slice(0, 160)}`);
+      }
     }
 
     // Update job progress after each batch
