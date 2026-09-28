@@ -54,6 +54,49 @@ function unflatten(node: unknown): void {
   }
 }
 
+/**
+ * Did the fixer change the question's SHAPE rather than its content?
+ *
+ * The prompt says "only change what is listed" but nothing enforced it, and the result was
+ * accepted whatever came back. Asked to fill in a null bloom_level, the fixer rewrote a
+ * one-component NextGen drafting set into six components in invented formats (true_false,
+ * multiple_select, fill_in_blank) — a different item type wearing the same id, passing
+ * validation, with no trace in changes_applied.
+ *
+ * Structure is only allowed to move when a change ASKED for it. Returns the reason it
+ * refused, or null when the fix is structurally faithful.
+ */
+export function structuralDrift(
+  before: Record<string, unknown>,
+  after: Record<string, unknown>,
+  changesRequired: string[]
+): string | null {
+  const asked = changesRequired.join(' ').toLowerCase();
+  const subsOf = (q: Record<string, unknown>) => {
+    const c = (q.content as Record<string, unknown>) || q;
+    return Array.isArray(c?.sub_questions) ? (c.sub_questions as Array<Record<string, unknown>>) : null;
+  };
+  const a = subsOf(before);
+  const b = subsOf(after);
+  if (!a || !b) return null;
+
+  // A sub-question count change is structural. Allow it only when something asked.
+  if (a.length !== b.length && !/sub[_ ]?question|component|add |remove |six|count/.test(asked)) {
+    return `sub_question count ${a.length} -> ${b.length}`;
+  }
+
+  // Each component that SURVIVES must keep its response model, unless the change named
+  // formats. Compare only the overlap: when a count change was legitimately requested, the
+  // added components are new and have no prior format to preserve.
+  if (!/format_type|response model|convert|change .*format/.test(asked)) {
+    const n = Math.min(a.length, b.length);
+    const fa = a.slice(0, n).map((s) => String(s?.format_type || '')).join(',');
+    const fb = b.slice(0, n).map((s) => String(s?.format_type || '')).join(',');
+    if (fa !== fb) return `sub-question formats ${fa || '(none)'} -> ${fb || '(none)'}`;
+  }
+  return null;
+}
+
 export async function fixQuestion(
   question: Record<string, unknown>,
   changesRequired: string[],
@@ -74,6 +117,7 @@ CRITICAL RULES:
 • If a change asks to fix a factual error, change ONLY the incorrect fact — do not rewrite the surrounding sentence.
 • Do NOT add new content, options, or explanations beyond what the changes require.
 • Preserve ALL fields from the original JSON — the question may be any format (MCQ, SATA, ordered response, fill-in-blank, etc.).
+• NEVER change the question's STRUCTURE unless a required change explicitly asks for it. Keep the same number of sub_questions, in the same order, each with the SAME format_type. A set with one sub-question keeps exactly one; do not "complete" it by adding more. Fixing a missing field means filling that field in place, not rebuilding the question around it.
 
 COURSE: ${courseName}
 
@@ -121,12 +165,26 @@ Return ONLY valid JSON. No preamble, no markdown fences.`;
       else if (raw.includes('```')) raw = raw.split('```')[1].split('```')[0].trim();
 
       const wrapper = JSON.parse(raw);
-      if (typeof wrapper === 'object' && wrapper.question) {
-        unflatten(wrapper.question);
-        return { fixed: true, question: wrapper.question, changesApplied: wrapper.changes_applied || [] };
+      const fixed = (typeof wrapper === 'object' && wrapper.question ? wrapper.question : wrapper) as Record<string, unknown>;
+      unflatten(fixed);
+
+      // A fix that reshapes the question is worse than no fix: the flagged defect is
+      // usually cosmetic, while the rewrite replaces a valid item with a different one.
+      // Retry once with the rule spelled out, then keep the ORIGINAL rather than accept it.
+      const drift = structuralDrift(question, fixed, changesRequired);
+      if (drift) {
+        console.warn(`  [Fixer] attempt ${attempt}/2 changed structure it was not asked to (${drift})`);
+        lastErr = `structural drift: ${drift}`;
+        if (attempt === 1) continue;
+        console.error(`  [Fixer] REFUSED the fix — keeping the original question (${drift})`);
+        return { fixed: false, error: lastErr };
       }
-      unflatten(wrapper);
-      return { fixed: true, question: wrapper, changesApplied: [] };
+
+      return {
+        fixed: true,
+        question: fixed,
+        changesApplied: (typeof wrapper === 'object' && wrapper.changes_applied) || [],
+      };
     } catch (e) {
       lastErr = e instanceof Error ? e.message : 'Fix failed';
       console.warn(`  [Fixer] attempt ${attempt}/2 failed to parse fixed question: ${lastErr}`);
