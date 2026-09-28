@@ -4,7 +4,8 @@
  */
 
 import { orCall, MODELS } from '../llm/openrouter.js';
-import { extractFormatSlugs, renderContractsForPrompt, buildContentSchema, normalizeSchemaParams, canonicalizeFormatSlug, resolveFormat, resolveQuestionType, FORMAT_CONTRACTS } from './formatContracts.js';
+import { extractFormatSlugs, renderContractsForPrompt, buildContentSchema, normalizeSchemaParams, canonicalizeFormatSlug, resolveFormat, resolveQuestionType, FORMAT_CONTRACTS, GROUPED_SLUGS } from './formatContracts.js';
+import { rescaleToTotal, readExamSize, subjectExamMap, type ExamSize } from './examSize.js';
 
 /** Canonicalize every format slug in the guidelines (format_specs keys +
  *  format_distribution) so the whole pipeline uses the fixed registry vocabulary. */
@@ -33,6 +34,149 @@ function canonicalizeGuidelines(g: Record<string, unknown>): Record<string, unkn
       else map.set(canon, { ...f, format: canon });
     }
     g.format_distribution = [...map.values()];
+  }
+  return g;
+}
+
+/**
+ * The ANALYSIS is authoritative on HOW BIG the exam is, the same way it is already
+ * authoritative on WHICH formats it uses. The guidelines interpret the size; they must
+ * not invent it.
+ *
+ * Without this the total never left exam_format — it was displayed on the structure page
+ * and read by no server code — so the guidelines LLM picked an exam length of its own.
+ * CPA came back with 100 questions across 22 subjects, a number with no source, and
+ * generation then treated that as the exam.
+ *
+ * Forces total_questions and time_minutes onto the guidelines, rescales
+ * subject_distribution to sum to the total, and sets each format_distribution count from
+ * the analysis's per-format item counts. A no-op when the analysis declares no size, so a
+ * course without one behaves exactly as before.
+ */
+function reconcileExamSize(
+  g: Record<string, unknown>,
+  examFormat: Record<string, unknown>,
+  structure?: Record<string, unknown>
+): Record<string, unknown> {
+  return applyExamSize(g, readExamSize(examFormat), structure);
+}
+
+/**
+ * Re-normalize the guidelines against THEIR OWN total.
+ *
+ * Used after a chat refine or a direct edit, where changing the exam length is the whole
+ * point — reconciling against the analysis there would silently undo what the user just
+ * asked for. Before this, refineGuidelines accepted an edited subject_distribution
+ * verbatim, so "make it 85 questions" left a document whose subjects still summed to
+ * something else.
+ */
+export function reconcileExamSizeSelf(
+  g: Record<string, unknown>,
+  structure?: Record<string, unknown>
+): Record<string, unknown> {
+  // With per-exam sizes their sum is the total, so editing one exam resizes only that
+  // exam and the grand total follows.
+  const self = readExamSize(g);
+  const total = self.exam_sizes
+    ? self.total_questions
+    : (Number(g.total_questions) > 0 ? Math.round(Number(g.total_questions)) : 0);
+  if (!total) return g;
+
+  const fd = Array.isArray(g.format_distribution) ? (g.format_distribution as Array<Record<string, unknown>>) : [];
+  const counts: Record<string, number> = {};
+  for (const f of fd) {
+    const slug = canonicalizeFormatSlug(String(f.format || f.slug || ''));
+    const n = Number(f.count);
+    if (slug && Number.isFinite(n) && n > 0) counts[slug] = n;
+  }
+  return applyExamSize(g, {
+    total_questions: total,
+    time_minutes: Number(g.time_minutes) > 0 ? Math.round(Number(g.time_minutes)) : undefined,
+    format_question_counts: Object.keys(counts).length > 0 ? counts : undefined,
+    exam_sizes: self.exam_sizes,
+  }, structure);
+}
+
+function applyExamSize(
+  g: Record<string, unknown>,
+  size: ExamSize,
+  structure?: Record<string, unknown>
+): Record<string, unknown> {
+  const total = size.total_questions;
+  if (!total) return g;
+
+  g.total_questions = total;
+  if (size.time_minutes) g.time_minutes = size.time_minutes;
+  if (size.exam_sizes) g.exam_sizes = size.exam_sizes;
+
+  // Subjects: keep the shape the model proposed, force the sum — PER EXAM when the course
+  // spans several. Rescaling all subjects against one grand total would let a big section
+  // bleed questions into a small one and leave every individual paper the wrong length.
+  const sd = g.subject_distribution as Record<string, Record<string, unknown>> | undefined;
+  if (sd && typeof sd === 'object' && Object.keys(sd).length > 0) {
+    const examOf = subjectExamMap(structure);
+    const sizes = size.exam_sizes;
+    const groups = new Map<string, string[]>();
+    for (const subj of Object.keys(sd)) {
+      const exam = (sizes && examOf[subj] && sizes[examOf[subj]]) ? examOf[subj] : '';
+      const list = groups.get(exam);
+      if (list) list.push(subj); else groups.set(exam, [subj]);
+    }
+
+    for (const [exam, subjects] of groups) {
+      // An ungrouped remainder (no exam, or an exam the analysis did not size) is scaled
+      // against whatever the grand total leaves over, so its questions are never lost.
+      const target = exam && sizes
+        ? sizes[exam].total_questions
+        : total - [...groups.keys()].filter((k) => k && sizes?.[k])
+            .reduce((n, k) => n + sizes![k].total_questions, 0);
+      if (!(target > 0)) continue;
+
+      const counts: Record<string, number> = {};
+      for (const s of subjects) counts[s] = Number(sd[s]?.questions) || 0;
+      const before = subjects.reduce((n, s) => n + counts[s], 0);
+      const scaled = rescaleToTotal(counts, target);
+      for (const s of subjects) {
+        sd[s].questions = scaled[s];
+        sd[s].percentage = Math.round((scaled[s] / target) * 1000) / 10;
+      }
+      if (before !== target) {
+        console.log(`  [Guidelines] ${exam || 'subjects'}: distribution summed to ${before} — rescaled to ${target}`);
+      }
+    }
+  }
+
+  // Formats: the analysis's ITEM counts win outright. A percentage cannot express them —
+  // a CPA section's MCQs are ~92% of its items but 50% of its score — so a count that
+  // merely echoes the percentage would quietly resize the simulation set.
+  const fd = Array.isArray(g.format_distribution) ? (g.format_distribution as Array<Record<string, unknown>>) : [];
+  // format_distribution is course-wide, so with per-exam sizes its counts are the sum
+  // across exams. The per-exam split stays in exam_sizes, which is what the allocator
+  // reads — this line is what the user sees, and it has to add up to the grand total.
+  let declared = size.format_question_counts;
+  if (size.exam_sizes) {
+    const summed: Record<string, number> = {};
+    for (const e of Object.values(size.exam_sizes)) {
+      for (const [slug, n] of Object.entries(e.format_question_counts || {})) {
+        summed[slug] = (summed[slug] || 0) + n;
+      }
+    }
+    if (Object.keys(summed).length > 0) declared = summed;
+  }
+  if (fd.length > 0 && declared) {
+    const present: Record<string, number> = {};
+    for (const f of fd) {
+      const slug = canonicalizeFormatSlug(String(f.format || f.slug || ''));
+      if (slug && declared[slug] !== undefined) present[slug] = declared[slug];
+    }
+    if (Object.keys(present).length > 0) {
+      const scaled = rescaleToTotal(present, total);
+      for (const f of fd) {
+        const slug = canonicalizeFormatSlug(String(f.format || f.slug || ''));
+        if (scaled[slug] !== undefined) f.count = scaled[slug];
+      }
+      console.log(`  [Guidelines] format counts from the analysis: ${Object.entries(scaled).map(([s, n]) => `${s}=${n}`).join(', ')}`);
+    }
   }
   return g;
 }
@@ -167,6 +311,19 @@ function reconcileToAnalysisFormats(g: Record<string, unknown>, examFormat: Reco
     if (rawMax && rawMax !== ipuMax) {
       console.warn(`  [Guidelines] ${slug}: items_per_unit_max ${rawMax} is below the floor ${ipuMin} — ignoring it`);
     }
+    // A SIMULATION is one work area, so its items_per_unit describes SCORING CELLS inside
+    // that work area — not sub-questions. Mapping it onto sub_question bounds demanded 4-8
+    // separate tasks, which is how a TBS became six mini quiz items wearing the name, and
+    // why a correctly-built one-work-area simulation then failed its own schema.
+    if (slug === 'task_based_simulation' || slug === 'tbs') {
+      const sp = (spec.schema_params = (spec.schema_params as Record<string, unknown>) || {});
+      sp.sub_question_min = 1;
+      sp.sub_question_max = 1;
+      sp.sub_question_count = 1;
+      delete spec.content_schema; // rebuild against the one-work-area bounds
+      continue;
+    }
+
     if (ipuMin > 1 || ipuMax > 1) {
       const sp = (spec.schema_params = (spec.schema_params as Record<string, unknown>) || {});
       const declaredMax = Number(sp.sub_question_max) || Number(sp.sub_question_count) || 0;
@@ -196,6 +353,51 @@ function reconcileToAnalysisFormats(g: Record<string, unknown>, examFormat: Reco
  * the contradictory template makes buildFormatSchema fall back to the built-in one,
  * which is correct by construction.
  */
+/**
+ * Throw away a grouped format's generation_template when it DEMONSTRATES the wrong work.
+ *
+ * `specFor` prefers the guidelines' template over the built-in one, and a model copies a
+ * demonstrated skeleton far more faithfully than it follows prose — so a wrong template is
+ * worse than none at all. CPA's showed two fill_blanks, a matrix_grid and a cloze_dropdown,
+ * and generation reproduced exactly that: 53 fill_blank, 38 matrix_grid, 33 cloze_dropdown
+ * and zero applied_research across 42 simulations. Dropping it falls back to the contract,
+ * which states the real shapes.
+ *
+ * Checks the template against what the spec itself permits, so it stays generic: an exam that
+ * legitimately sets a cloze inside a simulation simply lists it in its own syntax_rules.
+ */
+export function dropMisleadingWorkAreas(g: Record<string, unknown>): Record<string, unknown> {
+  const specs = g.format_specs as Record<string, Record<string, unknown>> | undefined;
+  if (!specs) return g;
+  for (const [slug, spec] of Object.entries(specs)) {
+    if (!GROUPED_SLUGS.has(slug)) continue;
+    const tmpl = spec?.generation_template as Record<string, unknown> | undefined;
+    const subs = tmpl?.sub_questions;
+    if (!tmpl || !Array.isArray(subs) || subs.length === 0) continue;
+
+    const maxSubs = Number((spec.schema_params as Record<string, unknown>)?.sub_question_max) || 0;
+    if (maxSubs && subs.length > maxSubs) {
+      console.warn(`  [Guidelines] ${slug}: template demonstrates ${subs.length} work areas where ${maxSubs} is the maximum — dropping it`);
+      delete spec.generation_template;
+      continue;
+    }
+
+    // Which sub-formats does this spec actually allow? Read its own prose rather than a
+    // hardcoded list, so the rule holds for any exam.
+    const prose = [spec.syntax_rules, spec.structure_requirements, spec.when_to_use]
+      .flatMap((v) => (Array.isArray(v) ? v : [v])).filter(Boolean).join(' ').toLowerCase();
+    if (!prose) continue;
+    const offenders = [...new Set(subs
+      .map((s) => canonicalizeFormatSlug(String((s as Record<string, unknown>)?.format_type || '')))
+      .filter((f) => f && !prose.includes(f)))];
+    if (offenders.length > 0) {
+      console.warn(`  [Guidelines] ${slug}: template demonstrates ${offenders.join(', ')}, which its own rules do not permit — dropping it`);
+      delete spec.generation_template;
+    }
+  }
+  return g;
+}
+
 function dropContradictoryTemplates(g: Record<string, unknown>): Record<string, unknown> {
   const specs = g.format_specs as Record<string, Record<string, unknown>> | undefined;
   if (!specs) return g;
@@ -455,6 +657,39 @@ export async function generateGuidelines(
       }).join('\n')
     : '  (none declared — infer from the specification above)';
 
+  // State the exam's SIZE outright. The old instructions were conditional ("if the exam
+  // format has subject_distribution … use those EXACTLY"), so a course whose analysis
+  // carried no distribution was told nothing and the model chose a length of its own.
+  const size = readExamSize(examFormat);
+  // A course spanning several exams is several PAPERS, each with its own length. Stating
+  // only a grand total produced one blended paper that was sittable in none of them.
+  const perExamBlock = size.exam_sizes
+    ? `\n─── EXAM SIZE PER EXAM (AUTHORITATIVE — this course covers ${Object.keys(size.exam_sizes).length} SEPARATE exams; a candidate sits ONE at a time, so each has its OWN paper) ───\n` +
+      Object.entries(size.exam_sizes).map(([exam, e]) =>
+        `  ${exam}: ${e.total_questions} questions${e.time_minutes ? ` in ${e.time_minutes} min` : ''}` +
+        (e.format_question_counts
+          ? ` — ${Object.entries(e.format_question_counts).map(([s, n]) => `${n} ${s}`).join(', ')}`
+          : '')
+      ).join('\n') +
+      `\nRULES: each exam's OWN subjects MUST sum to EXACTLY that exam's question count above. ` +
+      `Do NOT split one total between the exams and do NOT average their format mixes — they differ. ` +
+      `total_questions is the sum of all of them: ${size.total_questions}.\n`
+    : '';
+
+  const examSizeBlock = size.exam_sizes ? perExamBlock : size.total_questions
+    ? `\n─── EXAM SIZE (AUTHORITATIVE — this is how many items the real exam has; do NOT choose a different number) ───\n` +
+      `TOTAL QUESTIONS: ${size.total_questions}${size.time_minutes ? ` in ${size.time_minutes} minutes` : ''}\n` +
+      (size.format_question_counts
+        ? `ITEMS PER FORMAT (real item counts, NOT percentages — a grouped item such as a case study or simulation counts ONCE):\n` +
+          Object.entries(size.format_question_counts).map(([s, n]) => `  - ${s}: ${n}`).join('\n') + '\n'
+        : '') +
+      `RULES: subject_distribution questions MUST sum to EXACTLY ${size.total_questions}. ` +
+      `total_questions MUST be ${size.total_questions}. ` +
+      (size.format_question_counts
+        ? `Each format_distribution "count" MUST equal the item count listed above for that format, and the counts MUST sum to ${size.total_questions}. Set each "percentage" to that format's share of the SCORED WEIGHT, which may differ from its share of the items.\n`
+        : `\n`)
+    : '';
+
   const groups = Array.isArray(examFormat.question_groups) ? (examFormat.question_groups as Array<Record<string, unknown>>) : [];
   const groupingBlock = groups.length > 0
     ? `The exam groups some questions under a shared stimulus. For EACH group, add a format_specs entry for the mapped machine format AND a format_distribution entry:\n` +
@@ -487,9 +722,13 @@ ${groupingBlock}
 ─── THE EXAM'S FORMATS (AUTHORITATIVE — use EXACTLY these slugs as the keys of format_specs and the "format" values in format_distribution; do NOT rename, merge, substitute or omit any of them) ───
 ${formatListBlock}
 
+${examSizeBlock}
 Produce a JSON object with these exact sections:
 
 {
+  "total_questions": <number — the exam's total item count>,
+  "time_minutes": <number — the exam's duration in minutes, or null if unknown>,
+
   "subject_distribution": {
     "<Subject Name>": { "questions": <number>, "percentage": <number> }
   },
@@ -623,13 +862,14 @@ Return ONLY the JSON object. No preamble, no markdown fences.`;
   // Pipeline: canonicalize slugs -> force the analysed format set -> materialize
   // schemas -> guarantee grouped formats -> guarantee a schema for every format ->
   // discard any template that contradicts its schema -> strip field names that
-  // leaked in from a different format's spec.
-  return reconcileCountProse(scrubForeignFieldNames(dropContradictoryTemplates(ensureSchemaForEveryFormat(
+  // leaked in from a different format's spec -> force the analysed exam SIZE.
+  // Size runs last so it reconciles the format set this pipeline actually settled on.
+  return reconcileExamSize(reconcileCountProse(scrubForeignFieldNames(dropMisleadingWorkAreas(dropContradictoryTemplates(ensureSchemaForEveryFormat(
     reconcileGroupedFormats(
       attachContentSchemas(reconcileToAnalysisFormats(canonicalizeGuidelines(guidelines), examFormat)),
       examFormat
     )
-  ))));
+  ))))), examFormat, structure);
 }
 
 // Deterministic reconciliation: whenever the analysis describes a shared-stimulus
@@ -748,7 +988,10 @@ Return ONLY valid JSON. No preamble, no markdown fences.`;
   return {
     // Re-materialize schemas so an edit to num_options / sub-question counts /
     // exhibit rules updates the deterministic contract too.
-    updated_guidelines: updated ? reconcileCountProse(scrubForeignFieldNames(attachContentSchemas(updated))) : null,
+    // Re-normalize against the guidelines' OWN total: a refine is where the user
+    // deliberately changes the exam length, so the edited total wins and the subject and
+    // format counts are rescaled to match it.
+    updated_guidelines: updated ? reconcileExamSizeSelf(reconcileCountProse(scrubForeignFieldNames(attachContentSchemas(updated)))) : null,
     response: (result.response as string) || 'Guidelines updated.',
   };
 }

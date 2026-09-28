@@ -134,13 +134,35 @@ export const FORMAT_CONTRACTS: Record<string, FormatContract> = {
   task_based_simulation: {
     slug: 'task_based_simulation',
     label: 'Task-Based Simulation (TBS)',
-    structure: 'question (directions/memo); exhibits[] (2–5 documents, each {label,title,type,content} where content is MARKDOWN — tables for numeric data); sub_questions[] (4–8 tasks referencing exhibits by label, each with its format\'s answer key + rationale + reasoning_step); response_instructions; explanation.',
-    gradability: 'Each task carries its format\'s complete answer key. Every fact a task needs must actually appear in an exhibit\'s markdown.',
+    structure: 'question (directions/memo); exhibits[] (2–5 documents, each {label,title,type,content} where content is MARKDOWN — tables for numeric data); sub_questions[] holding EXACTLY ONE work area (a data_entry_grid, document_review or applied_research) carrying 4–18 separately scored cells; response_instructions; explanation.',
+    gradability: 'The one work area carries a complete answer key covering every scored cell, line or passage — partial credit is awarded per cell. Every fact it needs must actually appear in an exhibit\'s markdown.',
     syntax: [
       'NOT an image question (is_image_question=false); exhibit data is MARKDOWN, never an image.',
-      'Tasks reference exhibits by label ("Using Exhibit 1…").',
-      'Tasks are WORK, not quiz items: the candidate enters values, picks from dropdowns, or classifies rows — data_entry_grid (a form, schedule, reconciliation or journal entry the candidate completes cell by cell), document_review (correct the passages of a real document), research_citation (find the governing authority), fill_blank (a single numeric/text value), cloze_dropdown (option lists inside prose), matrix_grid (classification). Use ordered_response and plain lettered mcq_single ONLY if THIS exam genuinely uses them in a simulation — a CPA TBS does not: sequencing is not a CPA response type, and lettered multiple choice belongs to the MCQ testlets, not the work area.',
-      'Cover the task types this exam actually sets — for a CPA TBS those include document review, completing a form or schedule, recording journal entries, reconciliation, and researching authoritative literature for a citation.',
+      'The work area references exhibits by label ("Using Exhibit 1…").',
+      // ONE work area, not a set of tasks. A TBS is a single item: the candidate completes one
+      // form, reviews one document, or applies one authority, and is scored per cell inside it.
+      // Describing it as "4-8 tasks" is what produced simulations that were really six mini
+      // quiz items wearing the TBS name.
+      'ONE simulation is ONE work area of ONE format — sub_questions has exactly one entry. It is NOT a set of mini-questions in assorted formats. The scoring points are the ROWS, SPANS or ITEMS inside that single work area (4–18 of them, typically 8–9), each earning partial credit.',
+      // Literal skeletons, not prose: formats given a JSON skeleton had zero failures in the
+      // 201-simulation build, while the one described in a sentence failed 9 times in 19.
+      'The work area is one of exactly three shapes:\n' +
+        '  data_entry_grid — a form, schedule, reconciliation or journal entry completed cell by cell. Carries grid_kind (option_grid | numeric_entry | journal_entry | form | schedule | reconciliation), plus:\n' +
+        '    columns: [{"key":"answer","label":"<what is chosen>","input":"select","options":[<candidate list, same for every row>]}]  — or {"input":"number","unit":"USD","precision":0} for computed amounts\n' +
+        '    rows: [{"id":"1","label":"<the item being judged>"}, …]   (rows the candidate is GIVEN carry "values" and "editable": false)\n' +
+        '    correct_answer: {"1":{"answer":"<one of the options>"}, …} keyed by row id\n' +
+        '    a journal entry uses an account select column plus debit and credit number columns, with constraints: [{"type":"balanced","columns":["debit","credit"]}]\n' +
+        '  document_review — correct the passages of a real document. Carries:\n' +
+        '    document: the full document as markdown, each reviewable passage wrapped [[span:1]]text[[/span]]\n' +
+        '    spans: [{"id":"1","text":"…","options":["<replacement>","<replacement>","No change is required"],"correct":"…"}]  — at least one span must already be correct\n' +
+        '  applied_research — apply a standards excerpt that is SUPPLIED. Carries:\n' +
+        '    source (e.g. "AU-C 240.17"), excerpt (that authoritative text quoted verbatim as markdown — REQUIRED, or exhibit_label naming the exhibit carrying it),\n' +
+        '    items: [{"id":"1","prompt":"<what is asked of the excerpt>","options":["…","…"],"answer":"<one of the options>"}, …] with 3–4 entries\n' +
+        '    NEVER ask the candidate to find or cite a reference — the excerpt is supplied. That is the pre-2024 task.',
+      // The hedge stays because the contract is generic: NCLEX really does use matrix_grid and
+      // cloze_dropdown as response models. CPA does not, and neither does it use sequencing or
+      // lettered multiple choice, which belong to the MCQ testlets.
+      'Use fill_blank, cloze_dropdown, matrix_grid, ordered_response or lettered mcq_single as the work area ONLY if THIS exam genuinely sets them inside a simulation. A CPA TBS never does.',
     ],
     stimulusRule: 'Exhibits are the shared stimulus and are REQUIRED, embedded as markdown.',
   },
