@@ -2,8 +2,8 @@ import { Router } from 'express';
 import { supabase } from '../db/supabase.js';
 import { generateCourseStructure, parseStructureFromInput } from '../services/generation/courseStructure.js';
 import { refineCourseStructure, refineExamFormat } from '../services/generation/refineStructure.js';
-import { analyzeExamFormat, fetchMockExamSpecs, interpretExamFormatFromText } from '../services/generation/examFormat.js';
-import { generateGuidelines, refineGuidelines } from '../services/generation/guidelines.js';
+import { analyzeExamFormat, withMockExamSpecs, interpretExamFormatFromText } from '../services/generation/examFormat.js';
+import { generateGuidelines, refineGuidelines, reconcileExamSizeSelf } from '../services/generation/guidelines.js';
 import { scopeCourseToExam } from '../services/generation/examScope.js';
 
 export const coursesRouter = Router();
@@ -164,63 +164,8 @@ coursesRouter.post('/:id/exam-format', async (req, res, next) => {
       // No mock exam specs (total questions, subject distribution) needed
       combinedFormat = examFormat;
     } else {
-      // Mock exam: also fetch total questions, per-subject distribution
-      const subjects = ((structure.subjects as Array<{ name: string }>) || []).map((s) => s.name);
-      const mockSpecs = await fetchMockExamSpecs(courseName, subjects);
-      combinedFormat = { ...examFormat, ...mockSpecs, exam_pattern: examFormat.exam_pattern };
-
-      // Override subject_distribution image percentages with Phase 2 data (more accurate)
-      const phase2ImgPct = (examFormat.image_percentage_by_subject as Record<string, number>) || {};
-      const subjectDist = (combinedFormat.subject_distribution as Record<string, { questions: number; percentage: number; image_pct: number }>) || {};
-      let totalImgQ = 0;
-      for (const [subjName, dist] of Object.entries(subjectDist)) {
-        // Find matching Phase 2 image percentage
-        const key = subjName.toLowerCase().trim();
-        let imgPct: number | null = null;
-        if (subjName in phase2ImgPct) imgPct = phase2ImgPct[subjName];
-        else {
-          for (const [k, v] of Object.entries(phase2ImgPct)) {
-            if (k.toLowerCase().trim() === key || k.toLowerCase().includes(key) || key.includes(k.toLowerCase())) {
-              imgPct = v;
-              break;
-            }
-          }
-        }
-        if (imgPct !== null) {
-          dist.image_pct = imgPct;
-        }
-        totalImgQ += Math.round((dist.questions * dist.image_pct) / 100);
-      }
-
-      // Map per-subject exhibit (markdown) percentages the same way.
-      const phase2ExhPct = (examFormat.exhibit_percentage_by_subject as Record<string, number>) || {};
-      for (const [subjName, dist] of Object.entries(subjectDist as Record<string, { exhibit_pct?: number }>)) {
-        const key = subjName.toLowerCase().trim();
-        let exhPct: number | null = subjName in phase2ExhPct ? phase2ExhPct[subjName] : null;
-        if (exhPct === null) {
-          for (const [k, v] of Object.entries(phase2ExhPct)) {
-            if (k.toLowerCase().trim() === key || k.toLowerCase().includes(key) || key.includes(k.toLowerCase())) { exhPct = v; break; }
-          }
-        }
-        if (exhPct !== null) dist.exhibit_pct = exhPct;
-      }
-      // Enforce overall image target — scale up per-subject image_pct if weighted average is too low
-      const qf = (combinedFormat.question_format as Record<string, number>) || {};
-      const targetImgPct = qf.image_questions_percentage || 35;
-      const totalQ = Object.values(subjectDist).reduce((sum, d) => sum + d.questions, 0);
-      const targetImgQ = Math.round((totalQ * targetImgPct) / 100);
-
-      if (totalImgQ < targetImgQ && totalImgQ > 0) {
-        const scaleFactor = targetImgQ / totalImgQ;
-        totalImgQ = 0;
-        for (const dist of Object.values(subjectDist)) {
-          dist.image_pct = Math.min(90, Math.round(dist.image_pct * scaleFactor));
-          totalImgQ += Math.round((dist.questions * dist.image_pct) / 100);
-        }
-      }
-
-      combinedFormat.subject_distribution = subjectDist;
-      combinedFormat.image_questions_total = totalImgQ;
+      // Mock exam: also fetch total questions, per-subject and per-format counts.
+      combinedFormat = await withMockExamSpecs(examFormat, courseName, structure);
     }
 
     // Save to DB
@@ -343,7 +288,26 @@ coursesRouter.post('/:id/guidelines', async (req, res, next) => {
 
     // Scope to the selected exam (if the course spans multiple exams).
     const { courseName, structure } = scopeCourseToExam(course);
-    const examFormat = (course.exam_format || {}) as Record<string, unknown>;
+    let examFormat = (course.exam_format || {}) as Record<string, unknown>;
+
+    // A mock exam needs a real length, and the exam-format step only fetches one when it
+    // was itself run in mock-exam mode. A course analysed topic-wise therefore arrives
+    // here with no total and no subject distribution, and the guidelines LLM invents both.
+    // Backfill lazily — on demand rather than by widening that gate, so a topic-wise
+    // analysis still never pays for this call.
+    const { qbank_mode } = req.body || {};
+    const isMockExam = qbank_mode !== 'topic_wise' && qbank_mode !== 'topic_qbank';
+    const hasSize = Number(examFormat.total_questions) > 0
+      && Object.keys((examFormat.subject_distribution as Record<string, unknown>) || {}).length > 0;
+    if (isMockExam && !hasSize && Object.keys(examFormat).length > 0) {
+      console.log(`  [Guidelines] ${courseName}: no exam size on record — fetching mock exam specs`);
+      examFormat = await withMockExamSpecs(examFormat, courseName, structure);
+      const { error: efErr } = await supabase
+        .from('qb_courses')
+        .update({ exam_format: examFormat })
+        .eq('id', req.params.id);
+      if (efErr) throw new Error(efErr.message);
+    }
 
     const guidelines = await generateGuidelines(courseName, structure, examFormat);
 
@@ -364,9 +328,9 @@ coursesRouter.post('/:id/guidelines', async (req, res, next) => {
 // Refine guidelines via chat
 coursesRouter.put('/:id/guidelines', async (req, res, next) => {
   try {
-    const { message } = req.body;
-    if (!message) {
-      res.status(400).json({ error: 'Message is required' });
+    const { message, patch } = req.body;
+    if (!message && !patch) {
+      res.status(400).json({ error: 'Message or patch is required' });
       return;
     }
 
@@ -379,6 +343,29 @@ coursesRouter.put('/:id/guidelines', async (req, res, next) => {
     if (fetchError) throw new Error(fetchError.message);
 
     const currentGuidelines = (course.generation_guidelines || {}) as Record<string, unknown>;
+
+    // A direct field patch — correcting the exam length, say. Deterministic: no LLM call,
+    // no cost, and no chance of the refine model rewriting unrelated sections. The size
+    // reconciler then rescales the subject and format counts onto the new total.
+    if (patch && typeof patch === 'object') {
+      // The structure supplies subject -> exam, so editing one exam's total rescales only
+      // that exam's subjects rather than redistributing across every exam in the course.
+      const { structure: scopedStructure } = scopeCourseToExam(course);
+      const next = reconcileExamSizeSelf(
+        { ...currentGuidelines, ...(patch as Record<string, unknown>) },
+        scopedStructure
+      );
+      const { data, error } = await supabase
+        .from('qb_courses')
+        .update({ generation_guidelines: next })
+        .eq('id', req.params.id)
+        .select()
+        .single();
+      if (error) throw new Error(error.message);
+      const total = Number(next.total_questions) || 0;
+      res.json({ course: data, chat_response: total ? `Exam size set to ${total} questions.` : 'Guidelines updated.' });
+      return;
+    }
     const result = await refineGuidelines(currentGuidelines, message, course.name as string);
 
     if (result.updated_guidelines) {

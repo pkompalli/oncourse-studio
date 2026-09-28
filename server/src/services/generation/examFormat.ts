@@ -1,6 +1,7 @@
 import { orCall, MODELS } from '../llm/openrouter.js';
 import { supabase } from '../../db/supabase.js';
-import { resolveFormat, resolveQuestionType } from './formatContracts.js';
+import { resolveFormat, resolveQuestionType, canonicalizeFormatSlug } from './formatContracts.js';
+import { rescaleToTotal } from './examSize.js';
 
 /**
  * MODULE 2: Exam Format Analyzer
@@ -335,16 +336,26 @@ async function ensureFormatsExist(questionTypes: QuestionTypeInfo[]): Promise<vo
       const display = buildDisplayForType(qt);
       const promptGuide = buildPromptGuideForType(qt);
 
-      await supabase.from('qb_question_formats').insert({
+      // `source` is the real column ('builtin' | 'user_defined' | 'ai_discovered'), and
+      // `example` is NOT NULL DEFAULT '{}' — 003_flexible_question_formats.sql:24,27. This
+      // insert named `is_builtin` and passed example: null, so it had ALWAYS failed: not one
+      // discovered format was ever registered, and getFormatId then fell back to mcq_single's
+      // id for every task-based simulation in the CPA bank. The error was never surfaced
+      // because the result was not checked.
+      const { error: insErr } = await supabase.from('qb_question_formats').insert({
         slug: qt.slug,
         name: qt.name,
         description: qt.description,
         schema,
-        example: null,
+        example: {},
         display,
         prompt_guide: promptGuide,
-        is_builtin: false,
+        source: 'ai_discovered',
       });
+      if (insErr) {
+        console.warn(`[examFormat] could not register format "${qt.slug}" — ${insErr.message}`);
+        continue;
+      }
       console.log(`[examFormat] Auto-created format registry entry: ${qt.slug} (${qt.name})`);
     }
   }
@@ -592,7 +603,8 @@ RULES:
  */
 export async function fetchMockExamSpecs(
   courseName: string,
-  subjects: string[]
+  subjects: string[],
+  formats: Array<{ slug?: string; name?: string }> = []
 ): Promise<Record<string, unknown>> {
   const subjectsJson = JSON.stringify(subjects.slice(0, 30));
 
@@ -601,6 +613,24 @@ export async function fetchMockExamSpecs(
   const qTemplate = qTemplateLines.join(',\n');
   const imgTemplateLines = subjects.map((s) => `        "${s}": <integer>`);
   const imgTemplate = imgTemplateLines.join(',\n');
+
+  // Per-format ITEM counts. A real exam is specified in items, and percentages cannot
+  // express it: CPA AUD is 78 MCQs + 7 simulations, where MCQs are 91.8% of the items
+  // but 50% of the score. Ask for the counts directly, keyed by the slugs the analysis
+  // already resolved, so nothing downstream has to infer them from a share.
+  const fmtSlugs = formats.map((f) => resolveQuestionType(f as Record<string, unknown>)).filter(Boolean);
+  const uniqueFmts = [...new Set(fmtSlugs)];
+  const fmtTemplate = uniqueFmts.map((s) => `        "${s}": <integer>`).join(',\n');
+  const fmtBlock = uniqueFmts.length > 0
+    ? `    "format_question_counts": {\n${fmtTemplate}\n    },\n`
+    : '';
+  const fmtRule = uniqueFmts.length > 0
+    ? `\n- format_question_counts: the number of ITEMS of each format in one sitting — the real\n` +
+      `  count, NOT a percentage and NOT a share of the score. Use the EXACT format keys shown\n` +
+      `  above. The values MUST sum to total_questions. For a grouped format (a case study,\n` +
+      `  passage set or task-based simulation) count each GROUPED ITEM once, not its\n` +
+      `  sub-questions — e.g. a CPA section with 7 simulations is 7 here.`
+    : '';
 
   const prompt = `You are an expert on official exam blueprints and question patterns.
 
@@ -619,7 +649,7 @@ Return EXACTLY this JSON, filling in all <...> placeholders:
     "subject_question_counts": {
 ${qTemplate}
     },
-    "subject_image_pct": {
+${fmtBlock}    "subject_image_pct": {
 ${imgTemplate}
     },
     "exam_notes": "<one or two sentences on format/pattern>"
@@ -628,7 +658,7 @@ ${imgTemplate}
 RULES:
 - subject_question_counts: distribute total_questions across the given subjects based on the
   official exam blueprint. Use the EXACT subject keys shown above — do NOT rename them.
-  Every subject MUST have at least 1 question. The values MUST sum to total_questions.
+  Every subject MUST have at least 1 question. The values MUST sum to total_questions.${fmtRule}
 - subject_image_pct: percentage of image-based questions for EACH subject based on this exam's
   pattern.
 - Output ONLY the JSON block.`;
@@ -674,26 +704,28 @@ RULES:
   }
 
   // Adjust counts to sum to totalQ
-  const currentSum = Object.values(subjectCounts).reduce((a, b) => a + b, 0);
-  if (currentSum !== totalQ && currentSum > 0) {
-    const factor = totalQ / currentSum;
-    const scaled: Record<string, number> = {};
-    for (const [s, c] of Object.entries(subjectCounts)) {
-      scaled[s] = Math.max(1, Math.round(c * factor));
+  Object.assign(subjectCounts, rescaleToTotal(subjectCounts, totalQ));
+
+  // Same treatment for the per-format item counts, so the two distributions agree with
+  // each other and with the total. Keys are canonicalized because the model answers in
+  // whatever vocabulary the prompt's slugs suggested.
+  const llmFmtCounts = (specs.format_question_counts as Record<string, number>) || {};
+  if (Object.keys(llmFmtCounts).length > 0) {
+    const byCanon: Record<string, number> = {};
+    for (const [slug, v] of Object.entries(llmFmtCounts)) {
+      const canon = canonicalizeFormatSlug(String(slug));
+      const n = Math.max(0, Math.round(Number(v) || 0));
+      if (!canon || n <= 0) continue;
+      byCanon[canon] = (byCanon[canon] || 0) + n;
     }
-    let diff = totalQ - Object.values(scaled).reduce((a, b) => a + b, 0);
-    const sortedSubjs = Object.keys(scaled).sort((a, b) => scaled[b] - scaled[a]);
-    for (const s of sortedSubjs) {
-      if (diff === 0) break;
-      if (diff > 0) {
-        scaled[s] += 1;
-        diff -= 1;
-      } else if (scaled[s] > 1) {
-        scaled[s] -= 1;
-        diff += 1;
-      }
+    specs.format_question_counts = Object.keys(byCanon).length > 0
+      ? rescaleToTotal(byCanon, totalQ)
+      : undefined;
+    if (specs.format_question_counts) {
+      const parts = Object.entries(specs.format_question_counts as Record<string, number>)
+        .map(([s, n]) => `${s}=${n}`).join(', ');
+      console.log(`  [ExamSpecs] ${courseName}: ${totalQ} questions (${parts})`);
     }
-    Object.assign(subjectCounts, scaled);
   }
 
   // Build image percentages per subject
@@ -722,4 +754,210 @@ RULES:
   specs.image_questions_total = totalImgQ;
 
   return specs;
+}
+
+/**
+ * Research EVERY exam of a multi-exam course in one call, sizing each against its own
+ * blueprint.
+ *
+ * "All exams" previously produced a single blended paper — CPA came back as 100 questions
+ * drawn from all six sections at once, which is a sittable exam in none of them. A real
+ * CPA sitting is one section: AUD is 78 MCQ + 7 TBS, ISC is 82 + 6.
+ *
+ * Returns the same shape fetchMockExamSpecs does — a flat subject_distribution plus a
+ * total — with exam_sizes alongside. Flat works because subject names are unique across a
+ * course's exams, so every existing consumer of subject_distribution is unaffected.
+ */
+async function fetchMockExamSpecsPerExam(
+  courseName: string,
+  examSubjects: Array<{ exam: string; subjects: string[] }>,
+  formats: Array<{ slug?: string; name?: string }>
+): Promise<Record<string, unknown>> {
+  const fmtSlugs = [...new Set(formats.map((f) => resolveQuestionType(f as Record<string, unknown>)).filter(Boolean))];
+  const fmtShape = fmtSlugs.length > 0
+    ? `,\n      "format_question_counts": { ${fmtSlugs.map((s) => `"${s}": <integer>`).join(', ')} }`
+    : '';
+
+  const examBlocks = examSubjects.map(({ exam, subjects }) =>
+    `  "${exam}": {\n      "total_questions": <integer>,\n      "time_minutes": <integer>,\n` +
+    `      "subject_question_counts": { ${subjects.map((s) => `"${s}": <integer>`).join(', ')} },\n` +
+    `      "subject_image_pct": { ${subjects.map((s) => `"${s}": <integer>`).join(', ')} }${fmtShape}\n    }`
+  ).join(',\n');
+
+  const prompt = `You are an expert on official exam blueprints and question patterns.
+
+COURSE: ${courseName}
+
+This course covers ${examSubjects.length} SEPARATE exams. A candidate sits ONE of them at a
+time, so each has its OWN paper: its own question count, duration and format mix. Size each
+one independently from its official blueprint — do NOT split a single total between them.
+
+Return EXACTLY this JSON, filling in all <...> placeholders:
+
+{
+${examBlocks}
+}
+
+RULES:
+- total_questions: the real number of items in ONE sitting of THAT exam.
+- subject_question_counts: distribute that exam's total across ONLY that exam's subjects.
+  Use the EXACT subject keys shown. Every subject at least 1. MUST sum to that exam's total.
+- subject_image_pct: percentage of image-based questions per subject for that exam.${fmtSlugs.length > 0 ? `
+- format_question_counts: the number of ITEMS of each format in that exam — the real count,
+  NOT a percentage and NOT a share of the score. Count a grouped item (case study, passage
+  set, task-based simulation) ONCE, not its sub-questions. MUST sum to that exam's total.` : ''}
+- Output ONLY the JSON block.`;
+
+  const response = await orCall(MODELS.STRUCTURE, '',
+    `Using your detailed knowledge of the official ${courseName} exam blueprints — the question count, ` +
+    `duration, subject weighting and format mix of EACH of its exams — answer this:\n\n${prompt}`,
+    { temperature: 0.2, maxTokens: 6000 });
+
+  let text = response.content.trim();
+  if (text.includes('```json')) text = text.split('```json')[1].split('```')[0].trim();
+  else if (text.includes('```')) text = text.split('```')[1].split('```')[0].trim();
+  const parsed = JSON.parse(text) as Record<string, Record<string, unknown>>;
+
+  const matchKey = (canonical: string, dict: Record<string, unknown>): unknown => {
+    if (canonical in dict) return dict[canonical];
+    const cl = canonical.toLowerCase().trim();
+    for (const [k, v] of Object.entries(dict)) if (k.toLowerCase().trim() === cl) return v;
+    return null;
+  };
+
+  const examSizes: Record<string, { total_questions: number; time_minutes?: number; format_question_counts?: Record<string, number> }> = {};
+  const subjectDist: Record<string, { questions: number; percentage: number; image_pct: number }> = {};
+  let grandTotal = 0;
+
+  for (const { exam, subjects } of examSubjects) {
+    const block = (matchKey(exam, parsed) as Record<string, unknown>) || {};
+    const total = Math.max(subjects.length, Math.round(Number(block.total_questions) || 0) || subjects.length * 5);
+
+    // Subjects: this exam's own total, never a share of the course-wide one.
+    const llmCounts = (block.subject_question_counts as Record<string, unknown>) || {};
+    const raw: Record<string, number> = {};
+    for (const s of subjects) {
+      const v = matchKey(s, llmCounts);
+      raw[s] = v !== null ? Math.max(1, Math.round(Number(v) || 0)) : 1;
+    }
+    const counts = rescaleToTotal(raw, total);
+
+    const llmImg = (block.subject_image_pct as Record<string, unknown>) || {};
+    for (const s of subjects) {
+      const v = matchKey(s, llmImg);
+      subjectDist[s] = {
+        questions: counts[s],
+        percentage: Math.round((counts[s] / total) * 1000) / 10,
+        image_pct: v !== null ? Math.round(Number(v) || 0) : 20,
+      };
+    }
+
+    // Formats: likewise scoped to this exam — ISC's 82/6 must not be averaged with AUD's 78/7.
+    const llmFmt = (block.format_question_counts as Record<string, unknown>) || {};
+    const byCanon: Record<string, number> = {};
+    for (const [slug, v] of Object.entries(llmFmt)) {
+      const canon = canonicalizeFormatSlug(String(slug));
+      const n = Math.max(0, Math.round(Number(v) || 0));
+      if (canon && n > 0) byCanon[canon] = (byCanon[canon] || 0) + n;
+    }
+    const fmtCounts = Object.keys(byCanon).length > 0 ? rescaleToTotal(byCanon, total) : undefined;
+
+    examSizes[exam] = {
+      total_questions: total,
+      time_minutes: Math.round(Number(block.time_minutes) || 0) || undefined,
+      format_question_counts: fmtCounts,
+    };
+    grandTotal += total;
+    console.log(`  [ExamSpecs] ${exam}: ${total} questions` +
+      (fmtCounts ? ` (${Object.entries(fmtCounts).map(([s, n]) => `${s}=${n}`).join(', ')})` : ''));
+  }
+
+  let totalImgQ = 0;
+  for (const d of Object.values(subjectDist)) totalImgQ += Math.round((d.questions * d.image_pct) / 100);
+
+  return {
+    exam_sizes: examSizes,
+    total_questions: grandTotal,
+    subject_distribution: subjectDist,
+    image_questions_total: totalImgQ,
+  };
+}
+
+/**
+ * Merge mock-exam specs (total questions, per-subject and per-format counts) into an
+ * analysed exam_format, mapping the per-subject image and exhibit percentages across.
+ *
+ * Extracted from the exam-format route so the guidelines route can reuse it verbatim to
+ * backfill a course analysed in topic-wise mode. That gate meant exam size was decided
+ * by the mode chosen at ANALYSIS time and never revisited: CFA, Bar Exam, LSAT, CPA and
+ * MCAT all reached mock-exam generation with no total at all, leaving the guidelines LLM
+ * to invent one.
+ */
+export async function withMockExamSpecs(
+  examFormat: Record<string, unknown>,
+  courseName: string,
+  structure: Record<string, unknown>
+): Promise<Record<string, unknown>> {
+  const allSubjects = (structure.subjects as Array<{ name: string; exam?: string }>) || [];
+  const subjects = allSubjects.map((s) => s.name);
+  const formats = (examFormat.question_types as Array<{ slug?: string; name?: string }>) || [];
+
+  // A course spanning several exams and scoped to none of them ("All exams") must size
+  // each exam against its own blueprint. Scoping to one exam narrows `structure.subjects`
+  // upstream in scopeCourseToExam, so this naturally falls back to the single-exam path.
+  const byExam = new Map<string, string[]>();
+  for (const s of allSubjects) {
+    const exam = String(s.exam || '').trim();
+    if (!exam || !s.name) continue;
+    const list = byExam.get(exam);
+    if (list) list.push(s.name); else byExam.set(exam, [s.name]);
+  }
+
+  const mockSpecs = byExam.size > 1
+    ? await fetchMockExamSpecsPerExam(courseName, [...byExam].map(([exam, subs]) => ({ exam, subjects: subs })), formats)
+    : await fetchMockExamSpecs(courseName, subjects, formats);
+  const combinedFormat: Record<string, unknown> = { ...examFormat, ...mockSpecs, exam_pattern: examFormat.exam_pattern };
+
+  // Override subject_distribution image percentages with Phase 2 data (more accurate)
+  const phase2ImgPct = (examFormat.image_percentage_by_subject as Record<string, number>) || {};
+  const subjectDist = (combinedFormat.subject_distribution as Record<string, { questions: number; percentage: number; image_pct: number }>) || {};
+  let totalImgQ = 0;
+  const matchPct = (subjName: string, table: Record<string, number>): number | null => {
+    if (subjName in table) return table[subjName];
+    const key = subjName.toLowerCase().trim();
+    for (const [k, v] of Object.entries(table)) {
+      if (k.toLowerCase().trim() === key || k.toLowerCase().includes(key) || key.includes(k.toLowerCase())) return v;
+    }
+    return null;
+  };
+  for (const [subjName, dist] of Object.entries(subjectDist)) {
+    const imgPct = matchPct(subjName, phase2ImgPct);
+    if (imgPct !== null) dist.image_pct = imgPct;
+    totalImgQ += Math.round((dist.questions * dist.image_pct) / 100);
+  }
+
+  // Map per-subject exhibit (markdown) percentages the same way.
+  const phase2ExhPct = (examFormat.exhibit_percentage_by_subject as Record<string, number>) || {};
+  for (const [subjName, dist] of Object.entries(subjectDist as Record<string, { exhibit_pct?: number }>)) {
+    const exhPct = matchPct(subjName, phase2ExhPct);
+    if (exhPct !== null) dist.exhibit_pct = exhPct;
+  }
+
+  // Enforce overall image target — scale up per-subject image_pct if weighted average is too low
+  const qf = (combinedFormat.question_format as Record<string, number>) || {};
+  const targetImgPct = qf.image_questions_percentage || 35;
+  const totalQ = Object.values(subjectDist).reduce((sum, d) => sum + d.questions, 0);
+  const targetImgQ = Math.round((totalQ * targetImgPct) / 100);
+  if (totalImgQ < targetImgQ && totalImgQ > 0) {
+    const scaleFactor = targetImgQ / totalImgQ;
+    totalImgQ = 0;
+    for (const dist of Object.values(subjectDist)) {
+      dist.image_pct = Math.min(90, Math.round(dist.image_pct * scaleFactor));
+      totalImgQ += Math.round((dist.questions * dist.image_pct) / 100);
+    }
+  }
+
+  combinedFormat.subject_distribution = subjectDist;
+  combinedFormat.image_questions_total = totalImgQ;
+  return combinedFormat;
 }
