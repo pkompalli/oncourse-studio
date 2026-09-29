@@ -26,3 +26,6 @@ server/dist
 *.njsproj
 *.sln
 *.sw?
+
+# Pre-repair DB snapshots written by one-off repair scripts
+server/backups/

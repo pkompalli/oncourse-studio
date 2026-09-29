@@ -37,6 +37,14 @@ const JOB = (process.argv.find((a) => a.startsWith('--job=')) || '').split('=')[
   || 'e2d9e0b5-87b8-44d0-b8d1-b9f6eb4cfa67';
 const ONLY_FORMAT = (process.argv.find((a) => a.startsWith('--format=')) || '').split('=')[1] || '';
 /**
+ * --subject="<name>" pins generation to one subject instead of spreading a gap over the
+ * exam's subjects biggest-first. Needed when the gap is not just a count but a HOLE in a
+ * particular subject: AUD's two Ethics simulations were a federal tax return task and a UCC
+ * secured transactions task, so retiring them leaves Ethics short while the default spread
+ * would refill the two largest AUD subjects and leave Ethics with none.
+ */
+const ONLY_SUBJECT = (process.argv.find((a) => a.startsWith('--subject=')) || '').split('=').slice(1).join('=') || '';
+/**
  * --regenerate=slug[,slug] retires every live row of those formats so the count gap rebuilds
  * them. For rows that are the right COUNT but the wrong SHAPE — Bar's six integrated sets were
  * all six uniform multiple-choice components where NextGen mixes short answer and uses a
@@ -202,9 +210,13 @@ async function main() {
     const subjects = g.exam
       ? Object.entries(examOfSubject).filter(([, e]) => e === g.exam).map(([s]) => s)
       : (hosts.length > 0 ? hosts : [...new Set(live.map((r) => r.subject))]);
-    const bySize = subjects
+    const bySize = (ONLY_SUBJECT ? subjects.filter((s) => s === ONLY_SUBJECT) : subjects)
       .map((s) => ({ s, n: live.filter((r) => r.subject === s).length }))
       .sort((a, b) => b.n - a.n);
+    if (ONLY_SUBJECT && bySize.length === 0) {
+      console.warn(`  --subject="${ONLY_SUBJECT}" matches no subject in ${g.exam} — skipping`);
+      continue;
+    }
     if (bySize.length === 0) { console.warn(`  ${g.exam}: no subjects found — skipping`); continue; }
 
     const per = new Map<string, number>();
