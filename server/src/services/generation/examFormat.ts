@@ -682,6 +682,13 @@ RULES:
 
   const specs = JSON.parse(text) as Record<string, unknown>;
   const totalQ = (specs.total_questions as number) || 200;
+  // Write the resolved total BACK. The default was only ever a local, used to distribute the
+  // per-subject counts, so an exam whose length the model declines to name as one integer — a
+  // variable-length adaptive exam like NCLEX-RN, correctly — was stored with total_questions
+  // null beside a subject_distribution summing to 200. The guidelines step then found no size on
+  // record and invented its own (201), so the bank declared a total its own distribution
+  // contradicted, in a number belonging to neither.
+  specs.total_questions = totalQ;
 
   // ── Extract LLM's per-subject question counts and image percentages ──
   const llmCounts = (specs.subject_question_counts as Record<string, number>) || {};

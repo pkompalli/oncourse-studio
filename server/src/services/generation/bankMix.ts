@@ -25,6 +25,12 @@ const STOPWORDS = new Set([
   'no', 'that', 'the', 'their', 'then', 'there', 'these', 'this', 'to', 'was', 'were', 'what',
   'when', 'which', 'who', 'will', 'with', 'would', 'year', 'years', 'client', 'other', 'under',
   'amount', 'amounts', 'reports', 'report', 'following', 'above', 'below', 'must', 'may', 'can',
+  // Directive vocabulary. Every simulation in a bank shares it, so leaving it in clusters
+  // questions on their response instructions rather than on what they ask.
+  'using', 'exhibit', 'exhibits', 'select', 'selects', 'complete', 'completes', 'marked',
+  'passage', 'passages', 'highlighted', 'review', 'determine', 'determines', 'calculate',
+  'calculates', 'enter', 'enters', 'schedule', 'assume', 'assuming', 'closest', 'most', 'least',
+  'appropriate', 'correct', 'best', 'likely',
 ]);
 
 /**
@@ -235,9 +241,12 @@ export async function bankMixForJob(jobId: string): Promise<MixFinding[]> {
       id: String(r.id),
       exam: String(r.tags?.exam || examOfSubject[r.subject] || 'unassigned'),
       subject: r.subject ? String(r.subject) : undefined,
-      // The prose that says what is being tested. For a grouped item the shared stimulus is
-      // what identifies the concept.
-      text: String(c.stem ?? c.question ?? c.scenario ?? c.case_narrative ?? c.vignette ?? ''),
+      // The prose that says what is being TESTED, which for a grouped item is the stimulus and
+      // not the directive. Reading `question` first clustered four simulations together on
+      // "using, exhibits, review, marked, passage, select" — their shared response instructions,
+      // identical across every document review in the bank and saying nothing about the subject.
+      // The stimulus comes first now, and the directive is only a fallback for items with none.
+      text: String(c.stem ?? c.case_narrative ?? c.vignette ?? c.scenario ?? c.question ?? ''),
     };
   }).filter((i) => i.text.length > 0);
 

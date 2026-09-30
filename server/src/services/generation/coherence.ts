@@ -344,6 +344,42 @@ const ROLE_FAMILIES: string[][] = [
   ['employee', 'worker'],
 ];
 
+/**
+ * Which coherence findings must stop a question being approved, and which are observations.
+ *
+ * Not every finding is a defect of the same kind, and treating them alike gets this wrong in both
+ * directions. A document review keyed so that EVERY passage is already correct scores full marks
+ * without being read and must not ship. One where NO passage is correct as written is weaker — a
+ * candidate still has to pick the right correction on every passage, they simply learn that one
+ * option is never the answer — and that was already reviewed once and accepted as not worth
+ * regenerating a sound item over. Blocking on it now would contradict that call and flag five
+ * questions nobody thinks are broken.
+ *
+ * Blocking therefore means: the learner cannot answer it, can answer it without reading it, or is
+ * shown something broken. Everything else is advisory.
+ */
+const ADVISORY_PATTERNS: RegExp[] = [
+  // Not exploitable: every passage still needs the right correction chosen.
+  /is never the answer in this task/,
+  // Confusing but answerable, and easy to trip on a legitimately new party.
+  /same role under two names/,
+  // Weak rather than broken — a thin span still has a right answer.
+  /close to a coin flip/,
+];
+
+/** True when this finding should prevent approval rather than merely be reported. */
+export function isBlocking(issue: string): boolean {
+  return !ADVISORY_PATTERNS.some((re) => re.test(issue));
+}
+
+/** Split findings into those that must stop approval and those that are observations. */
+export function partitionIssues(issues: string[]): { blocking: string[]; advisory: string[] } {
+  const blocking: string[] = [];
+  const advisory: string[] = [];
+  for (const i of issues) (isBlocking(i) ? blocking : advisory).push(i);
+  return { blocking, advisory };
+}
+
 /** Present value of an ordinary annuity of 1 for n periods at rate r. */
 const pvAnnuity = (n: number, r: number) => (1 - Math.pow(1 + r, -n)) / r;
 
@@ -427,13 +463,18 @@ function malformedQuestionIssues(prompt: string, optionTexts: string[]): string[
   // the question — "A merchant seller signed… Which of the following is correct?" — so testing
   // the whole thing flags every one of them.
   const t = (whole.split(/(?<=[.?])\s+/).pop() || whole).trim();
-  const yesNo = optionTexts.filter((o) => /^\s*(?:[A-D][.)]\s*)?(yes|no)\b/i.test(o)).length;
+  // "Yes" or "No" must be the whole answer, not the first word of one. Matching a bare \bno\b
+  // counted "No later than 40 days after fiscal year-end" as a no, so a sound 10-K deadline
+  // question looked like a malformed yes/no item.
+  const yesNo = optionTexts.filter((o) => /^\s*(?:[A-D][.)]\s*)?(yes|no)\s*(?:[,.;:—–-]|$)/i.test(o)).length;
   if (yesNo < 2) return [];
   // A real question often opens with a scoping clause — "Under Rule 15(c)(1)(C), does the
   // amended claim…" — so drop one leading clause before testing, or every such question is
   // flagged.
   const core = t.replace(/^(?:[^,?]{0,80}),\s*/, '');
-  const interrogative = /^(does|do|did|is|are|was|were|has|have|had|can|could|may|might|must|should|would|will|which|what|why|how|who|whom|whose)\b/i
+  // "when" and "where" were missing from this list, which is the other half of why that 10-K
+  // question was flagged: "when is the registrant's annual report due?" read as a statement.
+  const interrogative = /^(does|do|did|is|are|was|were|has|have|had|can|could|may|might|must|should|would|will|shall|which|what|why|how|who|whom|whose|when|where|whether)\b/i
     .test(core);
   if (interrogative) return [];
   return [`reads as a statement but ends in a question mark, and its options are yes/no: "${t.slice(0, 70)}…"`];

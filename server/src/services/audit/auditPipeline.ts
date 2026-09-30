@@ -9,6 +9,7 @@
 import { supabase } from '../../db/supabase.js';
 import { fetchAllRows } from '../../db/pagination.js';
 import { bankMixForJob } from '../generation/bankMix.js';
+import { coherenceIssues, partitionIssues } from '../generation/coherence.js';
 import { orCall, MODELS } from '../llm/openrouter.js';
 import type { ContentPart } from '../llm/openrouter.js';
 import { formatQuestionsForReviewWithImages, extractJsonArray, gradabilityIssues } from '../review/shared.js';
@@ -318,7 +319,27 @@ async function runAuditPipeline(jobId: string): Promise<void> {
           ? Math.round(((vScore + aScore + auditScore) / 3) * 10) / 10
           : auditScore;
 
-        const status = auditScore >= 7 ? 'approved' : 'flagged';
+        // A deterministic finding must not be overridable by a holistic opinion.
+        //
+        // The validator already caps the score at 3 and marks a self-contradictory question NOT
+        // COMPLIANT, but status is decided HERE from the auditor's own score, so six questions
+        // capped at 3 were approved at 8 and 9 anyway and reached the bank. If the fixer could
+        // not resolve the finding, the auditor liking the question is not a reason to ship it.
+        //
+        // Only blocking findings count: a document review where no passage is correct as written
+        // is reported but does not stop approval, because a candidate still has to choose the
+        // right correction on every passage. See partitionIssues for where that line sits.
+        const { blocking: cohBlocking } = partitionIssues(coherenceIssues(q));
+        if (cohBlocking.length) {
+          result.issues = [
+            ...((result.issues as string[]) || []),
+            ...cohBlocking.map((s) => `NOT COMPLIANT — coherence: ${s}`),
+          ];
+        }
+        const status = auditScore >= 7 && cohBlocking.length === 0 ? 'approved' : 'flagged';
+        if (auditScore >= 7 && cohBlocking.length) {
+          console.log(`    [audit] Q${qStart + i} scored ${auditScore} but flagged: ${cohBlocking[0].slice(0, 90)}`);
+        }
 
         const trail = Array.isArray(q.audit_trail) ? [...(q.audit_trail as unknown[])] : [];
         trail.push({
