@@ -65,14 +65,19 @@ const BLUEPRINTS: Record<string, Blueprint> = {
     id: '42c85248-7209-4bfe-9f94-ea128e3ab598',
     label: 'MCAT',
     rows: {
-      passage_set: 37,       // passages, at five items each, to land the real 185
+      // 37 passages already existed carrying 150 questions, because the generator answered a
+      // "4–6 sub-questions" range at its floor 35 times out of 37. raisePassageFloor.ts raised
+      // that floor in the PROSE the generator reads while leaving schema_params.sub_question_min
+      // at 4 — see its header for why both could not move — and the 7 further passages needed to
+      // reach 185 questions each came back with 5. 150 + 35 = 185.
+      passage_set: 44,
       mcq_single: 45,        // discrete items: 15 in each science section, none in CARS
     },
-    // The real exam runs about 39 passages of variable length — CARS passages are longer than
-    // the science ones — averaging 4.7 questions each to make 185. Items per row has to be a
-    // whole number, so 37 passages at 5 hits 185 exactly. Choosing to be right about the item
-    // count and two passages out, rather than right about passages and ten items over: a
-    // candidate notices a paper that is the wrong length.
+    // The real exam runs about 39 passages of variable length — CARS passages are longer than the
+    // science ones — averaging 4.7 questions each to make 185. This bank gets there with 44
+    // because its first 37 are thin. Being right about the question count and a few passages over
+    // beats being right about passages and 36 questions short: a candidate notices a paper that
+    // is the wrong length, not one with a few extra passages.
     itemsPerGroup: { passage_set: 5 },
     source: 'Four sections totalling 230 questions — Chem/Phys 59, CARS 53, Bio/Biochem 59, '
       + 'Psych/Soc 59. About 185 are passage-based over 39 passages; the other 45 are discrete. '
@@ -134,7 +139,12 @@ const changes: string[] = [];
 
 console.log(`course: ${(data as any).name} — ${BP.label}`);
 console.log(`source: ${BP.source}`);
-console.log(`blueprint: ${TOTAL_ROWS} rows = ${TOTAL_ITEMS} scored items`);
+// TOTAL_ITEMS is what the paper holds IF every grouped row carries itemsPerGroup. It is a target,
+// not a measurement: MCAT's first 37 passages carry 4 questions each because the generator
+// answered a 4-6 range at its floor, so its real count is 230 against the 265 this arithmetic
+// implies. Only the ROW total is enforced below — that is what topUpJobFormats acts on — so the
+// item figure is labelled as the intent it is.
+console.log(`blueprint: ${TOTAL_ROWS} rows, ${TOTAL_ITEMS} scored items if every grouped row is full`);
 console.log(`  ${Object.entries(FORMAT_ROWS).map(([f, n]) => `${f}:${n}`).join('  ')}`);
 console.log(`\nbefore — exam_format.total=${ef.total_questions} guidelines.total=${gl.total_questions}`);
 console.log(`         guidelines.format_distribution=${JSON.stringify((gl.format_distribution || []).map((f: any) => `${f.format}:${f.count}`))}`);
@@ -207,7 +217,7 @@ const fcSum = Object.values((ef.format_question_counts || {}) as Record<string, 
 console.log(`\nafter  — total=${ef.total_questions}/${gl.total_questions}  subjectDist=${efSum}/${glSum}  formatCounts=${fcSum}  formatDist=${fdSum}`);
 const ok = [ef.total_questions, gl.total_questions, efSum, glSum, fcSum, fdSum].every((n) => n === TOTAL_ROWS);
 console.log(ok
-  ? `consistent: every total, distribution and format count agrees on ${TOTAL_ROWS} rows (${TOTAL_ITEMS} scored items)`
+  ? `consistent: every total, distribution and format count agrees on ${TOTAL_ROWS} rows`
   : 'INCONSISTENT — not writing');
 if (!ok) process.exit(1);
 
