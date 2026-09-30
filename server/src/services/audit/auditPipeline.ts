@@ -3,7 +3,8 @@
  *
  * Single-pass GPT-5.4 scoring of reviewed questions.
  * Score >= 7 → approved, < 7 → flagged.
- * Combined score = (validator_score + adversarial_score) / 2, capped at 10.
+ * The three stage scores are kept separately: each describes the version of the question
+ * that stage actually saw, and averaging them mixes pre- and post-repair states.
  */
 
 import { supabase } from '../../db/supabase.js';
@@ -138,7 +139,7 @@ asked and which fields moved. For EACH requested change, decide:
   • "not_applied"         the question still has the defect the change describes
   • "not_needed"          the change rested on a misreading; the question was already right
 
-Read the change, then read the question as it now stands, and say which. Two rules:
+Read the change, then read the question as it now stands, and say which. Three rules:
 
   1. "fields that moved: NONE" means the fixer returned the question unchanged. Every change it
      was asked to make is "not_applied" unless the question plainly never had the defect.
@@ -158,7 +159,7 @@ You will receive questions that have already passed validator and adversarial re
 Questions may be in ANY format: MCQ, Select All That Apply (SATA), ordered response, fill-in-the-blank, hot spot, matrix grid, extended matching, case study, etc.
 ${hasRepairs
   ? 'Your job has two parts: confirm that the repairs asked of earlier stages were actually made and made correctly, and then score the question.'
-  : 'Your job is a FINAL holistic quality check — one combined score per question.'}${verification}
+  : 'Your job is a FINAL holistic quality check — one score per question.'}${verification}
 
 Score each question 1-10 based on:
 1. Factual accuracy of the correct answer and explanation
@@ -394,12 +395,18 @@ async function runAuditPipeline(jobId: string): Promise<void> {
           console.log(`    [audit] Q${qStart + i} repair verification failed: ${notes[0].slice(0, 110)}`);
         }
 
-        // Combined score: average of validator + adversarial + audit, or just audit if others missing
-        const vScore = (q.validator_score as number) || 0;
-        const aScore = (q.adversarial_score as number) || 0;
-        const combinedScore = vScore && aScore
-          ? Math.round(((vScore + aScore + auditScore) / 3) * 10) / 10
-          : auditScore;
+        // There is deliberately no combined score.
+        //
+        // Averaging validator, adversarial and audit averaged three scores of three DIFFERENT
+        // versions of the question. validator_score is written once, before the fixer runs, and
+        // never re-scored; adversarial_score is taken after the validator's repair but before
+        // its own; only the audit score describes the question as it now stands. So a question
+        // that was found wanting, repaired correctly and is now sound carried a mean dragged
+        // down by a defect that no longer existed — repaired questions averaged 7.32 at the
+        // validator and 8.82 at audit, within 0.13 of questions that never needed a repair.
+        //
+        // Nothing gated on it: status has always been decided by the audit score below. The
+        // three scores are kept separately, each meaning what it says about the version it saw.
 
         // A deterministic finding must not be overridable by a holistic opinion.
         //
@@ -427,7 +434,6 @@ async function runAuditPipeline(jobId: string): Promise<void> {
         trail.push({
           phase: 'audit',
           score: auditScore,
-          combined_score: combinedScore,
           reason: (result.reason as string) || '',
           issues: (result.issues as string[]) || [],
           timestamp: new Date().toISOString(),

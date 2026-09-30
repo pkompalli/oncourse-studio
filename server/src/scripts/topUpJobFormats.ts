@@ -64,7 +64,7 @@ const LIMIT = Number((process.argv.find((a) => a.startsWith('--limit=')) || '').
 /** Extra instruction appended to the generation prompt for the rebuilt rows. */
 const SHAPE = (process.argv.find((a) => a.startsWith('--shape=')) || '').split('=').slice(1).join('=') || '';
 
-interface Row { id: string; subject: string; topic?: string | null; status: string; content?: Record<string, unknown> | null; tags: Record<string, unknown> | null; quality_score: number | null; combined_score: number | null; validator_score: number | null }
+interface Row { id: string; subject: string; topic?: string | null; status: string; content?: Record<string, unknown> | null; tags: Record<string, unknown> | null; quality_score: number | null; validator_score: number | null }
 
 async function main() {
   const { data: job, error: jobErr } = await supabase.from('qb_jobs').select('*').eq('id', JOB).single();
@@ -98,7 +98,7 @@ async function main() {
   }
 
   const rows = await fetchAllRows<Row>((from, to) =>
-    supabase.from('qb_questions').select('id,subject,topic,status,content,tags,quality_score,combined_score,validator_score')
+    supabase.from('qb_questions').select('id,subject,topic,status,content,tags,quality_score,validator_score')
       .eq('job_id', JOB).is('replaced_by_id', null).range(from, to)
   );
   const live = rows.filter((r) => r.status !== 'replaced');
@@ -152,7 +152,7 @@ async function main() {
     const all = live.filter((r) => fmtOf(r) === canon && !thinById.has(r.id));
     // Weakest first, so a partial rebuild replaces the least good ones.
     const rows = LIMIT > 0
-      ? [...all].sort((a, b) => ((a.combined_score ?? a.quality_score ?? 0) - (b.combined_score ?? b.quality_score ?? 0))).slice(0, LIMIT)
+      ? [...all].sort((a, b) => ((a.quality_score ?? 0) - (b.quality_score ?? 0))).slice(0, LIMIT)
       : all;
     for (const r of rows) thinById.add(r.id);
     toRetire.push(...rows);
@@ -178,7 +178,9 @@ async function main() {
       } else if (delta < 0) {
         // Retire the weakest first, so the section keeps its best questions.
         const worst = [...have].sort((a, b) =>
-          ((a.combined_score ?? a.quality_score ?? 0) - (b.combined_score ?? b.quality_score ?? 0))
+          // quality_score, not a cross-stage average: it is the only score taken of the
+          // question as it now stands, so it is the only one that says which are worst NOW.
+          ((a.quality_score ?? 0) - (b.quality_score ?? 0))
         ).slice(0, -delta);
         toRetire.push(...worst);
         console.log(`      ${slug.padEnd(24)} ${have.length}/${target}   retire ${-delta} (weakest)`);

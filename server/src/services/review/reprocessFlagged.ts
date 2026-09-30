@@ -661,17 +661,12 @@ async function runReprocessPipeline(jobId: string): Promise<void> {
         const auditScore = rawScore as number;
         const newStatus = auditScore >= 7 ? 'approved' : 'flagged';
 
-        const vScore = (q.validator_score as number) || 0;
-        const aScore = (q.adversarial_score as number) || 0;
-        const combinedScore = vScore && aScore
-          ? Math.round(((vScore + aScore + auditScore) / 3) * 10) / 10
-          : auditScore;
-
+        // No combined score — see auditPipeline.ts. Averaging the three stages mixed scores of
+        // three different versions of the question, and nothing ever gated on the result.
         const trail = Array.isArray(q.audit_trail) ? [...(q.audit_trail as unknown[])] : [];
         trail.push({
           phase: 'reprocess_audit',
           score: auditScore,
-          combined_score: combinedScore,
           reason: (result.reason as string) || '',
           issues: (result.issues as string[]) || [],
           timestamp: new Date().toISOString(),
@@ -679,7 +674,6 @@ async function runReprocessPipeline(jobId: string): Promise<void> {
 
         await supabase.from('qb_questions').update({
           quality_score: auditScore,
-          combined_score: combinedScore,
           status: newStatus,
           audit_trail: trail,
         }).eq('id', q.id);
