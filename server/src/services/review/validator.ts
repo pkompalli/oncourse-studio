@@ -124,6 +124,25 @@ Output ONLY the JSON array. No preamble, no trailing text.`;
       if (expl.min_sentences) rules.push(`Min ${expl.min_sentences} sentences`);
       if (rules.length > 0) gParts.push(`Explanation: ${rules.join(', ')}`);
     }
+    // The declared targets for the whole set. A batch of ten cannot audit a distribution — that
+    // is done deterministically over the finished bank (generation/distribution.ts) — but the
+    // reviewer still needs them to judge whether an individual question's assigned Bloom level
+    // or difficulty is plausible, and to apply the course's OWN key-balance rule rather than a
+    // hardcoded one. CPA and NCLEX both cap a single key at 30%; check 9 below assumed 40%.
+    const pctLine = (label: string, v: unknown): string | null => {
+      if (!v || typeof v !== 'object') return null;
+      const entries = Object.entries(v as Record<string, unknown>)
+        .filter(([, n]) => Number(n) > 0)
+        .map(([k, n]) => `${k} ${n}%`);
+      return entries.length ? `${label}: ${entries.join(', ')}` : null;
+    };
+    const bloomTarget = pctLine("Bloom's levels across the whole set", guidelines.blooms_distribution);
+    const diffTarget = pctLine('Difficulty across the whole set', guidelines.difficulty_distribution);
+    if (bloomTarget) gParts.push(bloomTarget);
+    if (diffTarget) gParts.push(diffTarget);
+    const keyBalance = String(guidelines.answer_key_balance ?? '').trim();
+    if (keyBalance) gParts.push(`Answer-key balance (THIS course's rule — apply it, not a generic one):\n  ${keyBalance}`);
+
     const anti = (guidelines.anti_patterns as string[]) || [];
     if (anti.length > 0) gParts.push(`Anti-patterns to flag:\n${anti.slice(0, GUIDELINE_RULE_CAP).map(a => `  • ${a}`).join('\n')}`);
     const coverage = (guidelines.coverage_rules as string[]) || [];
@@ -280,13 +299,15 @@ For EACH question ask:
    b. Does the option count match (e.g., 4 options vs. 5)?
    c. Are the distractors structured as the exam expects (homogeneous length, parallel construction)?
    d. Is the Bloom's level a valid normalized value (2_understand, 3_apply, 4_analyze, 5_evaluate)? Flag non-standard labels like NCJMM_*, raw text labels, etc.
-7. DIFFICULTY FIELD:
-   a. Does the question have a difficulty field with value "easy", "medium", or "hard"?
-   b. If missing or invalid → flag as format_compliance_issues.
-   c. Is the assigned difficulty reasonable for the question's complexity?${formatSpecificChecks}
+7. DIFFICULTY AND BLOOM — is each question labelled with a level it actually sits at?
+   a. Does the question carry a difficulty of "easy", "medium" or "hard", and a normalized Bloom level? If either is missing or invalid → flag as format_compliance_issues.
+   b. Is the assigned difficulty right for what the question demands? A one-step recall keyed "hard", or a multi-step derivation keyed "easy", is mislabelled — say which it should be.
+   c. Is the assigned Bloom level right for the cognitive work required? Recalling a threshold is not applying one, and applying a rule is not analysing a case. Where the whole-set targets are given above, a question labelled at a level it does not reach makes that target meaningless — so judge the label against the question, not against the target.${formatSpecificChecks}
 9. ANSWER KEY DIVERSITY — check the correct answer keys across the batch:
    a. Note the correct answer letter (A/B/C/D/E) for each question.
-   b. If more than 40% of questions in this batch share the same correct answer key, flag the over-represented ones and request the answer key be changed (with appropriate content adjustment).
+   b. Apply the course's own answer-key rule where one is given above. Where none is, flag if more than 40% of questions in this batch share the same key. Flag the over-represented ones and request the key be changed, with the content adjustment that makes the new key correct — never relabel an option without moving the content.
+   c. Flag any run of consecutive questions in this batch sharing one key that exceeds the course's stated run limit.
+   d. A batch is a tenth of the bank, so do NOT infer a whole-set imbalance from it. Report what this batch shows and nothing more.
 10. IMAGE — relevance, and whether it shows what the question needs:
    a. Image absent but the stem explicitly references it (e.g. "shown below", "image 1", "radiograph shown") → score ≤ 4 and set needs_revision true. The question is UNUSABLE without its image regardless of how good the text is.
    b. Image present but wrong modality or clearly irrelevant → flag and suggest replacement.

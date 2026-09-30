@@ -22,6 +22,7 @@ import { fixQuestion } from './fixer.js';
 import { saveJobSnapshots } from '../snapshots.js';
 import { regenerateQuestionImage, isImageGenerationAvailable } from '../images/imageGeneration.js';
 import { startTracking, getStepTokens } from '../llm/tokenTracker.js';
+import { distributionForJob } from '../generation/distribution.js';
 
 const REVIEW_BATCH_SIZE = 10;
 const MAX_CONCURRENT_BATCHES = 8;
@@ -395,6 +396,38 @@ async function runValidatorPhase(
   });
 
   await runWithConcurrency(batchTasks, MAX_CONCURRENT_BATCHES);
+
+  // ── Blueprint conformance, once the whole bank has been seen ──
+  //
+  // Every per-question check runs inside a batch of ten and is structurally unable to see a
+  // distribution. A question tagged to the right subject at the right Bloom level is beyond
+  // reproach on its own and still wrong if its exam already holds twice as many like it as the
+  // blueprint asks for. This runs after the batches because it is the first moment the finished
+  // bank exists.
+  //
+  // Reported, never routed to the fixer: no edit to any single question closes a distribution
+  // gap. The remedy is to generate what is missing or retire what is surplus, which is what
+  // topUpJobFormats.ts does with a human deciding.
+  try {
+    const findings = await distributionForJob(jobId);
+    if (findings.length) {
+      console.log(`[Blueprint] job ${jobId.slice(0, 8)} — ${findings.length} distribution gap(s):`);
+      for (const f of findings.slice(0, 20)) console.log(`  [Blueprint] ${f.exam} ${f.dimension}: ${f.detail}`);
+      setStep(jobId, `Blueprint: ${findings.length} distribution gap(s) — ${findings.slice(0, 2).map((f) => f.detail).join('; ')}`);
+      const { data: current } = await supabase.from('qb_jobs').select('progress').eq('id', jobId).single();
+      await supabase.from('qb_jobs').update({
+        progress: {
+          ...((current?.progress as Record<string, unknown>) || {}),
+          distribution_findings: findings.slice(0, 40),
+        },
+      }).eq('id', jobId);
+    } else {
+      console.log(`[Blueprint] job ${jobId.slice(0, 8)} — matches its blueprint within tolerance`);
+    }
+  } catch (e) {
+    // A reporting pass must never take the review down with it.
+    console.warn(`[Blueprint] distribution check failed: ${e instanceof Error ? e.message : e}`);
+  }
 
   setStep(jobId, `Validator complete: ${totalReviewed} reviewed, ${totalFixed} fixed`);
   return { reviewed: totalReviewed, fixed: totalFixed };
