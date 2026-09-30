@@ -22,18 +22,27 @@
  *
  * 4. REG accord-and-satisfaction MCQ keyed to the wrong option. See MISKEYS below.
  *
- * NOT fixed here, because neither is a data defect this script can settle:
- *   - Journal-entry grids (BAR 55/56, REG 76, TCP 72) score per row id, so a correct entry
- *     whose lines sit in another order loses the moved lines. The grader is not in this
- *     repo — QuestionRenderer only displays the key — so this needs either a statement of
- *     the required order in the task or an order-insensitive grader downstream.
- *   - AUD 83 and 84 are whole tasks from the wrong exam (a Form 1040 task and a UCC secured
- *     transactions task filed under AUD Ethics). Replacing them means generating, not editing.
+ * 5. JOURNAL-ENTRY LINE ORDER (BAR 55/56, REG 76, TCP 72). The grids score per row id, so a
+ *    correct entry whose lines sit in another order loses the moved lines — one scored 2 of 30.
+ *    The grader is downstream of this repo (QuestionRenderer only displays the key), so the
+ *    fix available here is to state the order the key uses. An order-insensitive grader would
+ *    be the better fix and still belongs on whoever owns the delivery platform.
+ *
+ * Classes 1-3 and 5 have since moved into services/generation/coherence.ts, which generation
+ * runs on its own output — so a new question never acquires them and this script is history.
+ * What stays here is what only applies to THIS bank: the mis-key, the per-question text fixes,
+ * and the one distractor that had to be derived from a specific exhibit.
+ *
+ * Three questions could not be edited into correctness and were retired and regenerated
+ * instead (AUD 83 and 84 were whole tasks from another exam; ISC 86 keyed all eight passages
+ * "No change is required", so it scored 8/8 without being read). That was done with
+ * topUpJobFormats --subject, not here.
  */
 import 'dotenv/config';
 import { supabase } from '../db/supabase.js';
 import { fetchAllRows } from '../db/pagination.js';
 import { subjectExamMap } from '../services/generation/examSize.js';
+import { repairCoherence, JOURNAL_ORDER_RULE } from '../services/generation/coherence.js';
 
 const APPLY = process.argv.includes('--apply');
 
@@ -65,26 +74,7 @@ const MISKEYS: Record<string, { from: string; to: string; explanation: string }>
   },
 };
 
-/** Learner-facing wording for the generator's internal type names. */
-const NAME_FIXES: Array<[RegExp, string]> = [
-  [/For each mcq_single question, select one answer\./g,
-   'Where a question asks for a single answer, select one option.'],
-  [/For each mcq_multi question, select exactly two answers/g,
-   'Where a question asks you to select two, select exactly two options'],
-  [/For each short_answer question, respond/g,
-   'For each short-answer question, respond'],
-  [/Answer each short_answer question/g,
-   'Answer each short-answer question'],
-];
 
-/** Instructions that remain true regardless of field inventory, kept per question. */
-const KEEP_EXTRA: Record<string, string> = {
-  'CPA/AUD-81': 'Base each response directly on the exhibits rather than on a prior response.',
-  'CPA/FAR-6': 'Amounts are stated in whole thousands of U.S. dollars.',
-  // The only rounding rule in the set that its sub-question does not already state, and it
-  // changes the answer: each amount is rounded before it feeds the next step.
-  'CPA/FAR-57': 'Round each calculated amount to the nearest whole dollar before using it in the next step.',
-};
 
 /**
  * Exact-string edits to learner-visible text, applied only where the string still matches.
@@ -119,13 +109,9 @@ const TEXT_FIXES: Record<string, Array<{ field: string; from: string; to: string
 
 /**
  * Journal-entry grids score per row id, so a correct entry whose lines sit in another order
- * loses the moved lines. The grader is downstream of this repo, so the fix here is to state
- * the order the key uses. Verified against all four: every entry lists debits before credits,
- * and within each side the accounts follow the order of the account list.
+ * loses the moved lines. The rule itself now lives in services/generation/coherence.ts, so
+ * generation states it on every new journal-entry task; this list is the four that predate it.
  */
-const JOURNAL_ORDER_RULE =
-  'Within each entry, enter all debit lines first, followed by all credit lines, taking the ' +
-  'accounts on each side in the order they appear in the account list.';
 const NEEDS_ORDER_RULE = ['CPA/BAR-55', 'CPA/BAR-56', 'CPA/REG-76', 'CPA/TCP-72'];
 
 /**
@@ -141,106 +127,6 @@ const NEEDS_ORDER_RULE = ['CPA/BAR-55', 'CPA/BAR-56', 'CPA/REG-76', 'CPA/TCP-72'
 const ADD_SPAN_OPTIONS: Record<string, Array<{ span: string; insertAt: number; option: string }>> = {
   'CPA/BAR-52': [{ span: '4', insertAt: 0, option: '$7,760' }],
 };
-
-type Kind = 'spans' | 'journal' | 'select' | 'numeric' | 'freetext';
-
-/** What controls does this task actually put on the screen? */
-function fieldKinds(content: any): Set<Kind> {
-  const kinds = new Set<Kind>();
-  for (const s of content.sub_questions || []) {
-    if (Array.isArray(s.spans) && s.spans.length) kinds.add('spans');
-    if (s.grid_kind === 'journal_entry') { kinds.add('journal'); continue; }
-    const cols = s.columns || [];
-    if (cols.some((c: any) => c.input === 'number')) kinds.add('numeric');
-    if (cols.some((c: any) => c.input === 'select')) kinds.add('select');
-    if ((s.format_type || s.question_type) === 'applied_research') kinds.add('freetext');
-  }
-  return kinds;
-}
-
-/** Instructions describing only the controls the task has. */
-function buildInstructions(ref: string, content: any): string | null {
-  const kinds = fieldKinds(content);
-  if (!kinds.size) return null;
-  const out: string[] = [];
-
-  if (KEEP_EXTRA[ref]?.startsWith('Amounts are stated')) out.push(KEEP_EXTRA[ref]);
-
-  if (kinds.has('spans')) {
-    out.push(
-      'For each highlighted passage, select the replacement that makes the statement correct, ' +
-      'or select "No change is required" if the passage is already correct.'
-    );
-  }
-  if (kinds.has('journal')) {
-    out.push(
-      'For each line, select the account and enter its amount as a positive number in either the ' +
-      'debit or the credit column, entering zero in the column that does not apply.'
-    );
-  }
-  if (kinds.has('numeric') && !kinds.has('journal')) {
-    out.push(
-      'Enter all amounts as positive whole U.S. dollars without currency symbols or commas, and ' +
-      'enter zero where no amount applies rather than leaving a cell blank.'
-    );
-  }
-  if (kinds.has('select') && !kinds.has('journal') && !kinds.has('spans')) {
-    out.push('Select one value for each row from the choices provided.');
-  }
-  if (kinds.has('freetext')) {
-    out.push('Enter your response in the field provided, basing it on the exhibits supplied.');
-  }
-
-  out.push('Every response field is scored independently, and a field left blank receives no credit.');
-  if (KEEP_EXTRA[ref] && !KEEP_EXTRA[ref].startsWith('Amounts are stated')) out.push(KEEP_EXTRA[ref]);
-  return out.join(' ');
-}
-
-/**
- * True when the stored instructions promise a control the task does not have, or a sign
- * convention its fields cannot accept. Anything else is left exactly as written.
- */
-function instructionsAreWrong(content: any): string | null {
-  const ri = String(content.response_instructions || '');
-  if (!ri) return null;
-  const kinds = fieldKinds(content);
-  const reasons: string[] = [];
-
-  const claimsDropdown = /dropdown/i.test(ri);
-  const claimsMatrix = /matrix/i.test(ri);
-  const claimsDocReview = /document[- ]review/i.test(ri);
-  const claimsJournal = /journal[- ]entry/i.test(ri);
-  const claimsSigned = /minus sign|parenthes|signed amount|negative (amounts?|values?|differences?)/i.test(ri);
-  const claimsNumericEntry = /enter .*(amounts?|numbers?|counts?|percentages?)|numeric cells?/i.test(ri);
-
-  const hasSelect = kinds.has('select') || kinds.has('journal');
-  const hasNumeric = kinds.has('numeric') || kinds.has('journal');
-
-  if ((claimsDropdown || claimsMatrix) && !hasSelect) reasons.push('names a dropdown/matrix field the task lacks');
-  if (claimsDocReview && !kinds.has('spans')) reasons.push('names a document-review field the task lacks');
-  if (claimsJournal && !kinds.has('journal')) reasons.push('names a journal-entry grid the task lacks');
-  if (claimsSigned) reasons.push('requires a signed amount, but every key is positive');
-  if (claimsNumericEntry && !hasNumeric) reasons.push('describes numeric entry on a task with no numeric cell');
-  return reasons.length ? reasons.join('; ') : null;
-}
-
-/** Drops an option that repeats the passage verbatim while the key says leave it alone. */
-function dedupeSpans(content: any): string[] {
-  const notes: string[] = [];
-  const norm = (x: unknown) => String(x ?? '').replace(/\s+/g, ' ').trim();
-  for (const s of content.sub_questions || []) {
-    for (const sp of s.spans || []) {
-      const opts: string[] = sp.options || [];
-      if (norm(sp.correct) !== 'No change is required') continue;
-      const keep = opts.filter((o) => norm(o) !== norm(sp.text));
-      if (keep.length !== opts.length && keep.length >= 2) {
-        sp.options = keep;
-        notes.push(`span ${sp.id}: dropped option repeating the passage verbatim`);
-      }
-    }
-  }
-  return notes;
-}
 
 async function main() {
   const edits: Array<{ ref: string; id: string; what: string[]; patch: Record<string, unknown> }> = [];
@@ -269,7 +155,11 @@ async function main() {
       const what: string[] = [];
       const patch: Record<string, unknown> = {};
 
-      what.push(...dedupeSpans(content));
+      // The mechanical repairs — duplicate options, internal type names, instructions rebuilt
+      // from the task's own fields, the journal-entry line order — now live in
+      // services/generation/coherence.ts and run inside generation itself, so a new question
+      // never needs them. This call is what repaired the existing bank.
+      what.push(...repairCoherence(content));
 
       for (const add of ADD_SPAN_OPTIONS[ref] || []) {
         for (const s of content.sub_questions || []) {
@@ -288,23 +178,9 @@ async function main() {
         }
       }
 
-      const ri = String(content.response_instructions || '');
-      let newRi = ri;
-      for (const [re, to] of NAME_FIXES) newRi = newRi.replace(re, to);
-      if (newRi !== ri) {
-        content.response_instructions = newRi.trim();
-        what.push('replaced internal field names with learner-facing wording');
-      } else {
-        const wrong = instructionsAreWrong(content);
-        if (wrong) {
-          const rebuilt = buildInstructions(ref, content);
-          if (rebuilt && rebuilt !== ri) {
-            content.response_instructions = rebuilt;
-            what.push(`rebuilt instructions (${wrong})`);
-          }
-        }
-      }
-
+      // A journal-entry task that predates the shared rule and whose instructions were already
+      // rebuilt: repairCoherence appends the order rule when it rebuilds, so this only catches
+      // one whose instructions were otherwise correct.
       if (NEEDS_ORDER_RULE.includes(ref)) {
         const cur = String(content.response_instructions || '');
         if (!cur.includes(JOURNAL_ORDER_RULE)) {

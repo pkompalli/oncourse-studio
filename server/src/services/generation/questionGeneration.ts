@@ -4,6 +4,7 @@ import { fetchAllRows } from '../../db/pagination.js';
 import { startTracking, getStepTokens } from '../llm/tokenTracker.js';
 import { classifyQuestionType } from '../questionType.js';
 import { schemaErrorsFor } from './schemaValidate.js';
+import { repairCoherence, coherenceIssues } from './coherence.js';
 import { canonicalizeFormatSlug, resolveQuestionType, GROUPED_SLUGS, FORMAT_CONTRACTS } from './formatContracts.js';
 import { rescaleToTotal, readExamSize, subjectExamMap, groupByExam } from './examSize.js';
 import { processAllImageQuestions, isImageGenerationAvailable, toStringArray } from '../images/imageGeneration.js';
@@ -1531,6 +1532,29 @@ function enrichQuestions(
       if (Object.keys(optObj).length > 0) q.options = optObj;
     }
   }
+
+  // Repair a question that contradicts itself, before it is ever stored.
+  //
+  // The prompt already says response_instructions must describe ONLY the response types that
+  // actually appear in the sub-questions, and one CPA job violated that 40 times — telling
+  // learners to "complete every matrix and dropdown field" on a task with four amount boxes,
+  // and to use a minus sign on one whose only control is a dropdown of unsigned strings. An
+  // instruction the model ignores at that rate has to be enforced in code.
+  //
+  // Only mechanical repairs happen here: instructions rebuilt from the task's own fields, an
+  // option that duplicates the passage it is meant to correct dropped, internal type names
+  // renamed. Anything needing judgment is left for coherenceIssues to raise in review, which
+  // is the same division of labour schema errors already follow.
+  //
+  // Safe to run on the flat question object: repairCoherence reads sub_questions,
+  // response_instructions and exhibits, which carry these names both here and under `content`.
+  for (const q of questions) {
+    const repairs = repairCoherence(q);
+    for (const r of repairs) console.log(`  [Coherence] ${subject} "${String(q.topic || '')}": ${r}`);
+    const remaining = coherenceIssues(q);
+    for (const issue of remaining) console.warn(`  [Coherence] ${subject} "${String(q.topic || '')}": NEEDS REVIEW — ${issue}`);
+  }
+
   return questions;
 }
 

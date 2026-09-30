@@ -7,6 +7,7 @@ import { orCall, MODELS } from '../llm/openrouter.js';
 import type { ContentPart } from '../llm/openrouter.js';
 import { extractJsonArray, formatQuestionsForReviewWithImages, gradabilityIssues } from './shared.js';
 import { schemaErrorsFor } from '../generation/schemaValidate.js';
+import { coherenceIssues } from '../generation/coherence.js';
 
 // ── Validator Prompt (V1 lines 5803-5857, verbatim) ──
 
@@ -155,6 +156,15 @@ Output ONLY the JSON array. No preamble, no trailing text.`;
   if (inBatch('ordered_response') || inBatch('drag_drop')) structuralChecks.push('ordered_response: needs items[] + correct_order (1-based indices in the correct sequence); flag if the order is arbitrary or unjustified.');
   if (inBatch('fill_blank')) structuralChecks.push('fill_blank: needs an explicit correct answer value (with acceptable alternatives if relevant) — NOT only in the explanation.');
   if (inBatch('sata') || inBatch('mcq_multi')) structuralChecks.push('sata: needs options[] + a set of correct keys (≥1); distractors must be genuinely incorrect.');
+  // Self-consistency, as a prompt check alongside the deterministic one in the hard gate below.
+  // These are the faults a QA pass actually found, each of which passed gradability and schema:
+  // an item can be perfectly well-formed and still be impossible, or trivial, to answer.
+  if (inBatch('document_review') || inBatch('task_based_simulation') || inBatch('tbs')) {
+    structuralChecks.push('document_review: a passage keyed "No change is required" must NOT also offer an option repeating that passage word for word — both are the same claim, so a candidate who agrees with the key is marked wrong.');
+    structuralChecks.push('document_review: flag a task whose passages are ALL keyed "No change is required" (it scores full marks without being read) or where NO passage is correct as written (that option is then never the answer).');
+    structuralChecks.push('simulation: response_instructions must name ONLY controls the task actually has. Flag instructions demanding a minus sign, a matrix, a dropdown, a journal entry or a document-review field that is absent from sub_questions.');
+    structuralChecks.push('simulation: a journal-entry grid scores per row, so the task must state the line order its key expects; otherwise a correct entry in another order loses the moved lines.');
+  }
   if (structuralChecks.length > 0) {
     formatSpecificChecks += `
 12. FORMAT STRUCTURE & GRADABILITY (for the formats in this batch): each question MUST carry the complete machine-readable answer scaffolding for its format. Flag (score ≤ 4, needs_revision) any question whose answer is not auto-gradable:
@@ -347,12 +357,18 @@ export async function runValidatorBatch(
   //  1) gradability — an ungradable question can never pass.
   //  2) schema — a question that violates its format's materialized content_schema
   //     (the contract the guidelines step fixed) can never pass.
+  //  3) coherence — a question that contradicts ITSELF can never pass. This is a distinct
+  //     property from the first two: a QA pass found 52 faults that were all gradable and all
+  //     schema-valid, which is precisely why they reached a tester. Instructions naming fields
+  //     the task lacks, an option repeating the passage it is meant to correct, a document
+  //     review keyed so that it scores full marks without being read.
   for (let i = 0; i < questions.length; i++) {
     const q = questions[i];
     const fmt = (q.format_type as string) || ((q.tags as Record<string, unknown>)?.format_type as string) || 'mcq_single';
     const gradeIssues = gradabilityIssues(q);
     const schemaIssues = schemaErrorsFor(guidelines, fmt, q.content).map((s) => `schema: ${s}`);
-    const issues = [...gradeIssues, ...schemaIssues];
+    const cohIssues = coherenceIssues(q).map((s) => `coherence: ${s}`);
+    const issues = [...gradeIssues, ...schemaIssues, ...cohIssues];
     if (issues.length === 0) continue;
     const r = results.find((x) => (x.question_number as number) === i + 1) || results[i];
     if (!r) continue;

@@ -29,3 +29,6 @@ server/dist
 
 # Pre-repair DB snapshots written by one-off repair scripts
 server/backups/
+
+# Exported papers (regenerate from /api/export/json/:jobId)
+exports/
