@@ -459,9 +459,22 @@ function formatOneQuestion(q: Record<string, unknown>, i: number): string {
 
   const explanation = (content?.explanation as string) || (q.explanation as string) || '';
 
+  // Give the reviewer what the image was SUPPOSED to show, not just the image.
+  //
+  // Without the specification a reviewer can only judge modality and relevance, and that is
+  // exactly what let two bad figures through: a growth chart whose weight points sat below their
+  // labels, and a rhythm strip that drew a regular narrow-QRS trace where the specification set
+  // out seven P waves marching independently through three QRS complexes. Both were the right
+  // kind of picture, on topic, and wrong in the one respect the question was decided by. The
+  // specification is already stored on the row; it simply was never shown to the reader who could
+  // check it.
+  const imageSpec = String(q.image_description || '').trim();
+  const specBlock = imageSpec
+    ? `\nIMAGE WAS SPECIFIED AS: ${imageSpec.slice(0, 1200)}\n→ Compare the image against this specification. Flag it ONLY where the image fails to show something the question's answer depends on — a value, a relationship, a trend, a label, a position. Do NOT flag drawing style, aesthetics, or detail the question never asks about.`
+    : '';
   const imageStatus = q.is_image_question
     ? (q.image_url
-        ? `IMAGE: Present (${q.image_type || 'clinical image'}) — shown below, evaluate for clinical accuracy, relevance to the question stem, and appropriate modality.`
+        ? `IMAGE: Present (${q.image_type || 'clinical image'}) — shown below, evaluate for clinical accuracy, relevance to the question stem, and appropriate modality.${specBlock}`
         : `IMAGE: ⚠️ MISSING — this is an image-based question but no image was generated. Score ≤ 4.`)
     : '';
 

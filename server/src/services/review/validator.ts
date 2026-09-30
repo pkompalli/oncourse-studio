@@ -248,10 +248,11 @@ For EACH question ask:
 9. ANSWER KEY DIVERSITY — check the correct answer keys across the batch:
    a. Note the correct answer letter (A/B/C/D/E) for each question.
    b. If more than 40% of questions in this batch share the same correct answer key, flag the over-represented ones and request the answer key be changed (with appropriate content adjustment).
-10. IMAGE — relevance only:
+10. IMAGE — relevance, and whether it shows what the question needs:
    a. Image absent but the stem explicitly references it (e.g. "shown below", "image 1", "radiograph shown") → score ≤ 4 and set needs_revision true. The question is UNUSABLE without its image regardless of how good the text is.
    b. Image present but wrong modality or clearly irrelevant → flag and suggest replacement.
-   c. Image that is imperfect but appropriate for the question → do NOT flag.
+   c. Image present and the right kind of picture, but it does NOT show what the answer is read from → flag (score ≤ 4, needs_revision true) and say which feature is missing or wrong. Where an IMAGE WAS SPECIFIED AS block is given, check the image against it. A figure can be on topic and still be unusable: a growth chart whose plotted points do not sit at the percentiles they are labelled with, a rhythm strip drawn as a regular narrow-QRS trace where the specification sets out atrial and ventricular activity at different rates, a graph whose axis values contradict the stem. If a candidate cannot read the value, trend or relationship the correct answer depends on, the question cannot be answered.
+   d. Image that is imperfect in style or polish but shows everything the question is read from → do NOT flag. Judge it on what the answer needs, not on how it looks.
 
 Scoring (10 = nothing to fix, 1 = unacceptable):
 • 9–10 → factually correct, explanation addresses all options, format compliant — do not change

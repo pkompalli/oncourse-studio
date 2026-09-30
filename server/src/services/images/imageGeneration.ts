@@ -564,6 +564,23 @@ export async function regenerateQuestionImage(
 
   if (error || !question) return false;
 
+  // Never hand a PLOTTED figure back to the image model.
+  //
+  // A chart with known data points is drawn by arithmetic, so its markers and labels cannot drift
+  // apart. Regenerating it replaces that with a diffusion model's impression of a chart, and this
+  // one has now failed the same way twice: asked for weight at the 50th, 25th, 10th and 5th
+  // percentiles it produced points sitting visibly below each of those labels — which is the
+  // defect a tester reported in the first place. The review feedback that triggers this is
+  // usually right that the image is wrong; regenerating is simply not the way to fix a plot.
+  //
+  // So a figure marked as plotted is left alone and the finding is reported. Re-running its
+  // renderer is a deliberate act, not something a review pass should do on its own.
+  const source = String(question.image_source || '');
+  if (/^Plotted from/i.test(source)) {
+    console.log(`    ↩︎ Q${question.question_number}: image was plotted from its specification, not regenerating — re-run its renderer instead`);
+    return false;
+  }
+
   // Build fix instructions from review feedback
   const fixInstructions = reviewFeedback.join('\n');
 

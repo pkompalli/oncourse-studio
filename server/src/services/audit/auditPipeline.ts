@@ -134,7 +134,7 @@ Score each question 1-10 based on:
 3. For non-choice formats: appropriateness and accuracy of the expected answer
 4. Educational relevance and value
 5. Clarity and unambiguity of the question stem
-6. Image completeness — if marked as IMAGE: MISSING, the question is UNUSABLE and must score ≤ 4
+6. Image completeness AND fidelity — if marked as IMAGE: MISSING, the question is UNUSABLE and must score ≤ 4. If an image is shown with an IMAGE WAS SPECIFIED AS block, read the image against that specification and score ≤ 4 where it fails to show a value, trend, relationship, label or position the correct answer is read from. Being the right kind of picture is not enough: a growth chart whose points do not sit at the percentiles labelling them, or a rhythm strip that does not show the activity the specification sets out, cannot be answered. Do not penalise style or polish where everything the answer needs is legible
 7. Overall exam-readiness
 
 Scoring guide:
@@ -465,9 +465,20 @@ export async function auditBatchForJob(jobId: string): Promise<{
   events: string[];
   subjects: SubjectStatus[];
 }> {
+  // A FINISHED audit in this cache must not answer for a job that has work again.
+  //
+  // The same fault as reviewBatchForJob had: a terminal entry was deleted and then returned
+  // anyway, so the next call reported "complete" without auditing anything. The job then ended
+  // orchestration still in 'auditing' with its questions sitting at 'reviewed', because the
+  // orchestrator was waiting for a status change nothing was going to make. It showed up twice on
+  // one job here — a question re-scored after its image was corrected passed review and then
+  // never reached audit.
+  //
+  // A live run still reports progress from this cache, which is what the UI polls. Only a
+  // terminal entry is dropped, and the DB check below still answers "complete" for a poll that
+  // arrives after a genuine finish.
   const cached = runningAudits.get(jobId);
-  if (cached) {
-    if (cached.status === 'complete') runningAudits.delete(jobId);
+  if (cached && cached.status !== 'complete' && cached.status !== 'failed') {
     return {
       status: cached.status, step: cached.step,
       audited: cached.audited, approved: cached.approved, flagged: cached.flagged, total: cached.total,
@@ -476,6 +487,7 @@ export async function auditBatchForJob(jobId: string): Promise<{
       subjects: cached.subjects,
     };
   }
+  if (cached) runningAudits.delete(jobId);
 
   // Check DB
   const { data: job, error: jobErr } = await supabase
