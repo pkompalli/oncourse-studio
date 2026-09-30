@@ -227,7 +227,15 @@ For EACH question ask:
    c. If the explanation only defends the correct answer without discussing distractors → flag as "explanation_issues" and set needs_revision true.
    d. Minimum 3 sentences for standalone questions.
 4. Does the stem/scenario contain the minimum data needed to reach the correct answer?
+   a. Name the figure that is missing if the key depends on a number the stem never states. An S corporation distribution question keyed a $25,000 dividend while saying only that accumulated E&P existed, never how much — unanswerable as written.
+   b. Does the stem contradict itself? One question called an amount "pretax book income" and then said it included federal income tax expense, while the key added that tax back.
+   c. Do all quoted factors, rates and tables come from ONE set of assumptions? A capital budgeting stem gave a four-year annuity factor of 3.0373 (12%) alongside a year-4 present value factor of 0.6830 (10%); no single discount rate produces both, so no answer is reachable.
+   d. Does a named method match the arithmetic it is used with? One item called itself the capital retention approach, which preserves principal, and then applied a present value annuity factor, which liquidates it.
 5. Is the content free of factual inaccuracies?
+   a. ACCOUNTING/REPORTING FRAMEWORK — if a question names a framework (U.S. GAAP, IFRS, GASB, tax basis), verify the answer is right under THAT framework, not a neighbouring one. This is a high-frequency failure: three questions asked for the U.S. GAAP treatment of a cash flow hedge of a forecast purchase and keyed the IFRS answer, applying a basis adjustment to the acquired asset. IFRS 9 folds the hedge reserve into the asset's cost; ASC 815 leaves it in AOCI and reclassifies to earnings when the hedged item affects earnings. Flag any answer that is correct only under the framework the question did NOT name.
+   b. SUPERSEDED RULES — flag an answer that depends on guidance that has been amended away. The same batch split out "hedge ineffectiveness", which ASU 2017-12 eliminated for qualifying cash flow hedges years ago.
+   c. MORE THAN ONE DEFENSIBLE ANSWER — if the question cites a standard that permits several responses, check that only ONE option is among them. One item asked what an accountant should do when management refuses the no-assurance legend; AR-C 70 permits a disclaimer, a compilation, or withdrawal, and three of the four options were those three. Flag it (needs_revision) and say which options are jointly defensible.
+   d. CONTESTED AUTHORITY — where courts or authorities genuinely split, the stem must say which view it applies, or two options are both right.
 6. FORMAT COMPLIANCE (if exam format requirements are provided above):
    a. Does the stem match the expected format (e.g., scenario/vignette vs. direct recall)?
    b. Does the option count match (e.g., 4 options vs. 5)?

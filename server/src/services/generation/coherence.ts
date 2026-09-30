@@ -324,6 +324,122 @@ export function repairCoherence(content: Record<string, unknown>): string[] {
 }
 
 /**
+ * Families of interchangeable party names. A rename shows up as an option using a DIFFERENT
+ * member of the same family than the stem does — the stem says "supplier" three times and two
+ * options say "wholesaler" about that same party.
+ *
+ * Kept to tight synonyms, which cost precision to buy correctness. A first attempt grouped a
+ * whole supply chain — manufacturer, wholesaler, distributor, retailer, seller — and flagged
+ * five sound questions, because in a products case those are DIFFERENT parties and an option is
+ * entitled to name one the stem never did. Same for creditor and lender: a judgment creditor is
+ * not the purchase-money lender. Only words that denote the same party by definition remain, so
+ * this now misses a loose retailer/seller substitution and does not cry wolf.
+ */
+const ROLE_FAMILIES: string[][] = [
+  ['supplier', 'wholesaler'],
+  ['buyer', 'purchaser'],
+  ['lessor', 'landlord'],
+  ['lessee', 'tenant'],
+  ['debtor', 'borrower'],
+  ['employee', 'worker'],
+];
+
+/** Present value of an ordinary annuity of 1 for n periods at rate r. */
+const pvAnnuity = (n: number, r: number) => (1 - Math.pow(1 + r, -n)) / r;
+
+/**
+ * Discount factors quoted in one stem must come from one rate.
+ *
+ * A capital-budgeting stem gave a four-year annuity factor of 3.0373 and a year-4 present value
+ * factor of 0.6830. The first is 12%, the second is 10%; at 12% the year-4 factor is 0.6355.
+ * Nothing about the item is malformed — it is simply unanswerable as a single NPV, and it moved
+ * the keyed answer and two distractors once corrected. Solving the rate implied by the single
+ * period factor and re-deriving the annuity factor catches it exactly.
+ */
+function discountFactorIssues(stem: string): string[] {
+  // The number pattern must not swallow a sentence-ending period: a greedy [\d.]+ captured
+  // "0.6830." and Number() turned that into NaN, so the check silently passed on the very
+  // question it was written for.
+  const NUM = String.raw`(\d+(?:\.\d+)?)`;
+  const ann = stem.match(new RegExp(String.raw`(\w+|\d+)[- ]year annuity factor is ${NUM}`, 'i'))
+    || stem.match(new RegExp(String.raw`annuity factor (?:for|over) (\d+) years is ${NUM}`, 'i'));
+  const single = stem.match(new RegExp(String.raw`year[- ](\d+) present value factor is ${NUM}`, 'i'))
+    || stem.match(new RegExp(String.raw`present value factor (?:for|at) year (\d+) is ${NUM}`, 'i'));
+  if (!ann || !single) return [];
+  const words: Record<string, number> = { two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
+  const nAnn = Number(ann[1]) || words[String(ann[1]).toLowerCase()];
+  const annFactor = Number(ann[2]);
+  const nSingle = Number(single[1]);
+  const pvFactor = Number(single[2]);
+  if (!nAnn || !nSingle || !annFactor || !pvFactor || nAnn !== nSingle) return [];
+  const impliedRate = Math.pow(1 / pvFactor, 1 / nSingle) - 1;
+  if (!(impliedRate > 0) || !Number.isFinite(impliedRate)) return [];
+  const expected = pvAnnuity(nAnn, impliedRate);
+  if (Math.abs(expected - annFactor) <= 0.01) return [];
+  return [
+    `discount factors come from different rates: the year-${nSingle} factor ${pvFactor} implies `
+    + `${(impliedRate * 100).toFixed(1)}%, at which the ${nAnn}-year annuity factor is `
+    + `${expected.toFixed(4)}, not the stated ${annFactor}`,
+  ];
+}
+
+/** The same party called one thing in the stem and another in the options. */
+function roleDriftIssues(stem: string, optionTexts: string[]): string[] {
+  const has = (text: string, word: string) => new RegExp(`\\b${word}s?\\b`, 'i').test(text);
+  const opts = optionTexts.join(' ');
+  const out: string[] = [];
+  for (const family of ROLE_FAMILIES) {
+    const inStem = family.filter((w) => has(stem, w));
+    if (inStem.length !== 1) continue; // ambiguous or absent — nothing to compare against
+    const inOpts = family.filter((w) => has(opts, w) && !has(stem, w));
+    if (!inOpts.length) continue;
+    out.push(
+      `the stem calls the party the "${inStem[0]}" but the options call it the `
+      + `"${inOpts.join('", "')}" — the same role under two names`
+    );
+  }
+  return out;
+}
+
+/**
+ * A stem asking what to DO whose keyed answer is to do nothing.
+ *
+ * One item asked for "the strongest basis for action by the corporation" and keyed an option
+ * beginning "Decline to pursue the director". The answer was right on the law — a disinterested
+ * board's informed rejection releases the director — but no candidate reading the stem would
+ * pick it, because declining is not a basis for action.
+ */
+function stemKeyPolarityIssues(stem: string, keyedText: string): string[] {
+  const asksForAction = /\b(basis|ground|grounds|claim|cause of action)\b[^.?]*\b(for|to)\b[^.?]*\baction\b/i.test(stem)
+    || /strongest (basis|ground|argument) for (action|suit|bringing)/i.test(stem);
+  const keyDeclines = /^\s*(decline|do not|don't|refrain|take no action|no action|forgo|abstain)\b/i.test(keyedText);
+  if (asksForAction && keyDeclines) {
+    return [`the stem asks for a basis for action but the keyed answer declines to act ("${keyedText.slice(0, 50)}…")`];
+  }
+  return [];
+}
+
+/** A declarative sentence given a question mark, with yes/no options underneath it. */
+function malformedQuestionIssues(prompt: string, optionTexts: string[]): string[] {
+  const whole = prompt.trim();
+  if (!whole.endsWith('?')) return [];
+  // The interrogative lives in the LAST sentence. A stem is usually a fact pattern followed by
+  // the question — "A merchant seller signed… Which of the following is correct?" — so testing
+  // the whole thing flags every one of them.
+  const t = (whole.split(/(?<=[.?])\s+/).pop() || whole).trim();
+  const yesNo = optionTexts.filter((o) => /^\s*(?:[A-D][.)]\s*)?(yes|no)\b/i.test(o)).length;
+  if (yesNo < 2) return [];
+  // A real question often opens with a scoping clause — "Under Rule 15(c)(1)(C), does the
+  // amended claim…" — so drop one leading clause before testing, or every such question is
+  // flagged.
+  const core = t.replace(/^(?:[^,?]{0,80}),\s*/, '');
+  const interrogative = /^(does|do|did|is|are|was|were|has|have|had|can|could|may|might|must|should|would|will|which|what|why|how|who|whom|whose)\b/i
+    .test(core);
+  if (interrogative) return [];
+  return [`reads as a statement but ends in a question mark, and its options are yes/no: "${t.slice(0, 70)}…"`];
+}
+
+/**
  * Report contradictions a learner would hit. Used as a deterministic pre-pass by the
  * validator, which caps the score and routes the question to the fixer.
  *
@@ -332,9 +448,53 @@ export function repairCoherence(content: Record<string, unknown>): string[] {
 export function coherenceIssues(q: Record<string, unknown>): string[] {
   const content = ((q.content as Record<string, unknown>) || q) as Record<string, unknown>;
   const subs = (content.sub_questions as Array<Record<string, unknown>>) || [];
-  if (!subs.length) return [];
+
+  // Checks that apply to a standalone question as much as to a work area, so they run before
+  // the grouped-question gate below. An MCQ has no sub_questions at all and these faults —
+  // mismatched discount factors, a party renamed between stem and options — were all found in
+  // plain MCQs.
+  const standalone: string[] = [];
+  const optionTexts = (() => {
+    const fromContent = content.options;
+    if (Array.isArray(fromContent)) return fromContent.map((o: any) => String(o?.text ?? o ?? ''));
+    if (fromContent && typeof fromContent === 'object') return Object.values(fromContent as Record<string, unknown>).map(String);
+    const col = (q as Record<string, unknown>).options;
+    if (col && typeof col === 'object') return Object.values(col as Record<string, unknown>).map(String);
+    return [] as string[];
+  })();
+  const stem = String(content.stem ?? content.question ?? '');
+  if (stem) {
+    standalone.push(...discountFactorIssues(stem));
+    if (optionTexts.length) {
+      standalone.push(...roleDriftIssues(stem, optionTexts));
+      standalone.push(...malformedQuestionIssues(stem, optionTexts));
+      const keyLetter = String((content.answer as Record<string, unknown>)?.key ?? (q as Record<string, unknown>).correct_option ?? '');
+      const keyed = (() => {
+        if (Array.isArray(content.options)) {
+          const hit = (content.options as Array<Record<string, unknown>>).find((o) => String(o.key) === keyLetter);
+          return String(hit?.text ?? '');
+        }
+        const col = (q as Record<string, unknown>).options as Record<string, string> | undefined;
+        return String(col?.[keyLetter] ?? '');
+      })();
+      if (keyed) standalone.push(...stemKeyPolarityIssues(stem, keyed));
+    }
+  }
+  // Sub-questions of a grouped item carry their own prompts and options.
+  for (const s of subs) {
+    const sp = String(s.question ?? '');
+    const so = (() => {
+      const o = s.options;
+      if (Array.isArray(o)) return o.map((x: any) => String(x?.text ?? x ?? ''));
+      if (o && typeof o === 'object') return Object.values(o as Record<string, unknown>).map(String);
+      return [] as string[];
+    })();
+    if (sp && so.length) standalone.push(...malformedQuestionIssues(sp, so));
+  }
+
+  if (!subs.length) return standalone;
   const inv = fieldInventory(content);
-  const issues: string[] = [];
+  const issues: string[] = [...standalone];
   const ri = String(content.response_instructions ?? '');
 
   // Repairable classes are still reported: a question reaching review with one of these means

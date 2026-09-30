@@ -41,6 +41,10 @@ function classify(issue: string): string {
   if (/is never the answer/.test(issue)) return 'degenerate-none-correct';
   if (/only \d+ exhibit/.test(issue)) return 'exhibit-cited-not-supplied';
   if (/raw table pipe/.test(issue)) return 'table-pipe-in-selectable-text';
+  if (/different rates/.test(issue)) return 'discount-factors-from-two-rates';
+  if (/same role under two names/.test(issue)) return 'party-renamed-between-stem-and-options';
+  if (/declines to act/.test(issue)) return 'stem-asks-for-action-key-declines';
+  if (/statement but ends in a question mark/.test(issue)) return 'statement-punctuated-as-question';
   return 'other';
 }
 
@@ -153,6 +157,40 @@ if (flatSource) {
   flatDetail = `${repairs.length} repair(s) on the flat shape, ${left.length} left`;
 }
 
+// ── 5. The second QA round's corpus ────────────────────────────────────────────
+// A second snapshot, taken before the round-2 fixes, holds that round's faults. The checks
+// written for them have to find them there, for the same reason as above.
+const snap2 = readdirSync(dir).filter((f) => f.startsWith('qb_questions_pre_qa2_')).sort().pop();
+const ROUND2: Record<string, string> = {
+  '10d8bf13': 'BAR 18 quoted a 12% annuity factor beside a 10% year-4 factor',
+  '29a7ac36': 'Bar 69 said "supplier" in the stem and "wholesaler" in two options',
+  '18bb7633': 'Bar 84 asked for a basis for action and keyed "Decline to pursue"',
+  '8986ee0b': 'CFA Private Wealth 20.2 was a statement with a question mark',
+  'c9216e77': 'FAR 54 carried raw table pipes inside its selectable spans',
+};
+let round2Found = 0;
+const round2Missed: string[] = [];
+if (snap2) {
+  const before2 = JSON.parse(readFileSync(`${dir}/${snap2}`, 'utf8')) as Array<Record<string, any>>;
+  console.log(`\n### ROUND 2 snapshot: ${snap2} (${before2.length} rows)`);
+  const hit = new Set<string>();
+  const t2 = new Map<string, number>();
+  for (const r of before2) {
+    const issues = coherenceIssues({ content: r.content, options: r.options, correct_option: r.correct_option });
+    if (issues.length) hit.add(String(r.id).slice(0, 8));
+    for (const i of issues) t2.set(classify(i), (t2.get(classify(i)) || 0) + 1);
+  }
+  for (const [c, n] of [...t2.entries()].sort((a, b) => b[1] - a[1])) {
+    console.log(`  ${String(n).padStart(4)}  ${c}`);
+  }
+  console.log('  each reported round-2 fault:');
+  for (const [id, desc] of Object.entries(ROUND2)) {
+    const ok = hit.has(id);
+    if (ok) round2Found++; else round2Missed.push(id);
+    console.log(`    ${ok ? 'FOUND ' : 'MISSED'}  ${id}  ${desc}`);
+  }
+}
+
 // ── Verdict ────────────────────────────────────────────────────────────────────
 console.log('\n── verdict ──');
 const checks: Array<[string, boolean, string]> = [
@@ -161,6 +199,7 @@ const checks: Array<[string, boolean, string]> = [
   ['repair leaves the judgment classes alone', [...afterT.byClass.keys()].every((c) => !AUTO_FIXABLE.has(c)), [...afterT.byClass.keys()].join(', ') || 'none remain'],
   ['live bank has no unaccepted faults', liveUnexpected.length === 0, liveUnexpected.length ? liveUnexpected.map((i) => i.slice(0, 8)).join(', ') : `${liveAccepted.length} accepted, 0 unexpected`],
   ['repair bites on the flat shape generation passes it', flatWorks, flatDetail],
+  ['every reported round-2 fault is detected', round2Missed.length === 0, round2Missed.length ? `missed ${round2Missed.join(', ')}` : `all ${round2Found} found`],
 ];
 let ok = true;
 for (const [name, pass, detail] of checks) {

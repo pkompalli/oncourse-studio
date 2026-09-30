@@ -396,6 +396,28 @@ const EDITS: Record<string, Edit> = {
   },
 };
 
+/**
+ * Party renames the coherence gate found on its own, after the round-2 checks were added — not
+ * reported by anyone. Keyed by question id rather than display index, because that is how a
+ * check reports a finding.
+ */
+const ID_EDITS: Record<string, { options: Record<string, string>; why: string }> = {
+  // Stem says "customer" throughout for the party that repudiated; only this option said "buyer".
+  '9a2a81f2-3954-4cbe-bb88-fe3e798cda00': {
+    why: 'stem calls the repudiating party the customer; this option called it the buyer',
+    options: {
+      C: "The seller should seek the entire contract price because the customer's cancellation transferred ownership of the generators.",
+    },
+  },
+  // Stem says "wholesaler" five times; only this option said "supplier".
+  '23b1fc4d-171f-4538-bb7e-866ef18c0d89': {
+    why: 'stem calls the party the wholesaler; this option called it the supplier',
+    options: {
+      B: "The company is likely bound because its failure to notify the wholesaler allowed the manager's prior apparent authority to continue.",
+    },
+  },
+};
+
 async function main() {
   const edits: Array<{ ref: string; id: string; what: string[]; patch: Record<string, unknown> }> = [];
   const seenRefs = new Set<string>();
@@ -417,9 +439,10 @@ async function main() {
       const n = (seen.get(code) || 0) + 1;
       seen.set(code, n);
       const ref = `${label}/${code}-${n}`;
-      const edit = EDITS[ref];
+      const byId = ID_EDITS[q.id];
+      const edit: Edit | undefined = EDITS[ref] || (byId ? { options: byId.options, why: byId.why } : undefined);
       if (!edit) continue;
-      seenRefs.add(ref);
+      if (EDITS[ref]) seenRefs.add(ref);
 
       const content = JSON.parse(JSON.stringify(q.content ?? {}));
       const what: string[] = [];

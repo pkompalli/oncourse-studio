@@ -8,6 +8,7 @@
 
 import { supabase } from '../../db/supabase.js';
 import { fetchAllRows } from '../../db/pagination.js';
+import { bankMixForJob } from '../generation/bankMix.js';
 import { orCall, MODELS } from '../llm/openrouter.js';
 import type { ContentPart } from '../llm/openrouter.js';
 import { formatQuestionsForReviewWithImages, extractJsonArray, gradabilityIssues } from '../review/shared.js';
@@ -384,6 +385,24 @@ async function runAuditPipeline(jobId: string): Promise<void> {
     const finalMsg = `Audit complete — ${totalApproved} approved, ${totalFlagged} flagged${nrSuffix} out of ${total}.`;
     setStep(jobId, finalMsg);
 
+    // Bank-level review, which only makes sense here.
+    //
+    // Every other check in the pipeline looks at one question. Some faults exist only between
+    // questions: three of one section's 57 items tested whether a cash flow hedge of a forecast
+    // purchase adjusts the asset's basis, each individually fine, and because all three were
+    // keyed the same wrong way one authoring error cost a candidate three questions. Generation
+    // runs a subject at a time and cannot see that; audit is the first point that holds the
+    // whole job.
+    //
+    // Advisory only — it is recorded on the job and never blocks or flags a question, because
+    // how many questions a concept deserves is a blueprint decision, not something a script
+    // should settle.
+    const mixFindings = await bankMixForJob(jobId);
+    if (mixFindings.length) {
+      console.log(`[Mix] job ${jobId.slice(0, 8)} — ${mixFindings.length} concentration(s) worth a look:`);
+      for (const f of mixFindings.slice(0, 10)) console.log(`  [Mix] ${f.exam}: ${f.detail}`);
+    }
+
     // Merge token usage from all steps
     const auditTokens = getStepTokens(jobId, 'audit');
     const { data: currentJob } = await supabase.from('qb_jobs').select('progress').eq('id', jobId).single();
@@ -397,6 +416,7 @@ async function runAuditPipeline(jobId: string): Promise<void> {
         events: runningAudits.get(jobId)?.events.slice(-10) || [],
         subjects: runningAudits.get(jobId)?.subjects || [],
         token_usage: { ...existingTokens, audit: auditTokens },
+        ...(mixFindings.length ? { mix_findings: mixFindings.slice(0, 20) } : {}),
       },
     }).eq('id', jobId);
 
