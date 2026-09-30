@@ -1622,16 +1622,46 @@ export async function professorGenerateQuestions(
   const hyt = subjectTask.hyt_topics || [];
   const topicCounter = { value: 0 };
   const allQuestions: Record<string, unknown>[] = [];
-  const numBatches = Math.ceil(numQ / PROFESSOR_BATCH_SIZE);
   const bloomRemaining = { ...subjectTask.bloom_counts };
   /** What each format still owes, decremented by what was actually produced. */
   const formatRemaining = new Map<string, number>(
     (subjectTask.question_type_allocations || []).map((a) => [a.slug, a.count])
   );
 
-  for (let b = 0; b < numBatches; b++) {
-    const batchSize = Math.min(PROFESSOR_BATCH_SIZE, numQ - allQuestions.length);
-    if (batchSize <= 0) break;
+  /**
+   * Ask for ONE grouped item at a time, however many are owed.
+   *
+   * A grouped format is a whole document — a passage with its questions, an unfolding case, a
+   * simulation — and the generator returns one or two per call no matter what the batch asks
+   * for. Measured across 303 batches of these runs, 29 came back short and the commonest shape
+   * was 2 delivered of 6 requested; a top-up that asked for 4 passage sets got 1, twice, and the
+   * retry got 1 again. It is NOT an output-budget problem, which was the obvious guess and the
+   * wrong one: those responses were about 8,000 characters against a 20,000-TOKEN ceiling, so
+   * nothing was truncated. The model simply will not emit several documents in one answer, and
+   * re-asking at a lower temperature cannot change that.
+   *
+   * The cost of asking for six and getting two was paid in the bank: LSAT got 2 reading passages
+   * of 4, NCLEX 2 unfolding cases of 3, MCAT 9 passage sets of 37. So a batch that is going to
+   * request a grouped format asks for exactly one of it, and the ledger below brings us back for
+   * the next. More calls, each one answerable.
+   */
+  const groupedOwed = () => [...formatRemaining.entries()]
+    .some(([slug, left]) => left > 0 && GROUPED_FORMATS.has(canonicalizeFormatSlug(slug)));
+
+  // Driven by what is left rather than a batch count fixed up front, because the size of each
+  // batch now depends on which formats are still outstanding. The guard bounds the loop at the
+  // one-per-call worst case plus slack, so a format the generator refuses to produce cannot spin
+  // here forever — it comes up short and the count gap is reported, as before.
+  const maxIterations = numQ + PROFESSOR_BATCH_SIZE;
+  let numBatches = Math.max(1, Math.ceil(numQ / PROFESSOR_BATCH_SIZE));
+
+  for (let b = 0; b < maxIterations; b++) {
+    const remaining = numQ - allQuestions.length;
+    if (remaining <= 0) break;
+    const batchSize = groupedOwed() ? 1 : Math.min(PROFESSOR_BATCH_SIZE, remaining);
+    // Bloom counts are shared out over the batches still to come, so that estimate has to track
+    // a loop whose length is no longer known in advance.
+    numBatches = b + 1 + Math.max(0, Math.ceil((remaining - batchSize) / PROFESSOR_BATCH_SIZE));
 
     // Bloom counts for this batch
     const batchBloom: Record<string, number> = {};

@@ -925,6 +925,21 @@ export async function withMockExamSpecs(
     : await fetchMockExamSpecs(courseName, subjects, formats);
   const combinedFormat: Record<string, unknown> = { ...examFormat, ...mockSpecs, exam_pattern: examFormat.exam_pattern };
 
+  // A length already on record wins over a freshly fetched one.
+  //
+  // The guidelines step calls this whenever hasSize is false, and hasSize needs BOTH a total and
+  // a subject distribution. A course analysed from a supplied specification arrives with an
+  // accurate total and no distribution, so it comes here for the distribution — and the spread
+  // above then replaced its total with this call's answer. NCLEX-RN had 150 taken from the real
+  // NGN specification overwritten by 200, the default used when a model declines to name one
+  // number for a variable-length exam. The caller wanted the missing distribution, not a second
+  // opinion on a figure it already had.
+  const knownTotal = Number(examFormat.total_questions);
+  if (Number.isFinite(knownTotal) && knownTotal > 0 && Number(combinedFormat.total_questions) !== knownTotal) {
+    console.log(`  [examFormat] keeping the total already on record (${knownTotal}) over the fetched ${combinedFormat.total_questions}`);
+    combinedFormat.total_questions = knownTotal;
+  }
+
   // Override subject_distribution image percentages with Phase 2 data (more accurate)
   const phase2ImgPct = (examFormat.image_percentage_by_subject as Record<string, number>) || {};
   const subjectDist = (combinedFormat.subject_distribution as Record<string, { questions: number; percentage: number; image_pct: number }>) || {};

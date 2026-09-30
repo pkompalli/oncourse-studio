@@ -791,9 +791,23 @@ export async function reviewBatchForJob(jobId: string, scope: ReviewScope = 'pen
   events: string[];
   subjects: SubjectStatus[];
 }> {
+  // A FINISHED review in this cache must not answer for a job that has work again.
+  //
+  // The old code deleted a terminal entry and then returned it anyway, so the very next call
+  // reported "complete" without running anything. That is how a topped-up job strands: the
+  // top-up inserts rows at 'generated', sets the job to 'reviewing' and asks the orchestrator
+  // to resume; phase 2 called this, got the previous run's 'complete' straight from memory, and
+  // orchestration then sat waiting for a status change that nothing was going to make. The job
+  // finished orchestration still in 'reviewing', its new rows unscored, while its stored step
+  // still read "Audit complete" from the run before. It took a second resume to work, and only
+  // because the first call had cleared the cache on its way past.
+  //
+  // A live run still reports its progress from here — that is what the UI polls. Only a
+  // terminal entry is dropped, and then the DB checks below decide whether there is anything to
+  // do, so a poll arriving after a genuine completion still answers "complete" rather than
+  // starting the pipeline again.
   const cached = runningReviews.get(jobId);
-  if (cached) {
-    if (cached.status === 'complete' || cached.status === 'failed') runningReviews.delete(jobId);
+  if (cached && cached.status !== 'complete' && cached.status !== 'failed') {
     return {
       status: cached.status, phase: cached.phase, step: cached.step,
       reviewed: cached.reviewed, fixed: cached.fixed, total: cached.total,
@@ -802,6 +816,7 @@ export async function reviewBatchForJob(jobId: string, scope: ReviewScope = 'pen
       subjects: cached.subjects,
     };
   }
+  if (cached) runningReviews.delete(jobId);
 
   // Check DB
   const { data: job, error: jobErr } = await supabase
