@@ -8,6 +8,17 @@ import type { ContentPart } from '../llm/openrouter.js';
 import { extractJsonArray, formatQuestionsForReviewWithImages, gradabilityIssues } from './shared.js';
 import { schemaErrorsFor } from '../generation/schemaValidate.js';
 import { coherenceIssues } from '../generation/coherence.js';
+import { consistencyIssues, isBlockingConsistency } from '../generation/consistency.js';
+
+/**
+ * Per-format rules to include. High enough that no course's real spec is truncated — the
+ * largest in the six live courses is 40 — and present only so a malformed guidelines document
+ * cannot push an unbounded list into the prompt.
+ */
+const FORMAT_RULE_CAP = 60;
+
+/** The same guard for the course-wide rule lists, which were capped at three to five. */
+const GUIDELINE_RULE_CAP = 20;
 
 // ── Validator Prompt (V1 lines 5803-5857, verbatim) ──
 
@@ -78,8 +89,8 @@ Output ONLY the JSON array. No preamble, no trailing text.`;
     if (stemStyle?.typical_format) parts.push(`Expected stem format: ${stemStyle.typical_format}`);
     if (optionCount) parts.push(`Expected option count: ${optionCount}`);
     if (recallRatio?.description) parts.push(`Recall vs reasoning: ${recallRatio.description}`);
-    if (distinctive.length > 0) parts.push(`Distinctive patterns:\n${distinctive.slice(0, 4).map(p => `  • ${p}`).join('\n')}`);
-    if (antiPatterns.length > 0) parts.push(`What this exam does NOT do:\n${antiPatterns.slice(0, 3).map(p => `  • ${p}`).join('\n')}`);
+    if (distinctive.length > 0) parts.push(`Distinctive patterns:\n${distinctive.slice(0, GUIDELINE_RULE_CAP).map(p => `  • ${p}`).join('\n')}`);
+    if (antiPatterns.length > 0) parts.push(`What this exam does NOT do:\n${antiPatterns.slice(0, GUIDELINE_RULE_CAP).map(p => `  • ${p}`).join('\n')}`);
 
     if (parts.length > 0) {
       examFormatContext = `\nEXAM FORMAT REQUIREMENTS (use these to judge format compliance):\n${parts.join('\n')}\n`;
@@ -103,7 +114,7 @@ Output ONLY the JSON array. No preamble, no trailing text.`;
     const dist = guidelines.distractor_guidelines as Record<string, unknown> | undefined;
     if (dist) {
       const rules = (dist.quality_rules as string[]) || [];
-      if (rules.length > 0) gParts.push(`Distractor rules:\n${rules.slice(0, 5).map(r => `  • ${r}`).join('\n')}`);
+      if (rules.length > 0) gParts.push(`Distractor rules:\n${rules.slice(0, GUIDELINE_RULE_CAP).map(r => `  • ${r}`).join('\n')}`);
     }
     const expl = guidelines.explanation_guidelines as Record<string, unknown> | undefined;
     if (expl) {
@@ -114,12 +125,24 @@ Output ONLY the JSON array. No preamble, no trailing text.`;
       if (rules.length > 0) gParts.push(`Explanation: ${rules.join(', ')}`);
     }
     const anti = (guidelines.anti_patterns as string[]) || [];
-    if (anti.length > 0) gParts.push(`Anti-patterns to flag:\n${anti.slice(0, 5).map(a => `  • ${a}`).join('\n')}`);
+    if (anti.length > 0) gParts.push(`Anti-patterns to flag:\n${anti.slice(0, GUIDELINE_RULE_CAP).map(a => `  • ${a}`).join('\n')}`);
     const coverage = (guidelines.coverage_rules as string[]) || [];
-    if (coverage.length > 0) gParts.push(`Coverage rules:\n${coverage.slice(0, 4).map(c => `  • ${c}`).join('\n')}`);
+    if (coverage.length > 0) gParts.push(`Coverage rules:\n${coverage.slice(0, GUIDELINE_RULE_CAP).map(c => `  • ${c}`).join('\n')}`);
 
-    // Per-format compliance checklist — only for the formats present in THIS batch,
-    // so the reviewer checks each question against its format's concrete requirements.
+    // The contract each format must satisfy, taken whole from the course's own guidelines.
+    //
+    // This block used to keep the first eight rules and drop the rest, and read only
+    // validation_checks and structure_requirements. CPA's mcq_single spec alone carries 14
+    // validation_checks, 8 structure_requirements, 9 content_rules and 8 syntax_rules — so
+    // two thirds of the contract never reached the reviewer, including "verify every
+    // numerical value needed to solve the item appears in the question" and "verify the
+    // explanation supports the keyed answer and separately explains why each of the other
+    // three options is wrong". Both describe faults a tester later found by hand.
+    //
+    // Only the formats present in this batch contribute, so the size stays bounded by what is
+    // actually being reviewed. content_rules and syntax_rules are where a course states its
+    // own subject-matter conventions, which is precisely the material that must NOT be
+    // hardcoded into this prompt: they differ per course and they are already written down.
     const specs = guidelines.format_specs as Record<string, Record<string, unknown>> | undefined;
     if (specs && Object.keys(specs).length > 0) {
       const list = (v: unknown) => (Array.isArray(v) ? (v as unknown[]).map(String) : v ? [String(v)] : []);
@@ -127,9 +150,18 @@ Output ONLY the JSON array. No preamble, no trailing text.`;
       for (const [fmt, spec] of Object.entries(specs)) {
         if (formatsInBatch && !formatsInBatch.has(fmt)) continue;
         if (!spec || typeof spec !== 'object') continue;
-        const checks = [...list(spec.validation_checks), ...list(spec.structure_requirements)];
-        if (spec.gradability) checks.push(String(spec.gradability));
-        if (checks.length > 0) blocks.push(`  [${fmt}] must satisfy:\n${checks.slice(0, 8).map(c => `    • ${c}`).join('\n')}`);
+        const checks = [
+          ...list(spec.validation_checks),
+          ...list(spec.structure_requirements),
+          ...list(spec.content_rules),
+          ...list(spec.syntax_rules),
+          ...list(spec.gradability),
+        ];
+        // Identical wording appears in more than one family; say each rule once.
+        const unique = [...new Set(checks.map((c) => c.trim()).filter(Boolean))];
+        if (unique.length > 0) {
+          blocks.push(`  [${fmt}] must satisfy:\n${unique.slice(0, FORMAT_RULE_CAP).map(c => `    • ${c}`).join('\n')}`);
+        }
       }
       if (blocks.length > 0) gParts.push(`PER-FORMAT COMPLIANCE (verify each question against its format's requirements; flag violations):\n${blocks.join('\n')}`);
     }
@@ -227,15 +259,22 @@ For EACH question ask:
    c. If the explanation only defends the correct answer without discussing distractors → flag as "explanation_issues" and set needs_revision true.
    d. Minimum 3 sentences for standalone questions.
 4. Does the stem/scenario contain the minimum data needed to reach the correct answer?
-   a. Name the figure that is missing if the key depends on a number the stem never states. An S corporation distribution question keyed a $25,000 dividend while saying only that accumulated E&P existed, never how much — unanswerable as written.
-   b. Does the stem contradict itself? One question called an amount "pretax book income" and then said it included federal income tax expense, while the key added that tax back.
-   c. Do all quoted factors, rates and tables come from ONE set of assumptions? A capital budgeting stem gave a four-year annuity factor of 3.0373 (12%) alongside a year-4 present value factor of 0.6830 (10%); no single discount rate produces both, so no answer is reachable.
-   d. Does a named method match the arithmetic it is used with? One item called itself the capital retention approach, which preserves principal, and then applied a present value annuity factor, which liquidates it.
+   a. If the key depends on a quantity the stem never states, name the missing figure. A question that establishes a quantity EXISTS without saying what it is, and then keys a specific amount, is unanswerable as written.
+   b. Does the stem contradict itself? Flag an item that describes an amount one way and then treats it as something else.
+   c. Do all quoted factors, rates, tables and assumptions come from ONE consistent set? Where two supplied figures imply different underlying parameters, no answer is reachable — recompute and say which two disagree.
+   d. Does a named method or principle match the procedure actually applied to it? Flag an item that names one approach and performs a different one.
+13. INTERNAL CONSISTENCY — does everything this item asserts agree with everything else it asserts? Work through it in this order and flag any step that fails:
+   a. Recompute every calculation the explanation states. The arithmetic it shows must produce the value it claims. An explanation that derives one number and then announces a different one is wrong wherever the disagreement lies.
+   b. The value the explanation arrives at must be the value the keyed option carries. If the working leads to one option and the key names another, say which.
+   c. Every figure the explanation relies on must appear in the stem, an exhibit, the passage, or be derived from them. An explanation that introduces a number from nowhere is not reproducible by a candidate.
+   d. No two options may be the same answer in different words, or the same quantity written differently.
+   e. Within a grouped item, sub-questions must not apply contradictory rules, mechanics or assumptions to the same facts. Name both sub-questions when they do.
+   f. The explanation's verdict must match the stored key: an explanation defending one option while the key names another means the learner is shown a justification for an answer marked wrong.
 5. Is the content free of factual inaccuracies?
-   a. ACCOUNTING/REPORTING FRAMEWORK — if a question names a framework (U.S. GAAP, IFRS, GASB, tax basis), verify the answer is right under THAT framework, not a neighbouring one. This is a high-frequency failure: three questions asked for the U.S. GAAP treatment of a cash flow hedge of a forecast purchase and keyed the IFRS answer, applying a basis adjustment to the acquired asset. IFRS 9 folds the hedge reserve into the asset's cost; ASC 815 leaves it in AOCI and reclassifies to earnings when the hedged item affects earnings. Flag any answer that is correct only under the framework the question did NOT name.
-   b. SUPERSEDED RULES — flag an answer that depends on guidance that has been amended away. The same batch split out "hedge ineffectiveness", which ASU 2017-12 eliminated for qualifying cash flow hedges years ago.
-   c. MORE THAN ONE DEFENSIBLE ANSWER — if the question cites a standard that permits several responses, check that only ONE option is among them. One item asked what an accountant should do when management refuses the no-assurance legend; AR-C 70 permits a disclaimer, a compilation, or withdrawal, and three of the four options were those three. Flag it (needs_revision) and say which options are jointly defensible.
-   d. CONTESTED AUTHORITY — where courts or authorities genuinely split, the stem must say which view it applies, or two options are both right.
+   a. NAMED FRAMEWORK OR AUTHORITY — where a question names the regime it is asked under (a standard, a jurisdiction, a guideline, a protocol, an edition), verify the answer is right under THAT one, not under a neighbouring regime that treats the same facts differently. An answer that is correct only under the framework the question did NOT name is wrong.
+   b. SUPERSEDED GUIDANCE — flag an answer that depends on a rule, threshold or classification that has since been amended or withdrawn.
+   c. MORE THAN ONE DEFENSIBLE ANSWER — if the governing rule permits several responses, check that only ONE of them appears among the options. Where two or more options are jointly permitted, flag it (needs_revision) and name them.
+   d. CONTESTED AUTHORITY — where authorities genuinely split, the stem must say which view it applies, or more than one option is right.
 6. FORMAT COMPLIANCE (if exam format requirements are provided above):
    a. Does the stem match the expected format (e.g., scenario/vignette vs. direct recall)?
    b. Does the option count match (e.g., 4 options vs. 5)?
@@ -274,7 +313,8 @@ Return a JSON ARRAY — one object per question:
     "factual_errors": [<confirmed wrong facts only — empty if none>],
     "distractor_issues": [<only if a distractor is genuinely defensible as correct — empty if none>],
     "vignette_issues": [<only if key data is missing to reach the answer — empty if none>],
-    "explanation_issues": [<flag if: explanation only defends correct answer without discussing distractors, too short, or contradicts answer — empty if none>],${caseStudyField}
+    "explanation_issues": [<flag if: explanation only defends correct answer without discussing distractors, too short, or contradicts answer — empty if none>],
+    "consistency_issues": [<check 13 — a calculation that does not produce the value it states, working that leads to a different option than the key, a figure the explanation uses that appears nowhere in the stimulus, two options that are the same answer, sub-questions applying contradictory rules. State the two things that disagree. Empty if none>],${caseStudyField}
     "difficulty_issues": [<flag if: difficulty field missing, invalid value, or unreasonable for question complexity — empty if none>],${hotspotField}
     "format_compliance_issues": [<stem format, option count, Bloom's level mismatches, non-normalized bloom labels — empty if none>],
     "answer_key_issue": "<if this question's correct answer contributes to a skewed distribution (e.g., too many 'B' answers), suggest changing to a different key with rationale — null if fine>",
@@ -371,13 +411,21 @@ export async function runValidatorBatch(
   //     schema-valid, which is precisely why they reached a tester. Instructions naming fields
   //     the task lacks, an option repeating the passage it is meant to correct, a document
   //     review keyed so that it scores full marks without being read.
+  //  4) consistency — what the question ASSERTS must agree with what else it asserts. Where
+  //     coherence reads structure, this reads content: a stated calculation that does not
+  //     produce its stated result, two options carrying one value, an explanation defending an
+  //     option the key does not name. Measured before being wired in (benchmarkGates.ts): one
+  //     blocking finding across the 2,804 rows of the three pre-repair snapshots, and that one
+  //     a defect a tester had independently reported. Advisory findings are left to the LLM
+  //     score rather than blocking, because an option order is a convention, not an error.
   for (let i = 0; i < questions.length; i++) {
     const q = questions[i];
     const fmt = (q.format_type as string) || ((q.tags as Record<string, unknown>)?.format_type as string) || 'mcq_single';
     const gradeIssues = gradabilityIssues(q);
     const schemaIssues = schemaErrorsFor(guidelines, fmt, q.content).map((s) => `schema: ${s}`);
     const cohIssues = coherenceIssues(q).map((s) => `coherence: ${s}`);
-    const issues = [...gradeIssues, ...schemaIssues, ...cohIssues];
+    const conIssues = consistencyIssues(q).filter(isBlockingConsistency).map((s) => `consistency: ${s}`);
+    const issues = [...gradeIssues, ...schemaIssues, ...cohIssues, ...conIssues];
     if (issues.length === 0) continue;
     const r = results.find((x) => (x.question_number as number) === i + 1) || results[i];
     if (!r) continue;

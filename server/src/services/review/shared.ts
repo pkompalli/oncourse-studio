@@ -288,9 +288,40 @@ function asText(v: unknown): string {
   return String(v);
 }
 
+/**
+ * Field names that give the answer away, at any depth.
+ *
+ * Used to redact the structured-content dump for a blind read. Matching on the KEY rather than
+ * the value is what makes it safe: an exhibit whose prose happens to contain the word "correct"
+ * is untouched, while `answer`, `correct_order` and every `spans[].correct` go.
+ */
+const ANSWER_BEARING_KEYS = new Set([
+  'answer', 'answers', 'correct', 'correct_answer', 'correct_answers', 'correct_option',
+  'correct_options', 'correct_order', 'correct_cells', 'correct_ids', 'correct_region',
+  'correct_answer_value', 'keyed_answer', 'explanation', 'rationale', 'rationales',
+  'scoring_rubric', 'acceptable_range', 'answer_key',
+]);
+
+/** Deep copy with every answer-bearing field removed. */
+function stripAnswers(node: unknown): unknown {
+  if (Array.isArray(node)) return node.map(stripAnswers);
+  if (node && typeof node === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(node as Record<string, unknown>)) {
+      if (ANSWER_BEARING_KEYS.has(k.toLowerCase())) continue;
+      out[k] = stripAnswers(v);
+    }
+    return out;
+  }
+  return node;
+}
+
 // Serialize a single sub-question of a case study so the reviewer can actually
 // verify its stem, options, answer, and rationale (not just a count).
-function formatSubQuestion(sq: Record<string, unknown>, j: number): string {
+//
+// `blind` withholds the answer and the rationale so a reviewer can attempt the sub-question
+// before being told what it is meant to be.
+function formatSubQuestion(sq: Record<string, unknown>, j: number, blind = false): string {
   const ft = (sq.format_type as string) || 'mcq_single';
   const stem = (sq.question as string) || (sq.stem as string) || '';
   const stepVal = sq.reasoning_step || sq.cjmm_step;
@@ -309,18 +340,18 @@ function formatSubQuestion(sq: Record<string, unknown>, j: number): string {
     lines.push('    Items: ' + (sq.items as unknown[]).map(asText).join(' | '));
   }
   const ans = sq.answer ?? sq.correct_answers ?? sq.correct_answer ?? sq.correct_order ?? sq.correct_option;
-  if (ans !== undefined && ans !== null) {
+  if (!blind && ans !== undefined && ans !== null) {
     lines.push('    Correct Answer: ' + (typeof ans === 'object' ? JSON.stringify(ans) : String(ans)));
   }
   const rat = sq.rationale ?? sq.explanation;
-  if (rat) lines.push('    Rationale: ' + (typeof rat === 'string' ? rat : JSON.stringify(rat)));
+  if (!blind && rat) lines.push('    Rationale: ' + (typeof rat === 'string' ? rat : JSON.stringify(rat)));
   const bloom = sq.blooms_level || sq.bloom;
   if (bloom) lines.push(`    Bloom: ${bloom}`);
   if (sq.difficulty) lines.push(`    Difficulty: ${sq.difficulty}`);
   return lines.join('\n');
 }
 
-function formatOneQuestion(q: Record<string, unknown>, i: number): string {
+function formatOneQuestion(q: Record<string, unknown>, i: number, blind = false): string {
   const formatType = (q.format_type as string) || ((q.tags as Record<string, unknown>)?.format_type as string) || 'mcq_single';
   const content = q.content as Record<string, unknown> | undefined;
 
@@ -347,7 +378,7 @@ function formatOneQuestion(q: Record<string, unknown>, i: number): string {
     const exhibitStr = exhibits.length
       ? '\nExhibits:\n' + exhibits.map((e, k) => `  [${asText(e.label) || `Exhibit ${k + 1}`}]${e.title ? ` ${asText(e.title)}` : ''}\n${asText(e.content)}`).join('\n')
       : '';
-    const subStr = groupedSubs.map((sq, j) => formatSubQuestion(sq, j)).join('\n');
+    const subStr = groupedSubs.map((sq, j) => formatSubQuestion(sq, j, blind)).join('\n');
     bodyStr = `${narrative ? `Scenario/Narrative: ${narrative}\n` : ''}${exhibitStr}\nSub-questions (${groupedSubs.length}):\n${subStr}`;
   } else switch (formatType) {
     case 'mcq_single': {
@@ -364,7 +395,7 @@ function formatOneQuestion(q: Record<string, unknown>, i: number): string {
           .join('\n');
       }
       const answer = (content?.answer as Record<string, unknown>)?.key || q.correct_option || '';
-      bodyStr = `Options:\n${optsStr}\nCorrect Answer: ${answer}`;
+      bodyStr = blind ? `Options:\n${optsStr}` : `Options:\n${optsStr}\nCorrect Answer: ${answer}`;
       break;
     }
     case 'sata':
@@ -381,20 +412,23 @@ function formatOneQuestion(q: Record<string, unknown>, i: number): string {
           .join('\n');
       }
       const answers = (content?.answer as Record<string, unknown>)?.keys || q.correct_answers || [q.correct_option || ''];
-      bodyStr = `Options (Select All That Apply):\n${optsStr}\nCorrect Answers: ${(answers as string[]).join(', ')}`;
+      bodyStr = blind
+        ? `Options (Select All That Apply):\n${optsStr}`
+        : `Options (Select All That Apply):\n${optsStr}\nCorrect Answers: ${(answers as string[]).join(', ')}`;
       break;
     }
     case 'ordered_response':
     case 'drag_drop': {
       const items = (content?.items as string[]) || (q.items as string[]) || [];
       const correctOrder = (content?.correct_order as number[]) || (q.correct_order as number[]) || [];
-      bodyStr = `Items to order:\n${items.map((item, j) => `  ${j + 1}. ${item}`).join('\n')}\nCorrect Order: ${correctOrder.join(', ')}`;
+      const itemsStr = items.map((item, j) => `  ${j + 1}. ${item}`).join('\n');
+      bodyStr = blind ? `Items to order:\n${itemsStr}` : `Items to order:\n${itemsStr}\nCorrect Order: ${correctOrder.join(', ')}`;
       break;
     }
     case 'fill_blank': {
       const answer = (content?.answer as Record<string, unknown>) || {};
-      bodyStr = `Correct Answer: ${answer.value || q.correct_answer_value || ''}${answer.unit ? ` ${answer.unit}` : ''}`;
-      if (answer.acceptable_range) bodyStr += `\nAcceptable Range: ${answer.acceptable_range}`;
+      bodyStr = blind ? '(free-entry answer)' : `Correct Answer: ${answer.value || q.correct_answer_value || ''}${answer.unit ? ` ${answer.unit}` : ''}`;
+      if (!blind && answer.acceptable_range) bodyStr += `\nAcceptable Range: ${answer.acceptable_range}`;
       break;
     }
     case 'hot_spot': {
@@ -405,17 +439,21 @@ function formatOneQuestion(q: Record<string, unknown>, i: number): string {
         const correctIds = (answer.correct_ids as string[]) || [];
         const scoring = (content?.scoring as string) || '';
         const rationale = (content?.rationale as Record<string, string>) || {};
-        bodyStr = `Stimulus (${stimulus.type}): ${stimulus.title || ''}\nTargets:\n${targets.map(t => `  ${t.id}: ${t.text}`).join('\n')}\nCorrect IDs: [${correctIds.join(', ')}]\nScoring: ${scoring}`;
-        if (Object.keys(rationale).length > 0) {
+        const targetStr = targets.map(t => `  ${t.id}: ${t.text}`).join('\n');
+        bodyStr = blind
+          ? `Stimulus (${stimulus.type}): ${stimulus.title || ''}\nTargets:\n${targetStr}\nScoring: ${scoring}`
+          : `Stimulus (${stimulus.type}): ${stimulus.title || ''}\nTargets:\n${targetStr}\nCorrect IDs: [${correctIds.join(', ')}]\nScoring: ${scoring}`;
+        if (!blind && Object.keys(rationale).length > 0) {
           bodyStr += `\nRationale:\n${Object.entries(rationale).map(([id, r]) => `  ${id}: ${r}`).join('\n')}`;
         }
       } else if (stimulus && stimulus.type === 'image_regions') {
         const regions = (stimulus.regions as Array<{ id: string; shape: string; bbox: number[] }>) || [];
         const correctIds = (answer.correct_ids as string[]) || [];
-        bodyStr = `Stimulus (image_regions):\nRegions: ${regions.map(r => `${r.id}[${r.bbox?.join(',')}]`).join(', ')}\nCorrect IDs: [${correctIds.join(', ')}]`;
+        const regionStr = regions.map(r => `${r.id}[${r.bbox?.join(',')}]`).join(', ');
+        bodyStr = blind ? `Stimulus (image_regions):\nRegions: ${regionStr}` : `Stimulus (image_regions):\nRegions: ${regionStr}\nCorrect IDs: [${correctIds.join(', ')}]`;
       } else {
         // Legacy fallback
-        bodyStr = `Correct Region: ${JSON.stringify(answer.region || q.correct_region || '')}`;
+        bodyStr = blind ? '(region answer)' : `Correct Region: ${JSON.stringify(answer.region || q.correct_region || '')}`;
       }
       break;
     }
@@ -423,36 +461,44 @@ function formatOneQuestion(q: Record<string, unknown>, i: number): string {
       const rows = (content?.row_headers as string[]) || (q.row_headers as string[]) || [];
       const cols = (content?.column_headers as string[]) || (q.column_headers as string[]) || [];
       const cells = (content?.correct_cells as Array<{ row: number; col: number }>) || [];
-      bodyStr = `Rows: ${rows.join(', ')}\nColumns: ${cols.join(', ')}\nCorrect Cells: ${cells.map((c) => `(${rows[c.row] || c.row},${cols[c.col] || c.col})`).join(', ')}`;
+      const grid = `Rows: ${rows.join(', ')}\nColumns: ${cols.join(', ')}`;
+      bodyStr = blind ? grid : `${grid}\nCorrect Cells: ${cells.map((c) => `(${rows[c.row] || c.row},${cols[c.col] || c.col})`).join(', ')}`;
       break;
     }
     case 'cloze_dropdown': {
       const blanks = (content?.blanks as Array<{ id: string; options: string[]; correct: string }>) || [];
-      bodyStr = blanks.map((b) => `  ${b.id}: options=[${b.options?.join(', ')}] correct=${b.correct}`).join('\n');
+      bodyStr = blanks.map((b) => blind ? `  ${b.id}: options=[${b.options?.join(', ')}]` : `  ${b.id}: options=[${b.options?.join(', ')}] correct=${b.correct}`).join('\n');
       break;
     }
     case 'emq': {
       const optionList = (content?.option_list as string[]) || [];
       const scenarios = (content?.scenarios as Array<{ stem: string; correct_answer: string }>) || [];
-      bodyStr = `Option List:\n${optionList.map((o) => `  ${o}`).join('\n')}\nScenarios:\n${scenarios.map((s, j) => `  ${j + 1}. ${s.stem} → ${s.correct_answer}`).join('\n')}`;
+      bodyStr = `Option List:\n${optionList.map((o) => `  ${o}`).join('\n')}\nScenarios:\n${scenarios.map((s, j) => blind ? `  ${j + 1}. ${s.stem}` : `  ${j + 1}. ${s.stem} → ${s.correct_answer}`).join('\n')}`;
       break;
     }
     case 'case_study': {
       const narrative = (content?.case_narrative as string) || '';
       const subQs = (content?.sub_questions as Array<Record<string, unknown>>) || [];
-      const subStr = subQs.map((sq, j) => formatSubQuestion(sq, j)).join('\n');
+      const subStr = subQs.map((sq, j) => formatSubQuestion(sq, j, blind)).join('\n');
       bodyStr = `Case Narrative: ${narrative}\n\nSub-questions (${subQs.length}):\n${subStr}`;
       break;
     }
     default: {
       // Legacy/unknown format — try standard MCQ fields
       const opts = q.options;
+      // This branch also serves constructed_response and performance_task, which carry no
+      // options at all — so the final `else` is the one a blind read reaches for them, and it
+      // was printing the answer verbatim.
       if (typeof opts === 'object' && opts !== null && !Array.isArray(opts)) {
-        bodyStr = `Options:\n${Object.entries(opts as Record<string, string>).map(([k, v]) => `  ${k}. ${v}`).join('\n')}\nCorrect Answer: ${q.correct_option || ''}`;
+        const listed = `Options:\n${Object.entries(opts as Record<string, string>).map(([k, v]) => `  ${k}. ${v}`).join('\n')}`;
+        bodyStr = blind ? listed : `${listed}\nCorrect Answer: ${q.correct_option || ''}`;
       } else if (Array.isArray(opts)) {
-        bodyStr = `Options:\n${(opts as string[]).map((o, j) => `  ${String.fromCharCode(65 + j)}. ${o}`).join('\n')}\nCorrect Answer: ${q.correct_option || ''}`;
+        const listed = `Options:\n${(opts as string[]).map((o, j) => `  ${String.fromCharCode(65 + j)}. ${o}`).join('\n')}`;
+        bodyStr = blind ? listed : `${listed}\nCorrect Answer: ${q.correct_option || ''}`;
       } else {
-        bodyStr = `Answer: ${q.correct_option || q.correct_answer || JSON.stringify(content?.answer || '')}`;
+        bodyStr = blind
+          ? '(free response — no options supplied)'
+          : `Answer: ${q.correct_option || q.correct_answer || JSON.stringify(content?.answer || '')}`;
       }
     }
   }
@@ -496,21 +542,28 @@ function formatOneQuestion(q: Record<string, unknown>, i: number): string {
   // MCQ-like formats are fully covered above, so we skip the redundant dump there.
   let groundTruth = '';
   if (content && !SIMPLE_FORMATS.has(formatType)) {
-    const raw = JSON.stringify(content);
+    // In blind mode this dump is the one place an answer could still leak, because it is the
+    // whole content object verbatim. Redact it structurally rather than trusting the per-format
+    // branches above to have covered every shape.
+    const raw = JSON.stringify(blind ? stripAnswers(content) : content);
     const capped = raw.length > GROUND_TRUTH_CAP ? raw.slice(0, GROUND_TRUTH_CAP) + '…(truncated)' : raw;
-    groundTruth = `\n[FULL STRUCTURED CONTENT — authoritative; verify against this]:\n${capped}`;
+    const label = blind
+      ? '[FULL STRUCTURED CONTENT — answer fields removed]'
+      : '[FULL STRUCTURED CONTENT — authoritative; verify against this]';
+    groundTruth = `\n${label}:\n${capped}`;
   }
+
+  const explanationLine = blind ? '' : `\nExplanation: ${explanation}`;
 
   return `--- Q${i + 1} ---${formatLabel}${metaLine}
 ${passageBlock}Question: ${stem}
-${bodyStr}
-Explanation: ${explanation}${imageStatus ? '\n' + imageStatus : ''}${groundTruth}`;
+${bodyStr}${explanationLine}${imageStatus ? '\n' + imageStatus : ''}${groundTruth}`;
 }
 
 // ── Format questions as plain text (no images) ──
 
-export function formatQuestionsForReview(questions: Record<string, unknown>[]): string {
-  return questions.map((q, i) => formatOneQuestion(q, i)).join('\n\n');
+export function formatQuestionsForReview(questions: Record<string, unknown>[], blind = false): string {
+  return questions.map((q, i) => formatOneQuestion(q, i, blind)).join('\n\n');
 }
 
 // ── Format questions as multimodal content (text + images) ──
@@ -549,13 +602,14 @@ async function fetchImageAsDataUrl(url: string, attempts = 3): Promise<string | 
 }
 
 export async function formatQuestionsForReviewWithImages(
-  questions: Record<string, unknown>[]
+  questions: Record<string, unknown>[],
+  blind = false
 ): Promise<string | ContentPart[]> {
   const hasAnyImage = questions.some(q => q.is_image_question && q.image_url);
 
   if (!hasAnyImage) {
     // No images to show — return plain text (cheaper, faster)
-    return formatQuestionsForReview(questions);
+    return formatQuestionsForReview(questions, blind);
   }
 
   // Pre-fetch all images concurrently (as data URLs). Failures resolve to null.
@@ -572,7 +626,7 @@ export async function formatQuestionsForReviewWithImages(
 
   for (let i = 0; i < questions.length; i++) {
     const q = questions[i];
-    const baseText = formatOneQuestion(q, i);
+    const baseText = formatOneQuestion(q, i, blind);
     const dataUrl = dataUrls[i];
 
     if (q.is_image_question && q.image_url && dataUrl) {

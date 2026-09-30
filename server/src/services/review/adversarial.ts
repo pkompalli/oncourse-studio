@@ -1,6 +1,24 @@
 /**
  * Adversarial review — faithful port of V1's get_batch_adversarial_prompt() (app.py 5860-5966)
  * Model: OR_ADVERSARIAL_MODEL (GPT-5.4)
+ *
+ * Runs in two phases, and the order is the point.
+ *
+ * PHASE 1 (blind) sits the question. Stem, options, passage, exhibits, image — no key, no
+ * explanation, no rationale, nothing derived from them. The reviewer commits to an answer and
+ * says where the item fought back: a figure that is not supplied, two facts that cannot both
+ * hold, no option that fits, more than one that does.
+ *
+ * PHASE 2 (informed) reveals the key and the explanation alongside phase 1's own attempt, and
+ * asks the usual adversarial questions about the gap between them.
+ *
+ * The reason for the split is a measured one. A QA pass returned 19 items whose key or options
+ * were wrong, and in every one the explanation AGREED with the key — "B is correct because…"
+ * where B was what the row stored. A reviewer shown the key and a fluent justification for it
+ * confirms; it does not check. The tester who found all 19 did the one thing this stage was
+ * never able to do, which was to answer the question first. Phase 1 restores that, and the
+ * disagreement between phase 1's answer and the stored key is then a deterministic signal
+ * needing no judgment at all.
  */
 
 import { orCall, MODELS } from '../llm/openrouter.js';
@@ -159,6 +177,159 @@ Return a JSON ARRAY — one object per question:
 Output ONLY the JSON array. No preamble, no trailing text.`;
 }
 
+// ── Phase 1: sit the question ──
+
+/** What stopped a candidate, named so the fixer is told which fault to repair. */
+const BLOCKERS = [
+  'insufficient_data — a value, fact or assumption the answer needs is not supplied anywhere',
+  'inconsistent_data — two supplied facts cannot both hold, or imply different underlying parameters',
+  'no_option_fits — the answer you reached is not among the options offered',
+  'multiple_defensible — two or more options are correct under the facts as given',
+  'ambiguous_stem — the question asks one thing while the options answer another, or the lead-in admits two readings',
+] as const;
+
+export function getBlindSolvePrompt(domain = 'exam preparation'): string {
+  return `You are an expert ${domain} candidate sitting these questions under exam conditions.
+
+You are given each question WITHOUT its answer key and WITHOUT its explanation. That is deliberate. Do not ask for them and do not guess at what they might say — answer from the stem, the options, and whatever passage, exhibit or image is supplied, exactly as a candidate would.
+
+For EACH question:
+1. Work it out. Do the arithmetic, apply the rule, read the figure.
+2. Commit to an answer. Give the option letter(s). If the format is not multiple choice, give the value, ordering or selection the question asks for.
+3. Say where the question fought back, using ONLY these labels where they genuinely apply:
+${BLOCKERS.map((b) => `   • ${b}`).join('\n')}
+4. State your confidence: high if one option is clearly right, medium if you had to choose between two, low if you are guessing.
+
+Rules:
+• Answer even when you flag a blocker — say what you would put down, then say what is wrong.
+• Do NOT flag a blocker because a question is hard. Hard is not broken. Flag only what makes the question unanswerable, ambiguous, or answerable in more than one way.
+• Do NOT comment on style, wording quality, difficulty, or educational value. That is not this pass.
+• For a grouped item (case study, simulation, passage set), answer EVERY sub-question in order.
+
+Return a JSON ARRAY — one object per question:
+[
+  {
+    "question_number": 1,
+    "answer": "<option letter(s): \\"B\\", or \\"B,D\\" for select-all. For a grouped item give one entry per sub-question in order: \\"1:B, 2:C, 3:A\\". For a non-choice format give the value or ordering.>",
+    "confidence": "<high|medium|low>",
+    "blockers": [<zero or more labels from the list above — empty if the question is sound>],
+    "working": "<one or two sentences: how you reached it, or what stopped you>"
+  },
+  ...
+]
+
+Output ONLY the JSON array. No preamble, no trailing text.`;
+}
+
+/** The answers the row stores, one entry per sub-question (or one entry for a standalone). */
+function storedAnswersOf(q: Record<string, unknown>): string[] | null {
+  const content = (q.content as Record<string, unknown>) || {};
+  const subs = content.sub_questions as Array<Record<string, unknown>> | undefined;
+  if (Array.isArray(subs) && subs.length) {
+    const keys = subs.map((s) => String(s.correct_answer ?? '').trim().toUpperCase().replace(/\s+/g, ''));
+    // Only comparable when every sub-question is letter-keyed; a grid or ordering inside the
+    // set makes the comparison meaningless.
+    return keys.every((k) => /^[A-J](,[A-J])*$/.test(k)) ? keys : null;
+  }
+  const answer = (content.answer as Record<string, unknown>) || {};
+  const keys = answer.keys ?? q.correct_answers;
+  if (Array.isArray(keys) && keys.length) {
+    return [keys.map((k) => String(k).trim().toUpperCase()).sort().join(',')];
+  }
+  const key = answer.key ?? q.correct_option;
+  const s = String(key ?? '').trim().toUpperCase();
+  return /^[A-J]$/.test(s) ? [s] : null;
+}
+
+/** The blind attempt, parsed the same way. Returns null when it cannot be read as letters. */
+function parseBlindAnswers(raw: unknown, grouped: boolean): string[] | null {
+  const s = String(raw ?? '').trim().toUpperCase();
+  if (!s) return null;
+  if (grouped) {
+    // "1:B, 2:C, 3:A" — or a bare "B, C, A" in the same order.
+    const parts = s.split(/[,;]/).map((p) => p.trim()).filter(Boolean);
+    const letters = parts.map((p) => {
+      const m = p.match(/^(?:\d+\s*[:.)]\s*)?([A-J](?:\s*,\s*[A-J])*)$/);
+      return m ? m[1].replace(/\s+/g, '') : null;
+    });
+    return letters.every(Boolean) ? (letters as string[]) : null;
+  }
+  const multi = s.match(/^[A-J](\s*,\s*[A-J])+$/);
+  if (multi) return [s.split(',').map((x) => x.trim()).sort().join(',')];
+  return /^[A-J]$/.test(s) ? [s] : null;
+}
+
+/**
+ * Where the blind attempt and the stored key part company.
+ *
+ * Reported per sub-question rather than per item, because a case study is one row but six
+ * independent questions. Measured against the round-3 corpus, a whole-item flag sent a sound
+ * four-part CFA set to the fixer over two sub-questions the blind attempt simply got wrong —
+ * naming the parts at least keeps the repair pointed at what is actually disputed, and leaves
+ * the rest of the set alone.
+ */
+function disagreementOf(q: Record<string, unknown>, raw: unknown): { any: boolean; detail: string } {
+  const content = (q.content as Record<string, unknown>) || {};
+  const grouped = Array.isArray(content.sub_questions) && (content.sub_questions as unknown[]).length > 0;
+  const stored = storedAnswersOf(q);
+  const got = parseBlindAnswers(raw, grouped);
+  if (!stored || !got || stored.length !== got.length) return { any: false, detail: '' };
+
+  const parts: string[] = [];
+  stored.forEach((k, i) => {
+    if (k === got[i]) return;
+    parts.push(grouped ? `sub-question ${i + 1} (key ${k}, attempt ${got[i]})` : `key ${k}, attempt ${got[i]}`);
+  });
+  return { any: parts.length > 0, detail: parts.join('; ') };
+}
+
+export interface BlindAttempt {
+  answer: string;
+  confidence: string;
+  blockers: string[];
+  working: string;
+  /** Set only where both the attempt and the stored key are comparable letter answers. */
+  disagreesWithKey: boolean;
+  /** Which sub-questions disagree, and what each side says. Empty when they agree. */
+  disagreementDetail: string;
+}
+
+export async function runBlindSolveBatch(
+  questions: Record<string, unknown>[],
+  domain = 'exam preparation'
+): Promise<Array<BlindAttempt | null>> {
+  const prompt = getBlindSolvePrompt(domain);
+  const content = await formatQuestionsForReviewWithImages(questions, /* blind */ true);
+
+  const userMessage: string | ContentPart[] = typeof content === 'string'
+    ? `${prompt}\n\nQuestions to answer:\n${content}`
+    : [{ type: 'text', text: `${prompt}\n\nQuestions to answer:\n` }, ...content];
+
+  let raw: Record<string, unknown>[] = [];
+  try {
+    // Low temperature: this is an attempt at the right answer, not an exploration.
+    const response = await orCall(MODELS.ADVERSARIAL, '', userMessage, { maxTokens: 16000, temperature: 0.1 });
+    raw = extractJsonArray(response.content, questions.length);
+  } catch (e) {
+    console.warn(`  [Blind] LLM call failed for batch of ${questions.length}: ${e instanceof Error ? e.message : e}`);
+    return questions.map(() => null);
+  }
+
+  return questions.map((q, i) => {
+    const r = raw.find((x) => (x.question_number as number) === i + 1) || raw[i];
+    if (!r) return null;
+    const clash = disagreementOf(q, r.answer);
+    return {
+      answer: String(r.answer ?? ''),
+      confidence: String(r.confidence ?? ''),
+      blockers: Array.isArray(r.blockers) ? (r.blockers as unknown[]).map(String) : [],
+      working: String(r.working ?? ''),
+      disagreesWithKey: clash.any,
+      disagreementDetail: clash.detail,
+    };
+  });
+}
+
 // ── Run adversarial on a batch of questions ──
 
 export async function runAdversarialBatch(
@@ -167,15 +338,34 @@ export async function runAdversarialBatch(
   domain = 'exam preparation',
   examFormat?: Record<string, unknown>
 ): Promise<Record<string, unknown>[]> {
+  // Phase 1 — sit the questions before seeing any of the answers.
+  const attempts = contentType === 'qbank'
+    ? await runBlindSolveBatch(questions, domain)
+    : questions.map(() => null);
+
+  const attemptBlock = attempts.some(Boolean)
+    ? `\nBLIND ATTEMPT (you answered these questions yourself, before seeing any key or explanation):\n${
+        attempts.map((a, i) => {
+          if (!a) return `  Q${i + 1}: (no attempt recorded)`;
+          const flags = a.blockers.length ? `  blockers: ${a.blockers.join(', ')}` : '';
+          const clash = a.disagreesWithKey ? `  ⚠ DISAGREES WITH THE STORED KEY — ${a.disagreementDetail}` : '';
+          return `  Q${i + 1}: answered ${a.answer} (confidence ${a.confidence})${clash}\n      working: ${a.working}${flags ? `\n    ${flags}` : ''}`;
+        }).join('\n')
+      }
+→ Where your blind answer differs from the key below, ONE of them is wrong. Decide which, and say so plainly: either the key is wrong (give the answer that is right and why) or your attempt was (say what in the stem you misread). Do not split the difference.
+→ Where you flagged a blocker, check it against the key and explanation now. If the explanation supplies a fact the stem withheld, the STEM is at fault — a candidate never sees the explanation.
+→ Where your blind answer matches the key, that agreement is evidence the item works; do not manufacture a problem with it.\n`
+    : '';
+
   const prompt = getBatchAdversarialPrompt(contentType, domain, examFormat);
   const content = await formatQuestionsForReviewWithImages(questions);
 
   let userMessage: string | ContentPart[];
   if (typeof content === 'string') {
-    userMessage = `${prompt}\n\nContent to validate:\n${content}`;
+    userMessage = `${prompt}\n${attemptBlock}\nContent to validate:\n${content}`;
   } else {
     userMessage = [
-      { type: 'text', text: `${prompt}\n\nContent to validate:\n` },
+      { type: 'text', text: `${prompt}\n${attemptBlock}\nContent to validate:\n` },
       ...content,
     ];
   }
@@ -205,6 +395,55 @@ export async function runAdversarialBatch(
       if (results2.length > results.length) results = results2;
     } catch (e) {
       console.warn(`  [Adversarial] Retry LLM call failed: ${e instanceof Error ? e.message : e}`);
+    }
+  }
+
+  // HARD GATE (deterministic, regardless of the phase-2 score):
+  //
+  // An independent attempt that reached a different answer than the key is not an opinion about
+  // quality — it is two answers to a question that has one. Either the key is wrong or the item
+  // is ambiguous enough to lead a prepared candidate elsewhere, and both need a human-legible
+  // change. Phase 2 has already been asked to say which; this makes sure the question is routed
+  // to the fixer even when phase 2 talked itself back into agreeing with the key, which is the
+  // failure this whole two-phase arrangement exists to prevent.
+  //
+  // Only letter-comparable answers reach here (see storedAnswerOf), so a free-entry or ordering
+  // format never trips it on a formatting difference.
+  for (let i = 0; i < questions.length; i++) {
+    const attempt = attempts[i];
+    if (!attempt) continue;
+    const r = results.find((x) => (x.question_number as number) === i + 1) || results[i];
+    if (!r) continue;
+
+    r.blind_answer = attempt.answer;
+    r.blind_confidence = attempt.confidence;
+    r.blind_blockers = attempt.blockers;
+    r.key_disagreement = attempt.disagreesWithKey;
+
+    if (!attempt.disagreesWithKey && !attempt.blockers.length) continue;
+
+    const notes: string[] = [];
+    if (attempt.disagreesWithKey) {
+      notes.push(
+        `ANSWER KEY — ${attempt.disagreementDetail}. An independent attempt at this question, made ` +
+        `without sight of the key or explanation, reached a different answer (${attempt.working.slice(0, 200)}). ` +
+        `Determine which is right and correct whichever is wrong — the key, or the stem/options that ` +
+        `led elsewhere. Change ONLY the parts named above; the rest of the item is not in dispute.`
+      );
+    }
+    for (const b of attempt.blockers) {
+      notes.push(`BLIND BLOCKER (${b}): ${attempt.working.slice(0, 200)}`);
+    }
+
+    // A low-confidence attempt that disagrees is reported but does not cap the score. It is the
+    // reading a guess produces, and a hard question is not a broken one — the note still reaches
+    // phase 2 and the fixer, which can act on it if the item really is ambiguous.
+    const decisive = attempt.disagreesWithKey && attempt.confidence.toLowerCase() !== 'low';
+    const prior = (r.adversarial_score as number) ?? 5;
+    if (decisive) r.adversarial_score = Math.min(prior, 4);
+    r.changes_required = [...((r.changes_required as string[]) || []), ...notes];
+    if (decisive) {
+      r.summary = `Blind attempt disagrees with the key (${attempt.disagreementDetail}) — ${String(r.summary ?? '')}`.slice(0, 400);
     }
   }
 
