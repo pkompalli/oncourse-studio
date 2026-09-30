@@ -9,6 +9,7 @@
 import { supabase } from '../../db/supabase.js';
 import { fetchAllRows } from '../../db/pagination.js';
 import { bankMixForJob } from '../generation/bankMix.js';
+import { fixHistoryBlock, unappliedChanges } from './fixHistory.js';
 import { coherenceIssues, partitionIssues } from '../generation/coherence.js';
 import { orCall, MODELS } from '../llm/openrouter.js';
 import type { ContentPart } from '../llm/openrouter.js';
@@ -121,12 +122,43 @@ async function pushProgress(jobId: string) {
 
 // ── Audit prompt ──
 
-function getAuditPrompt(): string {
+function getAuditPrompt(hasRepairs: boolean): string {
+  // The verification section only appears when something in the batch was actually repaired.
+  // Asking "was each change applied?" of ten questions that were never touched trains the
+  // model to answer the question with an empty array, which is how a real finding gets lost.
+  const verification = hasRepairs ? `
+
+PART ONE — VERIFY THE REPAIRS (do this FIRST, for every question that has a REPAIR HISTORY):
+
+Earlier stages asked for specific changes, and a fixer attempted them. You are shown what was
+asked and which fields moved. For EACH requested change, decide:
+
+  • "applied"             the change was made AND the result is correct
+  • "applied_incorrectly" the change was made but the result is wrong, incomplete, or broke something else
+  • "not_applied"         the question still has the defect the change describes
+  • "not_needed"          the change rested on a misreading; the question was already right
+
+Read the change, then read the question as it now stands, and say which. Two rules:
+
+  1. "fields that moved: NONE" means the fixer returned the question unchanged. Every change it
+     was asked to make is "not_applied" unless the question plainly never had the defect.
+  2. "fields that moved: NOT RECORDED" means nothing was captured either way. Decide from the
+     question in front of you — do NOT infer that the repair was skipped.
+  3. A repair marked THE REPAIR FAILED was never attempted successfully. Those changes are
+     "not_applied" — do not mark them applied because the question reads well now.
+
+Where the recorded movement says a field changed but the defect is still present, that is
+"applied_incorrectly", not "applied". Judge the question, not the record.
+
+PART TWO — SCORE THE QUESTION` : '';
+
   return `You are a final quality gate auditor for exam questions.
 
 You will receive questions that have already passed validator and adversarial review.
 Questions may be in ANY format: MCQ, Select All That Apply (SATA), ordered response, fill-in-the-blank, hot spot, matrix grid, extended matching, case study, etc.
-Your job is a FINAL holistic quality check — one combined score per question.
+${hasRepairs
+  ? 'Your job has two parts: confirm that the repairs asked of earlier stages were actually made and made correctly, and then score the question.'
+  : 'Your job is a FINAL holistic quality check — one combined score per question.'}${verification}
 
 Score each question 1-10 based on:
 1. Factual accuracy of the correct answer and explanation
@@ -148,7 +180,11 @@ For each question, provide:
 - quality_score (1-10)
 - status: "approved" if score >= 7, "flagged" if score < 7
 - reason: 1 sentence explaining the score
-- issues: array of specific problems (empty if approved)
+- issues: array of specific problems (empty if approved)${hasRepairs ? `
+- repair_verification: one entry per requested change, for questions with a REPAIR HISTORY
+
+A question with any "not_applied" or "applied_incorrectly" change CANNOT be approved, whatever
+its other merits. It still carries a defect an earlier stage identified.` : ''}
 
 Return a JSON ARRAY — one object per question:
 [
@@ -157,7 +193,14 @@ Return a JSON ARRAY — one object per question:
     "quality_score": 9,
     "status": "approved",
     "reason": "Well-constructed question with accurate answer and good distractors",
-    "issues": []
+    "issues": []${hasRepairs ? `,
+    "repair_verification": [
+      {
+        "change": "<the requested change, quoted or summarised so it is identifiable>",
+        "verdict": "<applied|applied_incorrectly|not_applied|not_needed>",
+        "note": "<1 sentence: what you checked in the question, and what you found>"
+      }
+    ]` : ''}
   },
   ...
 ]
@@ -168,15 +211,26 @@ Output ONLY the JSON array. No preamble, no trailing text.`;
 // ── Run audit on a batch ──
 
 async function runAuditBatch(questions: Record<string, unknown>[]): Promise<Record<string, unknown>[]> {
-  const prompt = getAuditPrompt();
+  // What earlier stages asked for, and what the fixer did about it. This was always on the row
+  // — reviewPipeline writes it for every repair — and audit never read it, so it re-scored each
+  // question from scratch and a change that was requested and silently not applied left a
+  // question that reads well, scores nine, and still has the defect.
+  const histories = questions
+    .map((q, i) => fixHistoryBlock(q, `Q${i + 1}`))
+    .filter((h): h is string => Boolean(h));
+  const historyBlock = histories.length
+    ? `\nREPAIR HISTORY — what earlier stages asked for and what the fixer did:\n${histories.join('\n')}\n`
+    : '';
+
+  const prompt = getAuditPrompt(histories.length > 0);
   const content = await formatQuestionsForReviewWithImages(questions);
 
   let userMessage: string | ContentPart[];
   if (typeof content === 'string') {
-    userMessage = `${prompt}\n\nQuestions to audit:\n${content}`;
+    userMessage = `${prompt}\n${historyBlock}\nQuestions to audit:\n${content}`;
   } else {
     userMessage = [
-      { type: 'text', text: `${prompt}\n\nQuestions to audit:\n` },
+      { type: 'text', text: `${prompt}\n${historyBlock}\nQuestions to audit:\n` },
       ...content,
     ];
   }
@@ -310,6 +364,34 @@ async function runAuditPipeline(jobId: string): Promise<void> {
             result.reason = `Not gradable: ${gradeIssues.slice(0, 3).join('; ')}${gradeIssues.length > 3 ? '…' : ''}`;
             result.issues = [ ...((result.issues as string[]) || []), ...gradeIssues.map((s) => `NOT GRADABLE — ${s}`) ];
           }
+        }
+
+        // REPAIR VERIFICATION GATE — the job this stage exists to do.
+        //
+        // Two sources, and the deterministic one comes first. `unappliedChanges` reads the
+        // fixer's OWN record that it could not make a change: a *_fix_failed entry with no later
+        // successful repair of the same stage. That is not an opinion about quality and needs no
+        // model to confirm it — the change was requested, the attempt failed, and nothing since
+        // has addressed it. Such a question was previously free to score 9 and ship.
+        //
+        // The auditor's per-change verdicts are the second source, covering the case the record
+        // cannot see: a change that WAS applied and applied wrongly.
+        const unapplied = unappliedChanges(q);
+        const verdicts = (result?.repair_verification as Array<Record<string, unknown>>) || [];
+        const badVerdicts = verdicts.filter((v) =>
+          ['not_applied', 'applied_incorrectly'].includes(String(v?.verdict || '').toLowerCase()));
+
+        if (unapplied.length || badVerdicts.length) {
+          const notes = [
+            ...unapplied.map((c) => `REPAIR NEVER APPLIED — the fixer failed and nothing since has addressed: ${String(c).slice(0, 220)}`),
+            ...badVerdicts.map((v) => `REPAIR ${String(v.verdict).toUpperCase()} — ${String(v.change ?? '').slice(0, 160)}: ${String(v.note ?? '').slice(0, 200)}`),
+          ];
+          if (auditScore >= 7) auditScore = 4;
+          if (result) {
+            result.issues = [...((result.issues as string[]) || []), ...notes];
+            result.reason = `Requested repair not carried through: ${notes[0].slice(0, 160)}`;
+          }
+          console.log(`    [audit] Q${qStart + i} repair verification failed: ${notes[0].slice(0, 110)}`);
         }
 
         // Combined score: average of validator + adversarial + audit, or just audit if others missing

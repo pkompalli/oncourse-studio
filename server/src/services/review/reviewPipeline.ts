@@ -23,6 +23,7 @@ import { saveJobSnapshots } from '../snapshots.js';
 import { regenerateQuestionImage, isImageGenerationAvailable } from '../images/imageGeneration.js';
 import { startTracking, getStepTokens } from '../llm/tokenTracker.js';
 import { distributionForJob } from '../generation/distribution.js';
+import { changedFields } from '../audit/fixHistory.js';
 
 const REVIEW_BATCH_SIZE = 10;
 const MAX_CONCURRENT_BATCHES = 8;
@@ -288,8 +289,12 @@ async function runValidatorPhase(
           const fixedQ = fixResult.question;
 
           // Record before/after in audit_trail
+          // `content` is selected too, because for a grouped item the entire repair lives
+          // there and the legacy columns are identical on both sides of a real change. Without
+          // it the trail records a case-study fix as having moved nothing, and audit reads that
+          // as the fixer having done nothing.
           const { data: current } = await supabase.from('qb_questions')
-            .select('question, options, correct_option, explanation, audit_trail')
+            .select('question, options, correct_option, explanation, content, audit_trail')
             .eq('id', item.dbId).single();
           const trail = Array.isArray(current?.audit_trail) ? [...(current.audit_trail as unknown[])] : [];
           trail.push({
@@ -300,13 +305,21 @@ async function runValidatorPhase(
               options: current?.options,
               correct_option: current?.correct_option,
               explanation: current?.explanation,
+              content: current?.content,
             },
             after: {
               question: fixedQ.question,
               options: fixedQ.options,
               correct_option: fixedQ.correct_option || fixedQ.correct_answer,
               explanation: fixedQ.explanation,
+              content: fixedQ.content,
             },
+            // Computed here, where both snapshots are in hand, so audit is told which fields
+            // moved rather than asked to infer it.
+            changed_fields: changedFields(
+              { question: current?.question, options: current?.options, correct_option: current?.correct_option, explanation: current?.explanation, content: current?.content },
+              { question: fixedQ.question, options: fixedQ.options, correct_option: fixedQ.correct_option || fixedQ.correct_answer, explanation: fixedQ.explanation, content: fixedQ.content },
+            ),
             timestamp: new Date().toISOString(),
           });
 
@@ -527,8 +540,12 @@ async function runAdversarialPhase(
           const fixedQ = fixResult.question;
 
           // Record before/after in audit_trail
+          // `content` is selected too, because for a grouped item the entire repair lives
+          // there and the legacy columns are identical on both sides of a real change. Without
+          // it the trail records a case-study fix as having moved nothing, and audit reads that
+          // as the fixer having done nothing.
           const { data: current } = await supabase.from('qb_questions')
-            .select('question, options, correct_option, explanation, audit_trail')
+            .select('question, options, correct_option, explanation, content, audit_trail')
             .eq('id', item.dbId).single();
           const trail = Array.isArray(current?.audit_trail) ? [...(current.audit_trail as unknown[])] : [];
           trail.push({
@@ -539,13 +556,21 @@ async function runAdversarialPhase(
               options: current?.options,
               correct_option: current?.correct_option,
               explanation: current?.explanation,
+              content: current?.content,
             },
             after: {
               question: fixedQ.question,
               options: fixedQ.options,
               correct_option: fixedQ.correct_option || fixedQ.correct_answer,
               explanation: fixedQ.explanation,
+              content: fixedQ.content,
             },
+            // Computed here, where both snapshots are in hand, so audit is told which fields
+            // moved rather than asked to infer it.
+            changed_fields: changedFields(
+              { question: current?.question, options: current?.options, correct_option: current?.correct_option, explanation: current?.explanation, content: current?.content },
+              { question: fixedQ.question, options: fixedQ.options, correct_option: fixedQ.correct_option || fixedQ.correct_answer, explanation: fixedQ.explanation, content: fixedQ.content },
+            ),
             timestamp: new Date().toISOString(),
           });
 
