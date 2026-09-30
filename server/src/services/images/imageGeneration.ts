@@ -191,7 +191,7 @@ IMAGE NEEDED: ${subject}${imageType && imageType !== subject ? `\nIMAGE TYPE: ${
 async function generateImageWithOpenAI(
   questionData: Record<string, unknown>,
   fixInstructions?: string
-): Promise<{ imageBytes: Buffer; mimeType: string } | null> {
+): Promise<{ imageBytes: Buffer; mimeType: string } | { safetyRefused: true; message: string } | null> {
   if (!openaiClient) return null;
 
   const prompt = buildImagePrompt(questionData, fixInstructions);
@@ -230,8 +230,31 @@ async function generateImageWithOpenAI(
   } catch (e) {
     const msg = e instanceof Error ? e.message.split('\n')[0].slice(0, 200) : String(e);
     console.error(`    [openai-img] Generation error: ${msg}`);
+    if (isSafetyRefusal(msg)) {
+      console.warn('    [openai-img] refused on content policy — not retryable');
+      return { safetyRefused: true, message: msg };
+    }
     return null;
   }
+}
+
+/**
+ * Did the image API refuse this prompt on content policy, as opposed to failing?
+ *
+ * The distinction decides whether retrying is worth anything. A timeout, a rate limit or a 5xx is
+ * worth another attempt; a refusal is the same answer every time. NCLEX needed a term newborn in
+ * respiratory distress and got "400 Your request was rejected by the safety system" — then got it
+ * again, with a fresh request id, after the prompt was re-framed from a photograph to a clinical
+ * atlas illustration. A distressed infant with central cyanosis is what the filter is for.
+ *
+ * Deliberately narrow. Matching loosely would send a transient blip down the fallback path and
+ * quietly convert a question that only needed one more attempt.
+ */
+function isSafetyRefusal(message: string): boolean {
+  const m = message.toLowerCase();
+  return /rejected by the safety system/.test(m)
+    || /content[_ ]policy[_ ]violation/.test(m)
+    || (/\b400\b/.test(m) && /safety|moderation|content policy/.test(m));
 }
 
 // ── Upload to Supabase Storage ──
@@ -264,6 +287,89 @@ async function uploadImageToStorage(
   return urlData?.publicUrl || null;
 }
 
+/**
+ * Rewrite a question to state the findings its refused image was specified to show.
+ *
+ * Reached only when the image API refuses on content policy, which is not recoverable by trying
+ * again. The alternative is what happened before this existed: the question stays flagged as
+ * "image-based question missing required image, making it unusable" and is dropped from every
+ * export, taking a clinically sound item and its correct key with it.
+ *
+ * image_description is the specification of what the picture would have contained, so the findings
+ * are read out of it rather than invented — that is what lets the existing options, key and
+ * explanation stand unchanged. The rewrite is deliberately conservative: only the sentence
+ * referring to the image is replaced, and the question, its options and its answer are untouched.
+ *
+ * A described finding is a real item style in every one of these exams. An image question whose
+ * image cannot exist is not.
+ *
+ * Returns whether the stem was rewritten. On failure the row is left exactly as it was, so review
+ * still flags it and nothing is silently half-converted.
+ */
+async function describeFindingsInsteadOfImage(question: Record<string, unknown>): Promise<boolean> {
+  const qId = question.id as string;
+  const content = JSON.parse(JSON.stringify((question.content as Record<string, unknown>) ?? {}));
+  const stem = String(content.stem ?? content.question ?? '');
+  const spec = String(question.image_description ?? '');
+  if (!stem || !spec) return false;
+
+  const prompt = `A question was written to show an image, but the image cannot be generated: the image API refuses this subject on content policy. Rewrite the question so it can be answered WITHOUT the image, by stating the findings the image was specified to show.
+
+THE IMAGE SPECIFICATION (what the picture would have contained):
+${spec.slice(0, 2000)}
+
+THE CURRENT TEXT (it refers to an image the candidate will not have):
+${stem}
+
+RULES
+• State the findings from the specification as observed clinical or factual detail, in prose, as an examiner would describe them. Take them FROM the specification — invent nothing.
+• Include every finding a candidate needs to reach the existing answer and to rule out the wrong options. Omit purely presentational detail: figure titles, axis ranges, grid colours, drawing instructions, calibration marks.
+• Remove every reference to a displayed image, figure, photograph, strip or exhibit.
+• Change NOTHING else. Keep the question being asked, its wording, and any [Blank N] markers exactly as they are.
+• Keep the same tense and register as the original.
+
+Return ONLY the rewritten text, with no preamble, no quotes and no explanation.`;
+
+  try {
+    const { orCall, MODELS } = await import('../llm/openrouter.js');
+    const response = await orCall(MODELS.FIXER, '', prompt, { maxTokens: 1500, temperature: 0.2 });
+    const rewritten = String(response.content || '').trim().replace(/^["']|["']$/g, '');
+
+    // Guard the obvious ways this can come back useless. A stem that still points at an image, or
+    // that lost a cloze marker, is worse than the flagged original.
+    if (rewritten.length < 40) return false;
+    if (/\b(shown in the (image|figure|photograph)|displayed|the image below|see figure)\b/i.test(rewritten)) return false;
+    const blanksBefore = (stem.match(/\[Blank \d+\]/g) || []).length;
+    const blanksAfter = (rewritten.match(/\[Blank \d+\]/g) || []).length;
+    if (blanksBefore !== blanksAfter) return false;
+
+    if (content.stem !== undefined) content.stem = rewritten; else content.question = rewritten;
+    if (content.question_type === 'image') content.question_type = 'text';
+
+    const patch: Record<string, unknown> = {
+      content,
+      is_image_question: false,
+      image_url: null,
+      image_type: null,
+      // image_description is KEPT: it is the provenance of the findings now in the stem, and
+      // is_image_question false already stops anything trying to generate from it again.
+      image_source: 'Described in stem — image refused by the image safety system',
+    };
+    // A row already flagged for the missing image has to go back for scoring, or the rewrite sits
+    // behind a stale flag that says "image-based question missing required image" and stays out of
+    // every export. During normal generation the row is already 'generated' and this is a no-op;
+    // it matters when retry-images is run against a job that has finished.
+    if (question.status === 'flagged') patch.status = 'generated';
+
+    const { error } = await supabase.from('qb_questions').update(patch).eq('id', qId);
+    if (error) { console.error(`    [img-fallback] update failed: ${error.message}`); return false; }
+    return true;
+  } catch (e) {
+    console.error(`    [img-fallback] rewrite failed: ${e instanceof Error ? e.message : e}`);
+    return false;
+  }
+}
+
 // ── Generate and store image for a single question ──
 
 async function generateAndStoreImage(
@@ -275,6 +381,14 @@ async function generateAndStoreImage(
   const qNum = question.question_number as number;
 
   const result = await generateImageWithOpenAI(question, fixInstructions);
+  if (result && 'safetyRefused' in result) {
+    // The image is never going to exist, so stop asking for it and make the question answerable
+    // without one. Only reached on a refusal: every other failure falls through to the retry
+    // path below, because those are worth another attempt and this is not.
+    const converted = await describeFindingsInsteadOfImage(question);
+    console.warn(`    ✗ Image refused on content policy for Q${qNum}${converted ? ' — findings described in the stem instead' : ' — and the stem could not be rewritten, left for review'}`);
+    return false;
+  }
   if (!result) {
     console.warn(`    ✗ Image generation failed for Q${qNum}`);
     return false;
