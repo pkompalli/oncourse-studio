@@ -367,6 +367,14 @@ export function coherenceIssues(q: Record<string, unknown>): string[] {
       if (new Set(opts.map(norm)).size !== opts.length) {
         issues.push(`span ${sp.id}: two options are identical`);
       }
+      // A schedule authored as a markdown table, with the span markers placed across the cell
+      // separators, makes each selectable unit carry a raw column pipe — candidates read
+      // "Adjusted inventory balance | $393,000". Reported rather than repaired: de-piping the
+      // span text alone would stop it matching the document it is anchored in, so the document
+      // has to be restructured at the same time.
+      if (String(sp.text ?? '').includes('|') || opts.some((o) => String(o).includes('|'))) {
+        issues.push(`span ${sp.id}: text or options contain a raw table pipe, which the learner sees verbatim`);
+      }
     }
     // A document review with nothing to find, or nothing correct, tests neither reading nor
     // judgment: one such task scored 8/8 without being read.

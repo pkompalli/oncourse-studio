@@ -40,6 +40,7 @@ function classify(issue: string): string {
   if (/scores full marks without being read/.test(issue)) return 'degenerate-all-no-change';
   if (/is never the answer/.test(issue)) return 'degenerate-none-correct';
   if (/only \d+ exhibit/.test(issue)) return 'exhibit-cited-not-supplied';
+  if (/raw table pipe/.test(issue)) return 'table-pipe-in-selectable-text';
   return 'other';
 }
 
