@@ -31,6 +31,10 @@ const out = qs!.map((q) => {
   const nowOpts = letters.map((k) => ({ text: q.options[k], is_correct: k === q.correct_option }));
   const origKey = origOpts.find((o) => o.is_correct)?.text ?? null;
   const nowKey = q.options[q.correct_option] ?? null;
+  // A key moves when a different OPTION is keyed. Rewording the keyed option in place is not a
+  // move; with options locked in count and order, position identifies the option.
+  const origKeyIdx = origOpts.findIndex((o) => o.is_correct);
+  const keyMoved = origOpts.length === letters.length ? letters.indexOf(q.correct_option) !== origKeyIdx : origKey !== nowKey;
   const origImg = (s.assets || []).find((x: any) => x.url)?.url ?? null;
   return {
     studio_id: q.id, source_id: s.id, step: q.tags.step, subject: q.subject, topic: q.topic,
@@ -42,7 +46,7 @@ const out = qs!.map((q) => {
       stem: q.question !== s.question_text, stem_similarity: sim(s.question_text, q.question),
       explanation: q.explanation !== (s.explanation || ''),
       options: JSON.stringify(origOpts.map((o) => o.text)) !== JSON.stringify(nowOpts.map((o) => o.text)),
-      key_moved: origKey !== nowKey, key_from: origKey, key_to: nowKey,
+      key_moved: keyMoved, key_reworded: !keyMoved && origKey !== nowKey, key_from: origKey, key_to: nowKey,
       image_regenerated: Boolean(q.image_url && q.image_url !== origImg),
     },
     validator: v ? { score: v.score, findings: v.changes || [], summary: v.summary, label: v.label_feedback || [], batch: v.batch_feedback_not_applied || [], held_for_image: v.held_for_image || [] } : null,

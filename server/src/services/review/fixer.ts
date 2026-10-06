@@ -87,6 +87,61 @@ function keyText(q: Record<string, unknown>): string | null {
 const norm = (s: string) => s.toLowerCase().replace(/\s+/g, ' ').trim();
 
 /**
+ * Whether a revised option is still the same choice: the share of one side's content words found
+ * on the other, taken in whichever direction is larger, so shortening ("Respect the patient's
+ * refusal and provide comfort care…" → "Respect the patient's refusal of surgery") and expanding
+ * ("Sacral promontory" → "…sacrohysteropexy to the sacral promontory") both keep identity.
+ * Measured on 23 option edits from two USMLE pilots: the 8 real replacements scored ≤ 0.25 and
+ * every rewording ≥ 0.50.
+ */
+const OPTION_IDENTITY_MIN = 0.5;
+const STOPWORDS = new Set('a an the of to in on for with and or by at as is are be from that this its their his her'.split(' '));
+function optionIdentity(before: string, after: string): number {
+  const words = (s: string) => new Set((s.toLowerCase().match(/[a-z0-9]+/g) || []).filter((w) => !STOPWORDS.has(w)));
+  const A = words(before), B = words(after);
+  if (!A.size || !B.size) return norm(before) === norm(after) ? 1 : 0;
+  const shared = [...A].filter((w) => B.has(w)).length;
+  return Math.max(shared / A.size, shared / B.size);
+}
+
+/**
+ * The fixer's JSON, wherever it sits in the reply. Sonnet 5.5 often writes a sentence first
+ * ("The required changes…", "I expanded…"), which JSON.parse rejects outright: 10 of the re-run
+ * pilot's first attempts, and 3 repairs that failed twice. Fenced blocks are tried first, then the
+ * whole reply, then each balanced top-level {…} in turn, preferring one with a "question" field.
+ */
+export function extractFixerJson(raw: string): Record<string, unknown> {
+  const text = raw.trim();
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+  const candidates: string[] = [];
+  if (fenced) candidates.push(fenced[1].trim());
+  candidates.push(text);
+  // Balanced top-level objects, skipping braces inside strings.
+  for (let start = text.indexOf('{'); start >= 0; start = text.indexOf('{', start + 1)) {
+    let depth = 0, inStr = false, esc = false;
+    for (let i = start; i < text.length; i++) {
+      const c = text[i];
+      if (inStr) { if (esc) esc = false; else if (c === '\\') esc = true; else if (c === '"') inStr = false; continue; }
+      if (c === '"') inStr = true;
+      else if (c === '{') depth++;
+      else if (c === '}' && --depth === 0) { candidates.push(text.slice(start, i + 1)); break; }
+    }
+  }
+  let firstObject: Record<string, unknown> | null = null;
+  for (const c of candidates) {
+    try {
+      const v = JSON.parse(c);
+      if (v && typeof v === 'object' && !Array.isArray(v)) {
+        if ('question' in v) return v as Record<string, unknown>;
+        firstObject ??= v as Record<string, unknown>;
+      }
+    } catch { /* not this one */ }
+  }
+  if (firstObject) return firstObject;
+  throw new Error(`no JSON object in the fixer's reply: ${text.slice(0, 60)}`);
+}
+
+/**
  * `locked`: the item is already in use (an imported bank), so its option count and order are fixed
  * whatever a change asks — a reviewer told "reduce to the standard five options" would otherwise
  * delete an option candidates have chosen. Wording and the key can still change.
@@ -102,6 +157,17 @@ export function optionDrift(before: Record<string, unknown>, after: Record<strin
   const sameSet = a.length === b.length && [...a].map(norm).sort().join('\u0001') === [...b].map(norm).sort().join('\u0001');
   if (sameSet && a.map(norm).join('\u0001') !== b.map(norm).join('\u0001') && (locked || !/\b(reorder|re-order|shuffle|reletter|re-letter|order of (the )?options|option order)\b/.test(asked))) {
     return 'options reordered';
+  }
+  // Same count and order, different choices. Asked to turn "which bony landmark…" into a vignette,
+  // the fixer kept five options in place and replaced every one ("Ischial spine" became "Vaginal
+  // hysterectomy with uterosacral suspension"), so each recorded answer would now name a choice
+  // its candidate never saw. On an item in use, each option may be reworded, not replaced.
+  if (locked && a.length === b.length) {
+    for (let i = 0; i < a.length; i++) {
+      if (norm(a[i]) !== norm(b[i]) && optionIdentity(a[i], b[i]) < OPTION_IDENTITY_MIN) {
+        return `option ${String.fromCharCode(65 + i)} replaced, not reworded ("${a[i].slice(0, 50)}" -> "${b[i].slice(0, 50)}")`;
+      }
+    }
   }
   // Which option is keyed, not what it says: editing the keyed option's wording (stripping a stray
   // "C. " prefix, say) is a text fix, and comparing text refused it as a key move. With the
@@ -181,6 +247,9 @@ CRITICAL RULES:
 • Keep every OPTION, in the same order, under the same letter, unless a change explicitly asks to add, remove, replace or reorder options. A wrong or weak option is fixed by editing its wording in place. Change which option is correct only when a change says the key is wrong.
 • You cannot change an image. If a change can only be met by a different image, mark it "❌" — never describe in the stem or explanation what the image should show; that hands the candidate the answer.
 • Never shorten a clinical vignette into a recall question or strip clinical detail from it, and never write a "fix" that refers to other questions in a batch (overlap, answer-letter balance) — mark such a change "❌".
+• Turning a short stem into a clinical vignette keeps the SAME question being asked and the SAME options: a "most likely diagnosis" item stays a diagnosis item with the same diagnoses to choose from. If a change can only be met by asking something different, mark it "❌".
+• Write only what a candidate should read. Never put notes about the item itself into the stem, options or explanation ("the image adds no information", "this was revised to…").
+• Reply with the JSON object only — no sentence before or after it.
 
 COURSE: ${courseName}
 
@@ -223,12 +292,8 @@ Return ONLY valid JSON. No preamble, no markdown fences.`;
         { maxTokens: MAX_TOKENS, temperature: attempt === 1 ? 0.2 : 0.1 }
       );
 
-      let raw = response.content.trim();
-      if (raw.includes('```json')) raw = raw.split('```json')[1].split('```')[0].trim();
-      else if (raw.includes('```')) raw = raw.split('```')[1].split('```')[0].trim();
-
-      const wrapper = JSON.parse(raw);
-      const fixed = (typeof wrapper === 'object' && wrapper.question ? wrapper.question : wrapper) as Record<string, unknown>;
+      const wrapper = extractFixerJson(response.content);
+      const fixed = (wrapper.question && typeof wrapper.question === 'object' ? wrapper.question : wrapper) as Record<string, unknown>;
       unflatten(fixed);
 
       // A fix that reshapes the question is worse than no fix: the flagged defect is
@@ -246,7 +311,7 @@ Return ONLY valid JSON. No preamble, no markdown fences.`;
       return {
         fixed: true,
         question: fixed,
-        changesApplied: (typeof wrapper === 'object' && wrapper.changes_applied) || [],
+        changesApplied: Array.isArray(wrapper.changes_applied) ? (wrapper.changes_applied as string[]) : [],
       };
     } catch (e) {
       lastErr = e instanceof Error ? e.message : 'Fix failed';
