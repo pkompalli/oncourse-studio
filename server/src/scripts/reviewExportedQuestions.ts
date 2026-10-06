@@ -116,8 +116,43 @@ const EDITABLE = ['question', 'options', 'correct_option', 'explanation'] as con
 const editable = (r: Record<string, unknown>) =>
   Object.fromEntries(EDITABLE.map((f) => [f, r[f]])) as Record<string, unknown>;
 
-// Mirrors reviewPipeline.ts — image changes go to regeneration there, which this run does not do.
-const IMAGE_CHANGE_RE = /\b(replace\s+(the\s+)?(attached|current|provided|existing)?\s*(image|x-?ray|ct|mri|scan|radiograph|photo|figure|picture|illustration))|(\b(image|x-?ray|radiograph|scan|figure)\b.*\b(replace|regenerate|update|redo|change|swap))/i;
+// Change requests the text fixer must never see. Each is recorded on the outcome instead.
+//
+// image — reviewPipeline's IMAGE_CHANGE_RE misses "Replace the ECG image…" and "Replace the chest
+//   image…", so those reached the fixer, which cannot touch an image and instead wrote the finding
+//   into the stem ("ECG shows an irregularly irregular rhythm…"), handing the candidate the answer.
+//   Once a question has ANY image finding, its text requests are held too (see routeChanges): a
+//   blind solve that disagrees because the picture is wrong is still a text request, and the fixer
+//   answered it by describing the right ECG in the stem.
+// batch — adversarial compares a question with the others in its batch. In a generated job those
+//   are siblings; here they are ten unrelated bank questions, and a "CONCEPT OVERLAP" note had the
+//   fixer replace a HIPAA disclosure question with a different HIPAA question. Key-distribution
+//   notes ("one of three 'B' answers") are the same artefact and invite key moves.
+// label — difficulty/Bloom's relabels. The fixer cannot edit those fields, so audit then reports
+//   the repair as never applied and flags a question whose content is fine.
+const IMAGE_NOUN_RE = /\b(image|images|ecg|ekg|x-?ray|radiograph|ct\b|mri|scan|photo|photograph|figure|picture|illustration|tracing|micrograph|smear|histolog)/i;
+const IMAGE_WORD_RE = /\b(image|images|picture|photo|photograph|figure|tracing|micrograph)\b/i;
+const BATCH_RELATIVE_RE = /^CONCEPT OVERLAP:|\b(answer|key)s?\b.*\b(distribution|balance|diversify)\b|\bone of (two|three|four|\d+) '?[A-E]'? answers\b|\bQ\d+\b.*\b(same|overlap|duplicate)|\bskew|\blettering\b/i;
+const LABEL_RE = /^DIFFICULTY:|\b(difficulty|bloom'?s?)\s+(label|level|rating)\b|\breconsider difficulty\b/i;
+type Route = 'fix' | 'image' | 'batch' | 'label';
+const routeOf = (c: string): Route =>
+  BATCH_RELATIVE_RE.test(c) ? 'batch'
+  : LABEL_RE.test(c) ? 'label'
+  // Misrouting a text defect here only leaves it recorded and unfixed; misrouting an image defect
+  // to the fixer rewrites the stem around a picture it cannot change. Err this way.
+  // "Explanation does not address option E (HIDA scan)" names a test, not the picture; only an
+  // explicit image word, or a request to replace one, counts.
+  : (IMAGE_WORD_RE.test(c) && /\b(replace|regenerate|swap|redo|provide|correct the|does not|doesn't|do not|fails? to|inconsistent|contradict|mismatch|inconsistent_data|not (clearly )?(show|depict|demonstrat|match))\b/i.test(c))
+    || (IMAGE_NOUN_RE.test(c) && /\b(replace|regenerate|swap|redo)\b/i.test(c)) ? 'image'
+  : 'fix';
+
+/** Word-level Jaccard similarity; below 0.5 the stem has been rewritten rather than edited. */
+function similarity(a: string, b: string): number {
+  const wa = new Set(a.toLowerCase().match(/[a-z0-9]+/g) || []);
+  const wb = new Set(b.toLowerCase().match(/[a-z0-9]+/g) || []);
+  const inter = [...wa].filter((w) => wb.has(w)).length;
+  return wa.size + wb.size - inter ? inter / (wa.size + wb.size - inter) : 1;
+}
 const STEM_REFS_IMAGE = /shown\s+(below|above|here)|in\s+the\s+(image|figure|scan|x-?ray|ct|mri)|based\s+on\s+the\s+(image|figure)/i;
 
 interface StageFix { attempted: boolean; fixed?: boolean; changes_applied?: string[]; error?: string; changed_fields?: string[] }
@@ -130,7 +165,13 @@ interface Outcome {
   adversarial_fix?: StageFix;
   audit?: { score: number | null; raw_score: number | null; reason: string; issues: string[]; repair_verification: unknown[] };
   status: 'approved' | 'flagged' | 'needs_review' | 'structural_failure';
+  // A moved key or a rewritten stem on a question students have already answered is a clinical
+  // call, whatever the auditor scored it.
+  needs_clinician_review: string[];
   image_feedback: string[];
+  label_feedback: string[];
+  dropped_batch_relative: string[];
+  held_for_image: string[];
   changed: boolean;
   original: { question_text: string; explanation: string | null; options: ExportOption[] };
   revised?: { question_text: string; explanation: string; options: Array<{ id: string | null; letter: string; text: string; is_correct: boolean }>; key_moved: boolean; option_count_changed: boolean };
@@ -155,6 +196,26 @@ function changesFrom(result: Record<string, unknown>, kind: 'validator' | 'adver
     ...list('case_study_issues').map((s) => `CASE_STUDY: ${s}`),
     ...list('explanation_contradictions').map((s) => `EXPLANATION: ${s}`),
   ];
+}
+
+/** Record image, label and batch-relative requests on the outcome; return only what the fixer should get. */
+function routeChanges(o: Outcome, r: Record<string, unknown>, changes: string[]): string[] {
+  o.image_feedback.push(...((r.asset_issues as string[]) || []), ...((r.missing_images as string[]) || []));
+  const text: string[] = [];
+  for (const c of changes) {
+    const route = routeOf(c);
+    if (route === 'image') o.image_feedback.push(c);
+    else if (route === 'label') o.label_feedback.push(c);
+    else if (route === 'batch') o.dropped_batch_relative.push(c);
+    else text.push(c);
+  }
+  // A question whose picture contradicts it is unusable until the picture is replaced, and every
+  // text repair made before then is written around the wrong image.
+  if (o.image_feedback.length && text.length) {
+    o.held_for_image.push(...text);
+    return [];
+  }
+  return text;
 }
 
 /** Apply a fixer pass to `row` in place, recording the repair on its trail the way the pipeline does. */
@@ -189,7 +250,7 @@ async function reviewBatch(items: Array<{ q: Exported; step: Step; from: string 
     const row = toRow(q, step);
     const o: Outcome = {
       id: q.id, step, step_from: from, subject: q.subject, topic: q.topic, validation_status: q.validation_status,
-      status: 'needs_review', image_feedback: [], changed: false,
+      status: 'needs_review', needs_clinician_review: [], image_feedback: [], label_feedback: [], dropped_batch_relative: [], held_for_image: [], changed: false,
       original: { question_text: q.question_text, explanation: q.explanation, options: q.options || [] },
     };
     out.push(o);
@@ -212,8 +273,7 @@ async function reviewBatch(items: Array<{ q: Exported; step: Step; from: string 
     const changes = changesFrom(r, 'validator');
     o.validator = { score, changes, summary: String(r.summary || '') };
     (row.audit_trail as unknown[]).push({ phase: 'validator', score: score ?? 5, changes: changes.length ? changes : null, summary: o.validator.summary, timestamp: new Date().toISOString() });
-    o.image_feedback.push(...((r.asset_issues as string[]) || []), ...((r.missing_images as string[]) || []), ...changes.filter((c) => IMAGE_CHANGE_RE.test(c)));
-    const text = changes.filter((c) => !IMAGE_CHANGE_RE.test(c));
+    const text = routeChanges(o, r, changes);
     if ((score ?? 5) <= 7 && text.length) o.validator_fix = await repair(row, text, 'validator', courseName);
   }));
 
@@ -225,8 +285,7 @@ async function reviewBatch(items: Array<{ q: Exported; step: Step; from: string 
     const changes = changesFrom(r, 'adversarial');
     o.adversarial = { score, changes, summary: String(r.summary || ''), blind_answer: r.blind_answer, blind_confidence: r.blind_confidence, key_disagreement: r.key_disagreement };
     (row.audit_trail as unknown[]).push({ phase: 'adversarial', score: score ?? 5, changes: changes.length ? changes : null, summary: o.adversarial.summary, timestamp: new Date().toISOString() });
-    o.image_feedback.push(...((r.asset_issues as string[]) || []), ...((r.missing_images as string[]) || []), ...changes.filter((c) => IMAGE_CHANGE_RE.test(c)));
-    const text = changes.filter((c) => !IMAGE_CHANGE_RE.test(c));
+    const text = routeChanges(o, r, changes);
     if ((score ?? 5) <= 7 && text.length) o.adversarial_fix = await repair(row, text, 'adversarial', courseName);
   }));
 
@@ -276,7 +335,13 @@ async function reviewBatch(items: Array<{ q: Exported; step: Step; from: string 
         key_moved: letters.indexOf(key) !== origKey,
         option_count_changed: letters.length !== orig.options.length,
       };
+      const sim = similarity(orig.question_text, o.revised.question_text);
+      if (o.revised.key_moved) o.needs_clinician_review.push(`Answer key moved from ${LETTERS[origKey] ?? 'none'} ("${orig.options[origKey]?.text.slice(0, 80) ?? ''}") to ${key} ("${opts[key]?.slice(0, 80) ?? ''}")`);
+      if (sim < 0.5) o.needs_clinician_review.push(`Stem rewritten, not edited (word overlap ${sim.toFixed(2)})`);
+      if (o.revised.option_count_changed) o.needs_clinician_review.push(`Option count changed ${orig.options.length} → ${letters.length}; option ids cannot be mapped`);
     }
+    // A blind solve that disagreed and was not resolved by a repair is a key a clinician should look at.
+    if (o.adversarial?.key_disagreement && !o.revised?.key_moved) o.needs_clinician_review.push(`Blind solve chose ${String(o.adversarial.blind_answer)} (${String(o.adversarial.blind_confidence)}) against key ${key}; key not changed`);
   });
   return out;
 }
@@ -306,6 +371,11 @@ function report(all: Exported[], outcomes: Outcome[]) {
     fix_failed: outcomes.filter((o) => o.validator_fix?.fixed === false || o.adversarial_fix?.fixed === false).length,
     blind_disagreed_with_key: outcomes.filter((o) => o.adversarial?.key_disagreement).length,
     with_image_feedback: outcomes.filter((o) => o.image_feedback.length).length,
+    needs_clinician_review: outcomes.filter((o) => o.needs_clinician_review?.length).length,
+    approved_but_needs_clinician_review: outcomes.filter((o) => o.status === 'approved' && o.needs_clinician_review?.length).length,
+    with_label_feedback: outcomes.filter((o) => o.label_feedback?.length).length,
+    batch_relative_dropped: outcomes.filter((o) => o.dropped_batch_relative?.length).length,
+    text_fixes_held_for_image: outcomes.filter((o) => o.held_for_image?.length).length,
     avg_scores: {
       validator: avg(outcomes.map((o) => o.validator?.score)),
       adversarial: avg(outcomes.map((o) => o.adversarial?.score)),
@@ -327,7 +397,9 @@ const RESULTS = `${OUT}/results.jsonl`;
 const exported = (JSON.parse(readFileSync(IN, 'utf8')) as { questions: Exported[] }).questions;
 // ids are random UUIDs, so an evenly spaced slice of the id-sorted list is an unbiased sample.
 const stride = LIMIT ? Math.max(1, Math.floor(exported.length / LIMIT)) : 1;
-const selected = LIMIT ? exported.filter((_, i) => i % stride === 0).slice(0, LIMIT) : exported;
+// --offset shifts the sample so a second pilot sees different questions.
+const OFFSET = argNum('offset', 0) % stride;
+const selected = LIMIT ? exported.filter((_, i) => i % stride === OFFSET).slice(0, LIMIT) : exported;
 
 const done = new Map<string, Outcome>();
 if (existsSync(RESULTS)) for (const line of readFileSync(RESULTS, 'utf8').split('\n')) if (line.trim()) { const o = JSON.parse(line) as Outcome; done.set(o.id, o); }
