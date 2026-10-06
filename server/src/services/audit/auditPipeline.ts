@@ -425,7 +425,15 @@ async function runAuditPipeline(jobId: string): Promise<void> {
             ...cohBlocking.map((s) => `NOT COMPLIANT — coherence: ${s}`),
           ];
         }
-        const status = auditScore >= 7 && cohBlocking.length === 0 ? 'approved' : 'flagged';
+        // The validator judged this item to belong to another exam (tags.belongs_to_exam, e.g.
+        // "NEET PG" for a USMLE item on India's MTP Act). It was deliberately left unrepaired, so
+        // however well it reads it is not approved for this course.
+        const otherExam = String((q.tags as Record<string, unknown> | null)?.belongs_to_exam ?? '');
+        if (otherExam) {
+          result.issues = [...((result.issues as string[]) || []), `BELONGS TO ${otherExam.toUpperCase()} — ${String((q.tags as Record<string, unknown>).out_of_scope_reason ?? '')}`];
+          result.reason = `Belongs to ${otherExam}, not this exam: ${String((q.tags as Record<string, unknown>).out_of_scope_reason ?? '').slice(0, 160)}`;
+        }
+        const status = auditScore >= 7 && cohBlocking.length === 0 && !otherExam ? 'approved' : 'flagged';
         if (auditScore >= 7 && cohBlocking.length) {
           console.log(`    [audit] Q${qStart + i} scored ${auditScore} but flagged: ${cohBlocking[0].slice(0, 90)}`);
         }

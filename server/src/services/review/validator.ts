@@ -320,6 +320,7 @@ ${opts?.existingBank ? `9. ANSWER KEY — these questions come from an existing 
    b. Image present but wrong modality or clearly irrelevant → flag and suggest replacement.
    c. Image present and the right kind of picture, but it does NOT show what the answer is read from → flag (score ≤ 4, needs_revision true) and say which feature is missing or wrong. Where an IMAGE WAS SPECIFIED AS block is given, check the image against it. A figure can be on topic and still be unusable: a growth chart whose plotted points do not sit at the percentiles they are labelled with, a rhythm strip drawn as a regular narrow-QRS trace where the specification sets out atrial and ventricular activity at different rates, a graph whose axis values contradict the stem. If a candidate cannot read the value, trend or relationship the correct answer depends on, the question cannot be answered.
    d. Image that is imperfect in style or polish but shows everything the question is read from → do NOT flag. Judge it on what the answer needs, not on how it looks.
+14. SCOPE — does the item belong to THIS exam at all? If it obviously tests material for a different exam (another country's law, national programmes or practice, or an item written for another exam — the course's coverage rules name the usual cases and which exam they belong to), set belongs_to_other_exam to that exam's name and the reason, score ≤ 3, and request NO changes: such an item is moved, not repaired. Use this only when it is obvious; an item that is merely hard, niche or imperfect belongs here and gets normal feedback.
 
 Scoring (10 = nothing to fix, 1 = unacceptable):
 • 9–10 → factually correct, explanation addresses all options, format compliant — do not change
@@ -355,6 +356,7 @@ Return a JSON ARRAY — one object per question:
         "1. Replace the attached image with one that matches what the stem describes",
         "2. Fix the correct answer from B to A — state the correct fact/rule for this exam"
       Empty array if no real changes needed.>],
+    "belongs_to_other_exam": <check 14 — null unless the item obviously belongs to another exam; then {"exam": "<that exam's name, as the course rules give it>", "reason": "<one sentence>"}>,
     "summary": "<1 sentence: what is wrong, or 'No issues found' if clean>"
   },
   ...

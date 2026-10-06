@@ -156,6 +156,27 @@ function buildSubjectMap(questions: Record<string, unknown>[]): SubjectStatus[] 
 }
 
 /**
+ * The validator's scope verdict (check 14): the item obviously belongs to another exam — for a
+ * USMLE bank, a question on India's MTP Act belongs to NEET PG. Such an item is tagged with that
+ * exam and flagged at audit, never repaired: rewriting it into this exam's terms would replace it
+ * with a different question.
+ */
+export function belongsToOtherExam(result: Record<string, unknown>): { exam: string; reason: string } | null {
+  const v = result.belongs_to_other_exam as Record<string, unknown> | null | undefined;
+  const exam = typeof v?.exam === 'string' ? v.exam.trim() : '';
+  return exam ? { exam, reason: String(v?.reason ?? '').trim() } : null;
+}
+
+function tagOtherExam(q: Record<string, unknown>, other: { exam: string; reason: string }): Record<string, unknown> {
+  const tags = { ...((q.tags as Record<string, unknown>) || {}) };
+  const examTags = Array.isArray(tags.exam_tags) ? (tags.exam_tags as string[]) : [];
+  tags.exam_tags = [...new Set([...examTags, other.exam])];
+  tags.belongs_to_exam = other.exam;
+  tags.out_of_scope_reason = other.reason;
+  return tags;
+}
+
+/**
  * Split a reviewer's requests (changeRouting.ts) and record the ones that do not go to the fixer,
  * so the trail shows every request and where it went.
  */
@@ -259,18 +280,26 @@ async function runValidatorPhase(
       const assetIssues = (result.asset_issues as string[]) || [];
       const missingImages = (result.missing_images as string[]) || [];
       const { routed, notSent } = routeForFix(q, changes, [...assetIssues, ...missingImages], existingBank);
+      const otherExam = belongsToOtherExam(result);
 
       const trail = Array.isArray(q.audit_trail) ? [...(q.audit_trail as unknown[])] : [];
       trail.push({
         phase: 'validator', score,
         changes: changes.length > 0 ? changes : null,
         ...notSent,
+        ...(otherExam ? { belongs_to_other_exam: otherExam } : {}),
         summary: (result.summary as string) || '',
         timestamp: new Date().toISOString(),
       });
 
-      await supabase.from('qb_questions').update({ validator_score: score, audit_trail: trail }).eq('id', q.id);
+      await supabase.from('qb_questions').update({
+        validator_score: score, audit_trail: trail,
+        ...(otherExam ? { tags: tagOtherExam(q, otherExam) } : {}),
+      }).eq('id', q.id);
       totalReviewed++;
+
+      // An item that belongs to another exam is moved, not repaired: no text fix, no new image.
+      if (otherExam) continue;
 
       if (score <= 7 && routed.fix.length > 0) {
         toFix.push({ dbId: q.id as string, question: q, changesRequired: routed.fix });
@@ -525,6 +554,9 @@ async function runAdversarialPhase(
 
       await supabase.from('qb_questions').update({ adversarial_score: score, audit_trail: trail }).eq('id', q.id);
       totalReviewed++;
+
+      // The validator found this item belongs to another exam: it is moved, not repaired.
+      if ((q.tags as Record<string, unknown> | null)?.belongs_to_exam) continue;
 
       if (score <= 7 && routed.fix.length > 0) {
         toFix.push({ dbId: q.id as string, question: q, changesRequired: routed.fix });

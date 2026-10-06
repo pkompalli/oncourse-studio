@@ -73,18 +73,25 @@ const CONTENT_RULES = [
   'Change which option is correct ONLY when the keyed answer is factually wrong; state the evidence, and expect the change to go to clinician review.',
 ];
 
+// Read by the validator's scope check (validator.ts, check 14). The live USMLE bank was assembled
+// partly from Indian sources, and an item on India's MTP Act cannot be repaired into a USMLE item —
+// it is a NEET PG item, so it is tagged and moved rather than rewritten.
+const OTHER_EXAM_RULE = 'Items that belong to NEET PG rather than USMLE: Indian law and regulation (e.g. the MTP Act, PCPNDT Act, Indian drug schedules), Indian national health programmes (e.g. NTEP/RNTCP, NVBDCP, Pulse Polio, the Universal Immunization Programme schedule), India-specific epidemiology or practice standards, and items whose answer depends on Indian context. Report these as belonging to "NEET PG". An item that merely carries an Indian exam source tag (AIIMS, NEET PG, INI-CET, FMGE, PGI) but tests standard international medicine is NOT out of scope: give it normal feedback, including removing the tag.';
+
 const ANSWER_KEY_BALANCE = 'Across the full bank, no single letter should key more than 30% of items, and no more than 4 consecutive items should share a key. Balance is achieved when items are generated or by shuffling option order at delivery — never by changing which option is correct, and never by reordering the options of an existing item.';
 
 const uniq = (xs: unknown[]) => [...new Set(xs.filter((x): x is string => typeof x === 'string' && x.trim().length > 0))];
 
 function merge(g: Record<string, unknown>, scope: string): Record<string, unknown> {
   const out = structuredClone(g);
-  out.anti_patterns = uniq([...((out.anti_patterns as unknown[]) || []), ...ANTI_PATTERNS]);
-  out.coverage_rules = uniq([...((out.coverage_rules as unknown[]) || []), scope]);
+  // Learned rules go FIRST in every list: the validator keeps only the first 20 of each guideline
+  // list and the first 60 per-format rules, and appended rules were being cut.
+  out.anti_patterns = uniq([...ANTI_PATTERNS, ...((out.anti_patterns as unknown[]) || [])]);
+  out.coverage_rules = uniq([OTHER_EXAM_RULE, scope, ...((out.coverage_rules as unknown[]) || [])]);
   out.answer_key_balance = ANSWER_KEY_BALANCE;
 
   const dg = (out.distractor_guidelines ??= {}) as Record<string, unknown>;
-  dg.quality_rules = uniq([...((dg.quality_rules as unknown[]) || []), ...DISTRACTOR_RULES]);
+  dg.quality_rules = uniq([...DISTRACTOR_RULES, ...((dg.quality_rules as unknown[]) || [])]);
   const eg = (out.explanation_guidelines ??= {}) as Record<string, unknown>;
   eg.required = true; eg.must_justify_correct = true; eg.must_address_distractors = true;
   const sg = (out.stem_guidelines ??= {}) as Record<string, unknown>;
@@ -92,8 +99,9 @@ function merge(g: Record<string, unknown>, scope: string): Record<string, unknow
 
   const specs = (out.format_specs ??= {}) as Record<string, Record<string, unknown>>;
   const mcq = (specs.mcq_single ??= {});
-  mcq.validation_checks = uniq([...((mcq.validation_checks as unknown[]) || []), ...VALIDATION_CHECKS]);
-  mcq.content_rules = uniq([...((mcq.content_rules as unknown[]) || []), ...CONTENT_RULES]);
+  // validation_checks is merged first of the per-format families, so the rules that protect an
+  // item already in use (option count, order, key) go at its head.
+  mcq.validation_checks = uniq([...CONTENT_RULES, OPTION_COUNT_RULE, ...VALIDATION_CHECKS, ...((mcq.validation_checks as unknown[]) || [])]);
   return out;
 }
 
@@ -129,7 +137,6 @@ function relaxOptionCount(g: Record<string, unknown>): number {
   const mcq = ((g.format_specs as Record<string, Record<string, unknown>>) || {}).mcq_single;
   if (mcq) {
     for (const k of ['validation_checks', 'structure_requirements', 'syntax_rules', 'content_rules']) mcq[k] = fixList(mcq[k]);
-    mcq.syntax_rules = uniq([...(mcq.syntax_rules as string[]), OPTION_COUNT_RULE]);
     if (typeof mcq.gradability === 'string') { const y = reword(mcq.gradability); if (y !== mcq.gradability) touched++; mcq.gradability = y; }
   }
   g.anti_patterns = fixList(g.anti_patterns);
