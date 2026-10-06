@@ -22,7 +22,10 @@ const GUIDELINE_RULE_CAP = 20;
 
 // ── Validator Prompt (V1 lines 5803-5857, verbatim) ──
 
-export function getBatchValidatorPrompt(contentType: string, domain = 'exam preparation', examFormat?: Record<string, unknown>, guidelines?: Record<string, unknown>, formatsInBatch?: Set<string>): string {
+/** existingBank: the items are already in use (imported from a live bank) — see changeRouting.ts. */
+export interface ReviewOptions { existingBank?: boolean; guidelines?: Record<string, unknown> }
+
+export function getBatchValidatorPrompt(contentType: string, domain = 'exam preparation', examFormat?: Record<string, unknown>, guidelines?: Record<string, unknown>, formatsInBatch?: Set<string>, opts?: ReviewOptions): string {
   if (contentType === 'lesson') {
     return `You are a senior ${domain} content validator. Fix what is genuinely wrong — do not over-correct content that is already accurate and appropriate.
 
@@ -296,18 +299,22 @@ For EACH question ask:
    d. CONTESTED AUTHORITY — where authorities genuinely split, the stem must say which view it applies, or more than one option is right.
 6. FORMAT COMPLIANCE (if exam format requirements are provided above):
    a. Does the stem match the expected format (e.g., scenario/vignette vs. direct recall)?
-   b. Does the option count match (e.g., 4 options vs. 5)?
+   ${opts?.existingBank
+    ? 'b. Do NOT flag the option count. These items are already in use and every option carries recorded answers: never request that an option be added, removed, merged or reordered — edit an option\'s wording in place if it is wrong.'
+    : 'b. Does the option count match (e.g., 4 options vs. 5)?'}
    c. Are the distractors structured as the exam expects (homogeneous length, parallel construction)?
    d. Is the Bloom's level a valid normalized value (2_understand, 3_apply, 4_analyze, 5_evaluate)? Flag non-standard labels like NCJMM_*, raw text labels, etc.
 7. DIFFICULTY AND BLOOM — is each question labelled with a level it actually sits at?
    a. Does the question carry a difficulty of "easy", "medium" or "hard", and a normalized Bloom level? If either is missing or invalid → flag as format_compliance_issues.
    b. Is the assigned difficulty right for what the question demands? A one-step recall keyed "hard", or a multi-step derivation keyed "easy", is mislabelled — say which it should be.
    c. Is the assigned Bloom level right for the cognitive work required? Recalling a threshold is not applying one, and applying a rule is not analysing a case. Where the whole-set targets are given above, a question labelled at a level it does not reach makes that target meaningless — so judge the label against the question, not against the target.${formatSpecificChecks}
-9. ANSWER KEY DIVERSITY — check the correct answer keys across the batch:
+${opts?.existingBank ? `9. ANSWER KEY — these questions come from an existing bank and are reviewed in arbitrary batches, so the letters in this batch say nothing about the bank's balance:
+   a. Do NOT flag answer-key distribution or runs, and do NOT compare questions with each other.
+   b. Ask for the keyed answer to change ONLY when it is factually wrong for the vignette as written; give the evidence in answer_key_issue. Never ask for it to move for balance.` : `9. ANSWER KEY DIVERSITY — check the correct answer keys across the batch:
    a. Note the correct answer letter (A/B/C/D/E) for each question.
    b. Apply the course's own answer-key rule where one is given above. Where none is, flag if more than 40% of questions in this batch share the same key. Flag the over-represented ones and request the key be changed, with the content adjustment that makes the new key correct — never relabel an option without moving the content.
    c. Flag any run of consecutive questions in this batch sharing one key that exceeds the course's stated run limit.
-   d. A batch is a tenth of the bank, so do NOT infer a whole-set imbalance from it. Report what this batch shows and nothing more.
+   d. A batch is a tenth of the bank, so do NOT infer a whole-set imbalance from it. Report what this batch shows and nothing more.`}
 10. IMAGE — relevance, and whether it shows what the question needs:
    a. Image absent but the stem explicitly references it (e.g. "shown below", "image 1", "radiograph shown") → score ≤ 4 and set needs_revision true. The question is UNUSABLE without its image regardless of how good the text is.
    b. Image present but wrong modality or clearly irrelevant → flag and suggest replacement.
@@ -363,7 +370,8 @@ export async function runValidatorBatch(
   contentType = 'qbank',
   domain = 'exam preparation',
   examFormat?: Record<string, unknown>,
-  guidelines?: Record<string, unknown>
+  guidelines?: Record<string, unknown>,
+  opts?: ReviewOptions
 ): Promise<Record<string, unknown>[]> {
   // Detect which format types are in this batch to conditionally include checks
   const formatsInBatch = new Set<string>();
@@ -380,7 +388,7 @@ export async function runValidatorBatch(
     }
   }
 
-  const prompt = getBatchValidatorPrompt(contentType, domain, examFormat, guidelines, formatsInBatch);
+  const prompt = getBatchValidatorPrompt(contentType, domain, examFormat, guidelines, formatsInBatch, opts);
   const content = await formatQuestionsForReviewWithImages(questions);
 
   // Build user message: multimodal if images present, plain text otherwise

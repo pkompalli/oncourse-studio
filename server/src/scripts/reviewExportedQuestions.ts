@@ -7,8 +7,8 @@
  *   validator → fixer (score ≤ 7 with text changes) → adversarial → fixer → audit
  * Image regeneration is NOT run (it would upload files); image feedback is recorded instead.
  *
- * Course context: the Step's `exam_format` from qb_courses, read once. The USMLE course rows have
- * no generation_guidelines, so the validator checks against the exam pattern only.
+ * Course context: the Step's `exam_format` and `generation_guidelines` from qb_courses, read once
+ * (the guidelines are written by setUsmleGuidelines.ts).
  *
  * Option ids: the export carries each option's id, ordered by id and lettered A–E. Revised options
  * are mapped back to those ids BY POSITION, so a later write-back edits option_text in place and
@@ -25,6 +25,7 @@ import { supabase } from '../db/supabase.js';
 import { runValidatorBatch } from '../services/review/validator.js';
 import { runAdversarialBatch } from '../services/review/adversarial.js';
 import { fixQuestion } from '../services/review/fixer.js';
+import { routeChange } from '../services/review/changeRouting.js';
 import { gradabilityIssues } from '../services/review/shared.js';
 import { runAuditBatch } from '../services/audit/auditPipeline.js';
 import { changedFields, unappliedChanges } from '../services/audit/fixHistory.js';
@@ -116,47 +117,9 @@ const EDITABLE = ['question', 'options', 'correct_option', 'explanation'] as con
 const editable = (r: Record<string, unknown>) =>
   Object.fromEntries(EDITABLE.map((f) => [f, r[f]])) as Record<string, unknown>;
 
-// Change requests the text fixer must never see. Each is recorded on the outcome instead.
-//
-// image — reviewPipeline's IMAGE_CHANGE_RE misses "Replace the ECG image…" and "Replace the chest
-//   image…", so those reached the fixer, which cannot touch an image and instead wrote the finding
-//   into the stem ("ECG shows an irregularly irregular rhythm…"), handing the candidate the answer.
-//   Once a question has ANY image finding, its text requests are held too (see routeChanges): a
-//   blind solve that disagrees because the picture is wrong is still a text request, and the fixer
-//   answered it by describing the right ECG in the stem.
-// batch — adversarial compares a question with the others in its batch. In a generated job those
-//   are siblings; here they are ten unrelated bank questions, and a "CONCEPT OVERLAP" note had the
-//   fixer replace a HIPAA disclosure question with a different HIPAA question. Key-distribution
-//   notes ("one of three 'B' answers") are the same artefact and invite key moves.
-// label — difficulty/Bloom's relabels. The fixer cannot edit those fields, so audit then reports
-//   the repair as never applied and flags a question whose content is fine.
-const IMAGE_NOUN_RE = /\b(image|images|ecg|ekg|x-?ray|radiograph|ct\b|mri|scan|photo|photograph|figure|picture|illustration|tracing|micrograph|smear|histolog)/i;
-const IMAGE_WORD_RE = /\b(image|images|picture|photo|photograph|figure|tracing|micrograph)\b/i;
-// Every reviewer sees only its batch, so a request that refers to the batch at all — or to how the
-// question sits among the others (over-represented letters, duplicated concepts) — is about the
-// batch, not the question.
-const BATCH_RELATIVE_RE = /^CONCEPT OVERLAP:|\bbatch\b|\boverrepresent|\bover-represent|\bduplicat|\bnear-identical\b|\bconcept diversity\b|\b(answer|key)s?\b.*\b(distribution|balance|diversify|varying|vary)\b|\bone of (two|three|four|\d+) '?[A-E]'? answers\b|\bQ\d+\b.*\b(same|overlap)|\bskew|\blettering\b/i;
-const LABEL_RE = /^DIFFICULTY:|\b(difficulty|bloom'?s?)\s+(label|level|rating)\b|\breconsider difficulty\b|\bdifficulty\b.*\b(easy|medium|hard)\b|\bbloom'?s?\b.*\b\d_[a-z]+/i;
-type Route = 'fix' | 'image' | 'batch' | 'label';
-// A request about the item's own stem or format is the point of this run — converting a recall
-// stem to a vignette is how a question comes to read like a Step item — even when the reviewer
-// justifies it by the rest of the batch ("…the apply-level format used elsewhere in the batch") or
-// by its Bloom's level. Checked after concept overlap and images, before the batch/label filters.
-const OWN_FORMAT_RE = /^FORMAT:|^EXPLANATION:|\b(vignette|lead-in|stem)\b/i;
-const routeOf = (c: string): Route =>
-  /^CONCEPT OVERLAP:/i.test(c) ? 'batch'
-  // Misrouting a text defect here only leaves it recorded and unfixed; misrouting an image defect
-  // to the fixer rewrites the stem around a picture it cannot change. Err this way.
-  // "Explanation does not address option E (HIDA scan)" names a test, not the picture; only an
-  // explicit image word, or a request to replace one, counts.
-  : isImageRequest(c) ? 'image'
-  : OWN_FORMAT_RE.test(c) ? 'fix'
-  : BATCH_RELATIVE_RE.test(c) ? 'batch'
-  : LABEL_RE.test(c) ? 'label'
-  : 'fix';
-const isImageRequest = (c: string): boolean =>
-  (IMAGE_WORD_RE.test(c) && /\b(replace|regenerate|swap|redo|provide|correct the|does not|doesn't|do not|fails? to|inconsistent|contradict|mismatch|inconsistent_data|not (clearly )?(show|depict|demonstrat|match))\b/i.test(c))
-    || (IMAGE_NOUN_RE.test(c) && /\b(replace|regenerate|swap|redo)\b/i.test(c));
+// Which requests reach the fixer is decided by services/review/changeRouting.ts, shared with the
+// pipeline: image findings and difficulty/Bloom's relabels are recorded, batch-relative notes are
+// dropped (these are existing-bank items), and the rest go to the fixer.
 
 /** Word-level Jaccard similarity; below 0.5 the stem has been rewritten rather than edited. */
 function similarity(a: string, b: string): number {
@@ -234,7 +197,7 @@ function routeChanges(o: Outcome, r: Record<string, unknown>, changes: string[])
   o.image_feedback.push(...((r.asset_issues as string[]) || []), ...((r.missing_images as string[]) || []));
   const text: string[] = [];
   for (const c of changes) {
-    const route = routeOf(c);
+    const route = routeChange(c, true);
     if (route === 'image') o.image_feedback.push(c);
     else if (route === 'label') o.label_feedback.push(c);
     else if (route === 'batch') o.dropped_batch_relative.push(c);
@@ -251,7 +214,7 @@ function routeChanges(o: Outcome, r: Record<string, unknown>, changes: string[])
 
 /** Apply a fixer pass to `row` in place, recording the repair on its trail the way the pipeline does. */
 async function repair(row: Record<string, unknown>, changes: string[], phase: 'validator' | 'adversarial', courseName: string): Promise<StageFix> {
-  const res = await fixQuestion(editable(row), changes, courseName);
+  const res = await fixQuestion(editable(row), changes, courseName, { existingBank: true });
   const trail = row.audit_trail as unknown[];
   if (res.fixed && res.question) {
     const before = editable(row);
@@ -272,7 +235,7 @@ async function repair(row: Record<string, unknown>, changes: string[], phase: 'v
   return { attempted: true, fixed: false, error };
 }
 
-async function reviewBatch(items: Array<{ q: Exported; step: Step; from: string }>, step: Step, examFormat: Record<string, unknown>): Promise<Outcome[]> {
+async function reviewBatch(items: Array<{ q: Exported; step: Step; from: string }>, step: Step, examFormat: Record<string, unknown>, guidelines: Record<string, unknown>): Promise<Outcome[]> {
   const courseName = STEP_NAMES[step];
   const out: Outcome[] = [];
   const live: Array<{ row: Record<string, unknown>; o: Outcome }> = [];
@@ -297,7 +260,7 @@ async function reviewBatch(items: Array<{ q: Exported; step: Step; from: string 
   const rows = live.map((l) => l.row);
 
   // Validator
-  const vRes = await runValidatorBatch(rows, 'qbank', courseName, examFormat, undefined);
+  const vRes = await runValidatorBatch(rows, 'qbank', courseName, examFormat, guidelines, { existingBank: true });
   await Promise.all(live.map(async ({ row, o }, i) => {
     const r = vRes[i] || {};
     const score = typeof r.overall_accuracy_score === 'number' ? r.overall_accuracy_score : null;
@@ -309,7 +272,7 @@ async function reviewBatch(items: Array<{ q: Exported; step: Step; from: string 
   }));
 
   // Adversarial — sees the validator's repair, as in the pipeline.
-  const aRes = await runAdversarialBatch(rows, 'qbank', courseName, examFormat);
+  const aRes = await runAdversarialBatch(rows, 'qbank', courseName, examFormat, { guidelines, existingBank: true });
   await Promise.all(live.map(async ({ row, o }, i) => {
     const r = aRes[i] || {};
     const score = typeof r.adversarial_score === 'number' ? r.adversarial_score : null;
@@ -443,9 +406,10 @@ const done = new Map<string, Outcome>();
 if (existsSync(RESULTS)) for (const line of readFileSync(RESULTS, 'utf8').split('\n')) if (line.trim()) { const o = JSON.parse(line) as Outcome; done.set(o.id, o); }
 
 if (!REPORT_ONLY) {
-  const { data: courses, error } = await supabase.from('qb_courses').select('id, exam_format').in('id', Object.values(STEP_COURSES));
+  const { data: courses, error } = await supabase.from('qb_courses').select('id, exam_format, generation_guidelines').in('id', Object.values(STEP_COURSES));
   if (error) throw new Error(error.message);
   const formats = Object.fromEntries((Object.keys(STEP_COURSES) as Step[]).map((s) => [s, (courses!.find((c) => c.id === STEP_COURSES[s])?.exam_format || {}) as Record<string, unknown>]));
+  const guidelinesOf = Object.fromEntries((Object.keys(STEP_COURSES) as Step[]).map((s) => [s, (courses!.find((c) => c.id === STEP_COURSES[s])?.generation_guidelines || {}) as Record<string, unknown>]));
 
   const todo = selected.filter((q) => !done.has(q.id)).map((q) => ({ q, ...((s) => ({ step: s.step, from: s.from }))(stepOf(q)) }));
   const batches: Array<{ step: Step; items: typeof todo }> = [];
@@ -459,7 +423,7 @@ if (!REPORT_ONLY) {
   const t0 = Date.now();
   let finished = 0;
   await runWithConcurrency(batches.map((b) => async () => {
-    const outcomes = await reviewBatch(b.items, b.step, formats[b.step]);
+    const outcomes = await reviewBatch(b.items, b.step, formats[b.step], guidelinesOf[b.step]);
     for (const o of outcomes) { appendFileSync(RESULTS, JSON.stringify(o) + '\n'); done.set(o.id, o); }
     finished++;
     const tok = getStepTokens(RUN_ID, 'review');

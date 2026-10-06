@@ -66,12 +66,65 @@ function unflatten(node: unknown): void {
  * Structure is only allowed to move when a change ASKED for it. Returns the reason it
  * refused, or null when the fix is structurally faithful.
  */
+/** Option texts in display order: the legacy {A:…} column, else content.options [{key,text}]. */
+function optionTexts(q: Record<string, unknown>): string[] | null {
+  const o = q.options;
+  if (o && typeof o === 'object' && !Array.isArray(o)) {
+    return Object.keys(o as Record<string, unknown>).sort().map((k) => String((o as Record<string, unknown>)[k] ?? ''));
+  }
+  const co = (q.content as Record<string, unknown> | undefined)?.options;
+  if (Array.isArray(co)) return co.map((x) => String((x as Record<string, unknown>)?.text ?? x ?? ''));
+  return null;
+}
+
+function keyText(q: Record<string, unknown>): string | null {
+  const opts = q.options as Record<string, unknown> | undefined;
+  const k = String(q.correct_option ?? q.correct_answer ?? (q.content as Record<string, unknown> | undefined)?.answer ?? '');
+  if (opts && typeof opts === 'object' && !Array.isArray(opts) && /^[A-J]$/.test(k)) return String(opts[k] ?? '');
+  return null;
+}
+
+const norm = (s: string) => s.toLowerCase().replace(/\s+/g, ' ').trim();
+
+/**
+ * `locked`: the item is already in use (an imported bank), so its option count and order are fixed
+ * whatever a change asks — a reviewer told "reduce to the standard five options" would otherwise
+ * delete an option candidates have chosen. Wording and the key can still change.
+ */
+export function optionDrift(before: Record<string, unknown>, after: Record<string, unknown>, asked: string, locked = false): string | null {
+  const a = optionTexts(before);
+  const b = optionTexts(after);
+  if (!a || !b || !a.length) return null;
+  if (a.length !== b.length && (locked || !/\b(add|remove|delete|drop|reduce|replace|fewer|more|option count|number of options)\b[^.]{0,40}\boptions?\b|\boption count\b/.test(asked))) {
+    return `option count ${a.length} -> ${b.length}${locked ? ' on an item already in use' : ''}`;
+  }
+  // Same options, new order: nothing a candidate needs, and every recorded answer moves.
+  const sameSet = a.length === b.length && [...a].map(norm).sort().join('\u0001') === [...b].map(norm).sort().join('\u0001');
+  if (sameSet && a.map(norm).join('\u0001') !== b.map(norm).join('\u0001') && (locked || !/\b(reorder|re-order|shuffle|reletter|re-letter|order of (the )?options|option order)\b/.test(asked))) {
+    return 'options reordered';
+  }
+  const ka = keyText(before), kb = keyText(after);
+  if (ka !== null && kb !== null && norm(ka) !== norm(kb) && !/\b(answer key|correct answer|keyed answer|key\b|correct option)/.test(asked)) {
+    return 'correct answer changed without a request to change it';
+  }
+  return null;
+}
+
 export function structuralDrift(
   before: Record<string, unknown>,
   after: Record<string, unknown>,
-  changesRequired: string[]
+  changesRequired: string[],
+  locked = false
 ): string | null {
   const asked = changesRequired.join(' ').toLowerCase();
+
+  // A single-best-answer item's options are its structure too. Asked to "reduce overrepresentation
+  // of B", the fixer reshuffled an item's options to move its key to C; asked to fix an
+  // explanation, it dropped a sixth option. On an item already in use, either one reattaches every
+  // recorded answer to different text.
+  const mcqDrift = optionDrift(before, after, asked, locked);
+  if (mcqDrift) return mcqDrift;
+
   const subsOf = (q: Record<string, unknown>) => {
     const c = (q.content as Record<string, unknown>) || q;
     return Array.isArray(c?.sub_questions) ? (c.sub_questions as Array<Record<string, unknown>>) : null;
@@ -100,7 +153,8 @@ export function structuralDrift(
 export async function fixQuestion(
   question: Record<string, unknown>,
   changesRequired: string[],
-  courseName: string
+  courseName: string,
+  opts?: { existingBank?: boolean }
 ): Promise<FixResult> {
   if (!changesRequired || changesRequired.length === 0) {
     return { fixed: false };
@@ -118,6 +172,9 @@ CRITICAL RULES:
 • Do NOT add new content, options, or explanations beyond what the changes require.
 • Preserve ALL fields from the original JSON — the question may be any format (MCQ, SATA, ordered response, fill-in-blank, etc.).
 • NEVER change the question's STRUCTURE unless a required change explicitly asks for it. Keep the same number of sub_questions, in the same order, each with the SAME format_type. A set with one sub-question keeps exactly one; do not "complete" it by adding more. Fixing a missing field means filling that field in place, not rebuilding the question around it.
+• Keep every OPTION, in the same order, under the same letter, unless a change explicitly asks to add, remove, replace or reorder options. A wrong or weak option is fixed by editing its wording in place. Change which option is correct only when a change says the key is wrong.
+• You cannot change an image. If a change can only be met by a different image, mark it "❌" — never describe in the stem or explanation what the image should show; that hands the candidate the answer.
+• Never shorten a clinical vignette into a recall question or strip clinical detail from it, and never write a "fix" that refers to other questions in a batch (overlap, answer-letter balance) — mark such a change "❌".
 
 COURSE: ${courseName}
 
@@ -171,7 +228,7 @@ Return ONLY valid JSON. No preamble, no markdown fences.`;
       // A fix that reshapes the question is worse than no fix: the flagged defect is
       // usually cosmetic, while the rewrite replaces a valid item with a different one.
       // Retry once with the rule spelled out, then keep the ORIGINAL rather than accept it.
-      const drift = structuralDrift(question, fixed, changesRequired);
+      const drift = structuralDrift(question, fixed, changesRequired, Boolean(opts?.existingBank));
       if (drift) {
         console.warn(`  [Fixer] attempt ${attempt}/2 changed structure it was not asked to (${drift})`);
         lastErr = `structural drift: ${drift}`;

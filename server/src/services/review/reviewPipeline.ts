@@ -24,6 +24,7 @@ import { regenerateQuestionImage, isImageGenerationAvailable } from '../images/i
 import { startTracking, getStepTokens } from '../llm/tokenTracker.js';
 import { distributionForJob } from '../generation/distribution.js';
 import { changedFields } from '../audit/fixHistory.js';
+import { routeChanges } from './changeRouting.js';
 
 const REVIEW_BATCH_SIZE = 10;
 const MAX_CONCURRENT_BATCHES = 8;
@@ -117,9 +118,13 @@ async function fetchJobQuestions(jobId: string, status?: string): Promise<Record
   return data;
 }
 
-async function getCourseInfo(jobId: string): Promise<{ name: string; examFormat: Record<string, unknown>; guidelines: Record<string, unknown> }> {
-  const { data: job } = await supabase.from('qb_jobs').select('course_id').eq('id', jobId).single();
-  if (!job) return { name: 'Unknown', examFormat: {}, guidelines: {} };
+async function getCourseInfo(jobId: string): Promise<{ name: string; examFormat: Record<string, unknown>; guidelines: Record<string, unknown>; existingBank: boolean }> {
+  const { data: job } = await supabase.from('qb_jobs').select('course_id, config').eq('id', jobId).single();
+  if (!job) return { name: 'Unknown', examFormat: {}, guidelines: {}, existingBank: false };
+  // Questions imported from a live bank have been answered already. Their batches are arbitrary
+  // slices of that bank, and their options carry recorded responses — see changeRouting.ts.
+  const config = (job.config || {}) as Record<string, unknown>;
+  const existingBank = config.source === 'import' || config.existing_bank === true;
 
   // Try with generation_guidelines first; fall back if column doesn't exist yet
   let course: Record<string, unknown> | null = null;
@@ -135,6 +140,7 @@ async function getCourseInfo(jobId: string): Promise<{ name: string; examFormat:
     name: (course?.name as string) || 'Unknown',
     examFormat: (course?.exam_format as Record<string, unknown>) || {},
     guidelines: (course?.generation_guidelines as Record<string, unknown>) || {},
+    existingBank,
   };
 }
 
@@ -149,11 +155,18 @@ function buildSubjectMap(questions: Record<string, unknown>[]): SubjectStatus[] 
   }));
 }
 
-// Detect image-related changes in changes_required (e.g., "Replace the attached chest X-ray...")
-const IMAGE_CHANGE_RE = /\b(replace\s+(the\s+)?(attached|current|provided|existing)?\s*(image|x-?ray|ct|mri|scan|radiograph|photo|figure|picture|illustration))|(\b(image|x-?ray|radiograph|scan|figure)\b.*\b(replace|regenerate|update|redo|change|swap))/i;
-
-function isImageRelatedChange(change: string): boolean {
-  return IMAGE_CHANGE_RE.test(change);
+/**
+ * Split a reviewer's requests (changeRouting.ts) and record the ones that do not go to the fixer,
+ * so the trail shows every request and where it went.
+ */
+function routeForFix(q: Record<string, unknown>, changes: string[], assetFeedback: string[], existingBank: boolean) {
+  const routed = routeChanges(changes, assetFeedback, existingBank, Boolean(q.is_image_question && q.image_url));
+  const notSent = {
+    ...(routed.label.length ? { label_feedback: routed.label } : {}),
+    ...(routed.batch.length ? { batch_feedback_not_applied: routed.batch } : {}),
+    ...(routed.heldForImage.length ? { held_for_image: routed.heldForImage } : {}),
+  };
+  return { routed, notSent };
 }
 
 function updateSubjectProgress(jobId: string, subject: string, phase: 'validator' | 'adversarial' | 'done', reviewed: number, fixed: number) {
@@ -195,7 +208,8 @@ async function runValidatorPhase(
   questions: Record<string, unknown>[],
   courseName: string,
   examFormat?: Record<string, unknown>,
-  guidelines?: Record<string, unknown>
+  guidelines?: Record<string, unknown>,
+  existingBank = false
 ): Promise<{ reviewed: number; fixed: number }> {
   const batches = chunk(questions, REVIEW_BATCH_SIZE);
   let totalReviewed = 0;
@@ -215,7 +229,7 @@ async function runValidatorPhase(
     // ── Step: Sending to validator ──
     setStep(jobId, `[Validator] Batch ${batchNum}/${batchesTotal}: sending Q${qStart}–Q${qEnd} to GPT-5.4...`);
 
-    const results = await runValidatorBatch(batch, 'qbank', courseName || 'exam preparation', examFormat, guidelines);
+    const results = await runValidatorBatch(batch, 'qbank', courseName || 'exam preparation', examFormat, guidelines, { existingBank });
 
     // ── Step: Processing scores ──
     setStep(jobId, `[Validator] Batch ${batchNum}/${batchesTotal}: processing scores for Q${qStart}–Q${qEnd}`);
@@ -244,11 +258,13 @@ async function runValidatorPhase(
       ];
       const assetIssues = (result.asset_issues as string[]) || [];
       const missingImages = (result.missing_images as string[]) || [];
+      const { routed, notSent } = routeForFix(q, changes, [...assetIssues, ...missingImages], existingBank);
 
       const trail = Array.isArray(q.audit_trail) ? [...(q.audit_trail as unknown[])] : [];
       trail.push({
         phase: 'validator', score,
         changes: changes.length > 0 ? changes : null,
+        ...notSent,
         summary: (result.summary as string) || '',
         timestamp: new Date().toISOString(),
       });
@@ -256,18 +272,13 @@ async function runValidatorPhase(
       await supabase.from('qb_questions').update({ validator_score: score, audit_trail: trail }).eq('id', q.id);
       totalReviewed++;
 
-      // Separate image-related changes from text changes
-      const textChanges = changes.filter(c => !isImageRelatedChange(c));
-      const imageChanges = changes.filter(c => isImageRelatedChange(c));
-
-      if (score <= 7 && textChanges.length > 0) {
-        toFix.push({ dbId: q.id as string, question: q, changesRequired: textChanges });
+      if (score <= 7 && routed.fix.length > 0) {
+        toFix.push({ dbId: q.id as string, question: q, changesRequired: routed.fix });
       }
 
       // Queue image regeneration if reviewer flagged image issues (from dedicated fields OR changes_required)
-      const allImageFeedback = [...assetIssues, ...missingImages, ...imageChanges];
-      if (q.is_image_question && allImageFeedback.length > 0) {
-        imageRegenQueue.push({ dbId: q.id as string, feedback: allImageFeedback });
+      if (q.is_image_question && routed.image.length > 0) {
+        imageRegenQueue.push({ dbId: q.id as string, feedback: routed.image });
       }
     }
 
@@ -284,7 +295,7 @@ async function runValidatorPhase(
 
       const fixPromises = toFix.map(async (item, fixIdx) => {
         setStep(jobId, `[Validator] Batch ${batchNum}: fixing Q${qStart + fixIdx} (${fixIdx + 1}/${toFix.length})...`);
-        const fixResult = await fixQuestion(item.question, item.changesRequired, courseName);
+        const fixResult = await fixQuestion(item.question, item.changesRequired, courseName, { existingBank });
         if (fixResult.fixed && fixResult.question) {
           const fixedQ = fixResult.question;
 
@@ -453,7 +464,9 @@ async function runAdversarialPhase(
   questions: Record<string, unknown>[],
   courseName: string,
   prevFixed: number,
-  examFormat?: Record<string, unknown>
+  examFormat?: Record<string, unknown>,
+  guidelines?: Record<string, unknown>,
+  existingBank = false
 ): Promise<{ reviewed: number; fixed: number }> {
   const batches = chunk(questions, REVIEW_BATCH_SIZE);
   let totalReviewed = 0;
@@ -472,7 +485,7 @@ async function runAdversarialPhase(
 
     setStep(jobId, `[Adversarial] Batch ${batchNum}/${batchesTotal}: sending Q${qStart}–Q${qEnd} to GPT-5.4...`);
 
-    const results = await runAdversarialBatch(batch, 'qbank', courseName || 'exam preparation', examFormat);
+    const results = await runAdversarialBatch(batch, 'qbank', courseName || 'exam preparation', examFormat, { guidelines, existingBank });
 
     setStep(jobId, `[Adversarial] Batch ${batchNum}/${batchesTotal}: processing scores for Q${qStart}–Q${qEnd}`);
 
@@ -496,11 +509,13 @@ async function runAdversarialPhase(
       ];
       const assetIssues = (result.asset_issues as string[]) || [];
       const missingImages = (result.missing_images as string[]) || [];
+      const { routed, notSent } = routeForFix(q, changes, [...assetIssues, ...missingImages], existingBank);
 
       const trail = Array.isArray(q.audit_trail) ? [...(q.audit_trail as unknown[])] : [];
       trail.push({
         phase: 'adversarial', score,
         changes: changes.length > 0 ? changes : null,
+        ...notSent,
         summary: (result.summary as string) || '',
         timestamp: new Date().toISOString(),
       });
@@ -508,18 +523,13 @@ async function runAdversarialPhase(
       await supabase.from('qb_questions').update({ adversarial_score: score, audit_trail: trail }).eq('id', q.id);
       totalReviewed++;
 
-      // Separate image-related changes from text changes
-      const textChanges = changes.filter(c => !isImageRelatedChange(c));
-      const imageChanges = changes.filter(c => isImageRelatedChange(c));
-
-      if (score <= 7 && textChanges.length > 0) {
-        toFix.push({ dbId: q.id as string, question: q, changesRequired: textChanges });
+      if (score <= 7 && routed.fix.length > 0) {
+        toFix.push({ dbId: q.id as string, question: q, changesRequired: routed.fix });
       }
 
       // Queue image regeneration if reviewer flagged image issues (from dedicated fields OR changes_required)
-      const allImageFeedback = [...assetIssues, ...missingImages, ...imageChanges];
-      if (q.is_image_question && allImageFeedback.length > 0) {
-        imageRegenQueue.push({ dbId: q.id as string, feedback: allImageFeedback });
+      if (q.is_image_question && routed.image.length > 0) {
+        imageRegenQueue.push({ dbId: q.id as string, feedback: routed.image });
       }
     }
 
@@ -535,7 +545,7 @@ async function runAdversarialPhase(
 
       const fixPromises = toFix.map(async (item, fixIdx) => {
         setStep(jobId, `[Adversarial] Batch ${batchNum}: fixing Q${qStart + fixIdx} (${fixIdx + 1}/${toFix.length})...`);
-        const fixResult = await fixQuestion(item.question, item.changesRequired, courseName);
+        const fixResult = await fixQuestion(item.question, item.changesRequired, courseName, { existingBank });
         if (fixResult.fixed && fixResult.question) {
           const fixedQ = fixResult.question;
 
@@ -670,7 +680,7 @@ async function runReviewPipeline(jobId: string, scope: ReviewScope): Promise<voi
   try {
     startTracking(jobId, 'review');
     setStep(jobId, 'Loading course data...');
-    const { name: courseName, examFormat, guidelines } = await getCourseInfo(jobId);
+    const { name: courseName, examFormat, guidelines, existingBank } = await getCourseInfo(jobId);
 
     // A full re-review wipes every score, trail and status in the job. That is the
     // right thing when re-reviewing a job from scratch and catastrophic otherwise:
@@ -753,7 +763,7 @@ async function runReviewPipeline(jobId: string, scope: ReviewScope): Promise<voi
     await pushProgress(jobId);
 
     // Phase A — only send valid questions (not structural failures)
-    const validatorResult = await runValidatorPhase(jobId, validQuestions, courseName, examFormat, guidelines);
+    const validatorResult = await runValidatorPhase(jobId, validQuestions, courseName, examFormat, guidelines, existingBank);
 
     // Save post-validator snapshot
     setStep(jobId, 'Saving post-validator snapshots...');
@@ -777,7 +787,7 @@ async function runReviewPipeline(jobId: string, scope: ReviewScope): Promise<voi
     });
 
     // Phase B
-    const adversarialResult = await runAdversarialPhase(jobId, freshValid, courseName, validatorResult.fixed, examFormat);
+    const adversarialResult = await runAdversarialPhase(jobId, freshValid, courseName, validatorResult.fixed, examFormat, guidelines, existingBank);
 
     // Save post-adversarial snapshot
     setStep(jobId, 'Saving post-adversarial snapshots...');

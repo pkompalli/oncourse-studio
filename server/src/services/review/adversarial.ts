@@ -24,10 +24,11 @@
 import { orCall, MODELS } from '../llm/openrouter.js';
 import type { ContentPart } from '../llm/openrouter.js';
 import { extractJsonArray, formatQuestionsForReviewWithImages } from './shared.js';
+import type { ReviewOptions } from './validator.js';
 
 // ── Adversarial Prompt (V1 lines 5915-5966) ──
 
-export function getBatchAdversarialPrompt(contentType: string, domain = 'exam preparation', examFormat?: Record<string, unknown>): string {
+export function getBatchAdversarialPrompt(contentType: string, domain = 'exam preparation', examFormat?: Record<string, unknown>, opts?: ReviewOptions): string {
   if (contentType === 'lesson') {
     return `You are an adversarial ${domain} content reviewer. Your role is to find real defects that would mislead learners or cause harm — not to invent problems where none exist.
 
@@ -96,6 +97,10 @@ Output ONLY the JSON array. No preamble, no trailing text.`;
     }
   }
 
+  // The course sets its own key-balance rule (generation_guidelines.answer_key_balance), as the
+  // validator already reads it; this stage used to apply a generic "roughly equal" instead.
+  const keyRule = typeof opts?.guidelines?.answer_key_balance === 'string' ? (opts.guidelines.answer_key_balance as string).trim() : '';
+
   // qbank
   return `You are an adversarial ${domain} exam item reviewer.
 ${examFormatContext}
@@ -128,12 +133,16 @@ Flag only if one of these is true:
       • Leaked slugs: candidate-visible text must reference exhibits by their LABEL ("Exhibit 1"), never an internal id/slug (e.g. "cds-inputs-exhibit"). Flag any leaked slug.
       • response_instructions accuracy: must describe ONLY the response types actually present (no "enter basis points" if there is no bps entry) and specify the accepted numeric/date format. Flag mismatches.
       • Numeric options must be ordered ascending by value. Flag out-of-order option sets.
-8. CONCEPT DIVERSITY — look across the entire batch:
+${opts?.existingBank ? `8. These questions come from an existing bank, already answered by candidates, and are reviewed in arbitrary batches. Do NOT compare them with each other: leave concept_overlap empty.
+9. ANSWER KEY — leave answer_key_issue empty unless the keyed answer is wrong for the vignette as written. Never ask for a key to move, or for options to be reordered, added or removed, for balance.` : `8. CONCEPT DIVERSITY — look across the entire batch:
    a. Flag questions that test the EXACT same concept/fact as another question in the batch (conceptual duplicate even if worded differently)
    b. Flag questions that are too similar in scenario/presentation (e.g., 3 questions built on the same fact pattern → suggest varying it)
 9. ANSWER KEY BALANCE — check correct answer distribution across the batch:
-   a. If correct answer keys are heavily skewed (e.g., 6 out of 10 are "B"), flag the ones that should change to achieve better balance
-   b. A well-designed exam has roughly equal distribution across answer keys
+${keyRule
+  ? `   a. Apply THIS course's rule, not a generic one: ${keyRule}
+   b. A batch is a tenth of the bank: flag only what this batch shows against that rule.`
+  : `   a. If correct answer keys are heavily skewed (e.g., 6 out of 10 are "B"), flag the ones that should change to achieve better balance
+   b. A well-designed exam has roughly equal distribution across answer keys`}`}
 
 Do NOT flag:
 • Omissions that don't affect clinical reasoning for this question
@@ -336,7 +345,8 @@ export async function runAdversarialBatch(
   questions: Record<string, unknown>[],
   contentType = 'qbank',
   domain = 'exam preparation',
-  examFormat?: Record<string, unknown>
+  examFormat?: Record<string, unknown>,
+  opts?: ReviewOptions
 ): Promise<Record<string, unknown>[]> {
   // Phase 1 — sit the questions before seeing any of the answers.
   const attempts = contentType === 'qbank'
@@ -357,7 +367,7 @@ export async function runAdversarialBatch(
 → Where your blind answer matches the key, that agreement is evidence the item works; do not manufacture a problem with it.\n`
     : '';
 
-  const prompt = getBatchAdversarialPrompt(contentType, domain, examFormat);
+  const prompt = getBatchAdversarialPrompt(contentType, domain, examFormat, opts);
   const content = await formatQuestionsForReviewWithImages(questions);
 
   let userMessage: string | ContentPart[];
