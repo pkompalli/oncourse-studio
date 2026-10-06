@@ -211,7 +211,7 @@ Output ONLY the JSON array. No preamble, no trailing text.`;
 
 // ── Run audit on a batch ──
 
-async function runAuditBatch(questions: Record<string, unknown>[]): Promise<Record<string, unknown>[]> {
+export async function runAuditBatch(questions: Record<string, unknown>[]): Promise<Record<string, unknown>[]> {
   // What earlier stages asked for, and what the fixer did about it. This was always on the row
   // — reviewPipeline writes it for every repair — and audit never read it, so it re-scored each
   // question from scratch and a change that was requested and silently not applied left a
