@@ -132,19 +132,31 @@ const editable = (r: Record<string, unknown>) =>
 //   the repair as never applied and flags a question whose content is fine.
 const IMAGE_NOUN_RE = /\b(image|images|ecg|ekg|x-?ray|radiograph|ct\b|mri|scan|photo|photograph|figure|picture|illustration|tracing|micrograph|smear|histolog)/i;
 const IMAGE_WORD_RE = /\b(image|images|picture|photo|photograph|figure|tracing|micrograph)\b/i;
-const BATCH_RELATIVE_RE = /^CONCEPT OVERLAP:|\b(answer|key)s?\b.*\b(distribution|balance|diversify)\b|\bone of (two|three|four|\d+) '?[A-E]'? answers\b|\bQ\d+\b.*\b(same|overlap|duplicate)|\bskew|\blettering\b/i;
-const LABEL_RE = /^DIFFICULTY:|\b(difficulty|bloom'?s?)\s+(label|level|rating)\b|\breconsider difficulty\b/i;
+// Every reviewer sees only its batch, so a request that refers to the batch at all — or to how the
+// question sits among the others (over-represented letters, duplicated concepts) — is about the
+// batch, not the question.
+const BATCH_RELATIVE_RE = /^CONCEPT OVERLAP:|\bbatch\b|\boverrepresent|\bover-represent|\bduplicat|\bnear-identical\b|\bconcept diversity\b|\b(answer|key)s?\b.*\b(distribution|balance|diversify|varying|vary)\b|\bone of (two|three|four|\d+) '?[A-E]'? answers\b|\bQ\d+\b.*\b(same|overlap)|\bskew|\blettering\b/i;
+const LABEL_RE = /^DIFFICULTY:|\b(difficulty|bloom'?s?)\s+(label|level|rating)\b|\breconsider difficulty\b|\bdifficulty\b.*\b(easy|medium|hard)\b|\bbloom'?s?\b.*\b\d_[a-z]+/i;
 type Route = 'fix' | 'image' | 'batch' | 'label';
+// A request about the item's own stem or format is the point of this run — converting a recall
+// stem to a vignette is how a question comes to read like a Step item — even when the reviewer
+// justifies it by the rest of the batch ("…the apply-level format used elsewhere in the batch") or
+// by its Bloom's level. Checked after concept overlap and images, before the batch/label filters.
+const OWN_FORMAT_RE = /^FORMAT:|^EXPLANATION:|\b(vignette|lead-in|stem)\b/i;
 const routeOf = (c: string): Route =>
-  BATCH_RELATIVE_RE.test(c) ? 'batch'
-  : LABEL_RE.test(c) ? 'label'
+  /^CONCEPT OVERLAP:/i.test(c) ? 'batch'
   // Misrouting a text defect here only leaves it recorded and unfixed; misrouting an image defect
   // to the fixer rewrites the stem around a picture it cannot change. Err this way.
   // "Explanation does not address option E (HIDA scan)" names a test, not the picture; only an
   // explicit image word, or a request to replace one, counts.
-  : (IMAGE_WORD_RE.test(c) && /\b(replace|regenerate|swap|redo|provide|correct the|does not|doesn't|do not|fails? to|inconsistent|contradict|mismatch|inconsistent_data|not (clearly )?(show|depict|demonstrat|match))\b/i.test(c))
-    || (IMAGE_NOUN_RE.test(c) && /\b(replace|regenerate|swap|redo)\b/i.test(c)) ? 'image'
+  : isImageRequest(c) ? 'image'
+  : OWN_FORMAT_RE.test(c) ? 'fix'
+  : BATCH_RELATIVE_RE.test(c) ? 'batch'
+  : LABEL_RE.test(c) ? 'label'
   : 'fix';
+const isImageRequest = (c: string): boolean =>
+  (IMAGE_WORD_RE.test(c) && /\b(replace|regenerate|swap|redo|provide|correct the|does not|doesn't|do not|fails? to|inconsistent|contradict|mismatch|inconsistent_data|not (clearly )?(show|depict|demonstrat|match))\b/i.test(c))
+    || (IMAGE_NOUN_RE.test(c) && /\b(replace|regenerate|swap|redo)\b/i.test(c));
 
 /** Word-level Jaccard similarity; below 0.5 the stem has been rewritten rather than edited. */
 function similarity(a: string, b: string): number {
@@ -153,6 +165,25 @@ function similarity(a: string, b: string): number {
   const inter = [...wa].filter((w) => wb.has(w)).length;
   return wa.size + wb.size - inter ? inter / (wa.size + wb.size - inter) : 1;
 }
+/**
+ * The original option id behind each revised option, matched by TEXT. Matching by position is
+ * wrong whenever the fixer reorders: the pilot saw options reshuffled to move a key from B to C,
+ * which by position would have attached every student's recorded answer to different text.
+ * Best pairs first; a revised option whose best match shares under half its words is new (null).
+ */
+function matchOptionIds(original: ExportOption[], revised: string[]): Array<string | null> {
+  const pairs: Array<{ r: number; o: number; s: number }> = [];
+  revised.forEach((t, r) => original.forEach((x, o) => pairs.push({ r, o, s: similarity(t, x.text) })));
+  pairs.sort((a, b) => b.s - a.s);
+  const ids: Array<string | null> = revised.map(() => null);
+  const usedR = new Set<number>(), usedO = new Set<number>();
+  for (const p of pairs) {
+    if (p.s < 0.5 || usedR.has(p.r) || usedO.has(p.o)) continue;
+    ids[p.r] = original[p.o].id; usedR.add(p.r); usedO.add(p.o);
+  }
+  return ids;
+}
+
 const STEM_REFS_IMAGE = /shown\s+(below|above|here)|in\s+the\s+(image|figure|scan|x-?ray|ct|mri)|based\s+on\s+the\s+(image|figure)/i;
 
 interface StageFix { attempted: boolean; fixed?: boolean; changes_applied?: string[]; error?: string; changed_fields?: string[] }
@@ -325,20 +356,27 @@ async function reviewBatch(items: Array<{ q: Exported; step: Step; from: string 
     const opts = row.options as Record<string, string>;
     const letters = Object.keys(opts).sort();
     const key = String(row.correct_option || '');
-    const origKey = orig.options.findIndex((x) => x.is_correct);
+    const origKeyOpt = orig.options.find((x) => x.is_correct);
     o.changed = o.validator_fix?.fixed === true || o.adversarial_fix?.fixed === true;
     if (o.changed) {
+      const ids = matchOptionIds(orig.options, letters.map((L) => opts[L]));
+      const options = letters.map((L, idx) => ({ id: ids[idx], letter: L, text: opts[L], is_correct: L === key }));
+      const newKeyId = options.find((x) => x.is_correct)?.id ?? null;
       o.revised = {
         question_text: String(row.question),
         explanation: String(row.explanation),
-        options: letters.map((L, idx) => ({ id: orig.options[idx]?.id ?? null, letter: L, text: opts[L], is_correct: L === key })),
-        key_moved: letters.indexOf(key) !== origKey,
+        options,
+        // Moved means a different OPTION is now correct, not a different letter: a reorder that
+        // carries the right answer from B to C changes nothing a student answered.
+        key_moved: newKeyId !== (origKeyOpt?.id ?? null),
         option_count_changed: letters.length !== orig.options.length,
       };
       const sim = similarity(orig.question_text, o.revised.question_text);
-      if (o.revised.key_moved) o.needs_clinician_review.push(`Answer key moved from ${LETTERS[origKey] ?? 'none'} ("${orig.options[origKey]?.text.slice(0, 80) ?? ''}") to ${key} ("${opts[key]?.slice(0, 80) ?? ''}")`);
+      if (o.revised.key_moved) o.needs_clinician_review.push(`Answer key moved from "${origKeyOpt?.text.slice(0, 80) ?? 'none'}" to "${opts[key]?.slice(0, 80) ?? ''}"`);
       if (sim < 0.5) o.needs_clinician_review.push(`Stem rewritten, not edited (word overlap ${sim.toFixed(2)})`);
-      if (o.revised.option_count_changed) o.needs_clinician_review.push(`Option count changed ${orig.options.length} → ${letters.length}; option ids cannot be mapped`);
+      if (o.revised.option_count_changed) o.needs_clinician_review.push(`Option count changed ${orig.options.length} → ${letters.length}`);
+      const replaced = options.filter((x) => !x.id).length;
+      if (replaced) o.needs_clinician_review.push(`${replaced} option(s) replaced with new text; they have no original option id`);
     }
     // A blind solve that disagreed and was not resolved by a repair is a key a clinician should look at.
     if (o.adversarial?.key_disagreement && !o.revised?.key_moved) o.needs_clinician_review.push(`Blind solve chose ${String(o.adversarial.blind_answer)} (${String(o.adversarial.blind_confidence)}) against key ${key}; key not changed`);
