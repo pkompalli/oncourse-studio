@@ -366,7 +366,10 @@ async function runValidatorPhase(
     }
 
     // ── Step: Regenerate flagged images ──
-    if (imageRegenQueue.length > 0 && isImageGenerationAvailable()) {
+    // Not for an existing bank: its images are real clinical photographs and tracings, and the
+    // pilot's regenerated pupil photo was judged still wrong. The feedback stays on the trail for
+    // a person to source a replacement.
+    if (imageRegenQueue.length > 0 && isImageGenerationAvailable() && !existingBank) {
       setStep(jobId, `[Validator] Batch ${batchNum}: regenerating ${imageRegenQueue.length} flagged images...`);
       await Promise.all(
         imageRegenQueue.map(async (item) => {
@@ -616,7 +619,7 @@ async function runAdversarialPhase(
     }
 
     // ── Step: Regenerate flagged images ──
-    if (imageRegenQueue.length > 0 && isImageGenerationAvailable()) {
+    if (imageRegenQueue.length > 0 && isImageGenerationAvailable() && !existingBank) {
       setStep(jobId, `[Adversarial] Batch ${batchNum}: regenerating ${imageRegenQueue.length} flagged images...`);
       await Promise.all(
         imageRegenQueue.map(async (item) => {

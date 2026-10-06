@@ -103,8 +103,14 @@ export function optionDrift(before: Record<string, unknown>, after: Record<strin
   if (sameSet && a.map(norm).join('\u0001') !== b.map(norm).join('\u0001') && (locked || !/\b(reorder|re-order|shuffle|reletter|re-letter|order of (the )?options|option order)\b/.test(asked))) {
     return 'options reordered';
   }
-  const ka = keyText(before), kb = keyText(after);
-  if (ka !== null && kb !== null && norm(ka) !== norm(kb) && !/\b(answer key|correct answer|keyed answer|key\b|correct option)/.test(asked)) {
+  // Which option is keyed, not what it says: editing the keyed option's wording (stripping a stray
+  // "C. " prefix, say) is a text fix, and comparing text refused it as a key move. With the
+  // options in place the letter identifies the option; only a re-shaped set falls back to text.
+  const la = String(before.correct_option ?? ''), lb = String(after.correct_option ?? after.correct_answer ?? '');
+  const moved = a.length === b.length && /^[A-J]$/.test(la) && /^[A-J]$/.test(lb)
+    ? la !== lb
+    : (() => { const ka = keyText(before), kb = keyText(after); return ka !== null && kb !== null && norm(ka) !== norm(kb); })();
+  if (moved && !/\b(answer key|correct answer|keyed answer|key\b|correct option)/.test(asked)) {
     return 'correct answer changed without a request to change it';
   }
   return null;
