@@ -29,6 +29,10 @@ const APPLY = process.argv.includes('--apply');
 const IN = argStr('in', 'backups/usmle_export/usmle_questions_post_2025-01-31.json');
 const LIMIT = Number(argStr('limit', '0'));
 const OFFSET = Number(argStr('offset', '0'));
+// --steps step3 imports only those Steps; --job <id> fills that existing (empty) job instead of
+// creating one — used to finish an import that was stopped part-way.
+const ONLY_STEPS = argStr('steps') ? argStr('steps').split(',') : null;
+const INTO_JOB = argStr('job');
 
 type Step = 'step1' | 'step2' | 'step3';
 const COURSES: Record<Step, string> = {
@@ -141,16 +145,26 @@ for (const step of Object.keys(COURSES) as Step[]) {
 
 for (const step of Object.keys(COURSES) as Step[]) {
   const course = courses!.find((c) => c.id === COURSES[step])!;
+  if (ONLY_STEPS && !ONLY_STEPS.includes(step)) continue;
   const chosen = pick(byStep[step]);
   const images = chosen.filter(({ q }) => (q.assets || []).some((a) => a.url)).length;
   const noKey = chosen.filter(({ q }) => !(q.options || []).some((o) => o.is_correct)).length;
   console.log(`${step}: ${chosen.length} of ${byStep[step].length} questions → ${course.name}${LIMIT ? ' (pilot)' : ''} | ${images} with images | ${noKey} with no keyed option`);
   if (!APPLY || !chosen.length) continue;
 
-  const { data: job, error: jErr } = await supabase.from('qb_jobs').insert({
+  let job: { id: string };
+  if (INTO_JOB) {
+    const { count } = await supabase.from('qb_questions').select('id', { count: 'exact', head: true }).eq('job_id', INTO_JOB);
+    if (count) throw new Error(`job ${INTO_JOB} already has ${count} questions — refusing to add more`);
+    job = { id: INTO_JOB };
+  } else {
+  const { data: created, error: jErr } = await supabase.from('qb_jobs').insert({
     course_id: COURSES[step],
     type: 'mock_exam',
-    status: 'reviewing',
+    // Parked, not 'reviewing': the server resumes every job at reviewing on startup
+    // (resumeStrandedJobs), so starting the app would launch the whole review unasked.
+    // runImportedJobs.ts un-parks a job when it is run on purpose.
+    status: 'parked',
     progress: {},
     config: {
       source: 'import',
@@ -164,12 +178,14 @@ for (const step of Object.keys(COURSES) as Step[]) {
     },
   }).select('id').single();
   if (jErr) throw new Error(jErr.message);
+  job = created;
+  }
 
   const rows = chosen.map(({ q, from }, i) => toRow(q, step, from, job.id, course.name, i + 1));
   for (let i = 0; i < rows.length; i += 500) {
     const { error } = await supabase.from('qb_questions').insert(rows.slice(i, i + 500));
     if (error) throw new Error(`insert ${step} rows ${i}–${i + 499}: ${error.message}`);
   }
-  console.log(`  created job ${job.id} with ${rows.length} questions`);
+  console.log(`  ${INTO_JOB ? "filled" : "created"} job ${job.id} with ${rows.length} questions`);
 }
 if (!APPLY) console.log('dry run — rerun with --apply to create the jobs');

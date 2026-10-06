@@ -42,6 +42,12 @@ async function drive(id: string) {
   const tag = `[${id.slice(0, 8)}]`;
   let job = await jobOf(id);
   if (job.config?.source !== 'import') throw new Error(`${tag} is not an imported job — refusing (this driver assumes existing-bank mode)`);
+  // Imported jobs wait at 'parked' so a server restart does not start them (importUsmleExport.ts).
+  if (job.status === 'parked') {
+    const { error } = await supabase.from('qb_jobs').update({ status: 'reviewing' }).eq('id', id);
+    if (error) throw new Error(error.message);
+    job = { ...job, status: 'reviewing' };
+  }
   if (job.status === 'reviewing') {
     await reviewBatchForJob(id, 'pending');
     job = { ...job, status: await waitWhile(id, 'reviewing', tag) };
