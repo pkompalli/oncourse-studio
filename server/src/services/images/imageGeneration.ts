@@ -348,6 +348,9 @@ Return ONLY the rewritten text, with no preamble, no quotes and no explanation.`
 
     const patch: Record<string, unknown> = {
       content,
+      // The legacy column is what reviewers and the export read for an MCQ. Rewriting only
+      // content.stem left `question` still saying "shown in the image on the left".
+      ...(String(question.question ?? '') === stem || !question.question ? { question: rewritten } : {}),
       is_image_question: false,
       image_url: null,
       image_type: null,
@@ -375,13 +378,21 @@ Return ONLY the rewritten text, with no preamble, no quotes and no explanation.`
 async function generateAndStoreImage(
   question: Record<string, unknown>,
   jobId: string,
-  fixInstructions?: string
+  fixInstructions?: string,
+  opts: { duringReview?: boolean } = {}
 ): Promise<boolean> {
   const qId = question.id as string;
   const qNum = question.question_number as number;
 
   const result = await generateImageWithOpenAI(question, fixInstructions);
   if (result && 'safetyRefused' in result) {
+    // A REPLACEMENT was refused, and the question still has the image it had. Keep it: the
+    // fallback below is for a question whose image never existed, and run here it removed a real
+    // clinical photograph from an imported item (977c011f) and left the stem pointing at nothing.
+    if (question.image_url) {
+      console.warn(`    ✗ Replacement image refused on content policy for Q${qNum} — keeping the existing image`);
+      return false;
+    }
     // The image is never going to exist, so stop asking for it and make the question answerable
     // without one. Only reached on a refusal: every other failure falls through to the retry
     // path below, because those are worth another attempt and this is not.
@@ -421,17 +432,19 @@ async function generateAndStoreImage(
     }];
   }
 
-  // If this question was previously scored low (image-related failure),
-  // reset scores so it gets properly re-evaluated in audit
+  // If this question was previously scored low (image-related failure), reset its scores so it is
+  // re-evaluated in audit — but only outside a review pass. Inside one, the validator has just
+  // scored the question low BECAUSE of the image, and the reset erased that score and its trail
+  // mid-review, along with every repair recorded before it, so audit had nothing to verify.
+  // The trail is history and is never cleared.
   const prevQuality = question.quality_score as number | null;
   const prevValidator = question.validator_score as number | null;
   const prevScore = prevQuality ?? prevValidator;
-  if (prevScore !== null && prevScore <= 6) {
+  if (!opts.duringReview && prevScore !== null && prevScore <= 6) {
     updateData.validator_score = null;
     updateData.adversarial_score = null;
     updateData.quality_score = null;
     updateData.combined_score = null;
-    updateData.audit_trail = [];
     updateData.status = 'reviewed';
   }
 
@@ -552,7 +565,8 @@ export function imageContradictionIssues(issues: string[]): string[] {
 export async function regenerateQuestionImage(
   questionId: string,
   jobId: string,
-  reviewFeedback: string[]
+  reviewFeedback: string[],
+  opts: { duringReview?: boolean } = {}
 ): Promise<boolean> {
   if (!openaiClient) return false;
 
@@ -585,7 +599,7 @@ export async function regenerateQuestionImage(
   const fixInstructions = reviewFeedback.join('\n');
 
   console.log(`    🔄 Re-generating image for Q${question.question_number} with review feedback`);
-  return generateAndStoreImage(question, jobId, fixInstructions);
+  return generateAndStoreImage(question, jobId, fixInstructions, opts);
 }
 
 export function isImageGenerationAvailable(): boolean {

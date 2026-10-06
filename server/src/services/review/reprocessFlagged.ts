@@ -312,7 +312,8 @@ async function persistFix(
   fixedQ: Record<string, unknown>,
   trail: unknown[],
   issues: string[],
-  jobId: string
+  jobId: string,
+  existingBank = false
 ): Promise<void> {
   const update: Record<string, unknown> = { audit_trail: trail };
   if (fixedQ.question != null) update.question = fixedQ.question;
@@ -331,7 +332,8 @@ async function persistFix(
   await supabase.from('qb_questions').update(update).eq('id', q.id as string);
 
   const contradictions = imageContradictionIssues(issues);
-  if (contradictions.length > 0 && q.image_url && isImageGenerationAvailable()) {
+  // Not for an imported bank: its images are real, and regeneration replaced them with drawings.
+  if (contradictions.length > 0 && q.image_url && isImageGenerationAvailable() && !existingBank) {
     console.log(`    🖼  Image contradicts the text for Q${q.question_number} — redrawing from the corrected text`);
     await regenerateQuestionImage(q.id as string, jobId, contradictions);
   }
@@ -386,7 +388,7 @@ async function runReprocessPipeline(jobId: string): Promise<void> {
     });
     let imageRetried = 0;
 
-    if (imageQsToRetry.length > 0 && isImageGenerationAvailable()) {
+    if (imageQsToRetry.length > 0 && isImageGenerationAvailable() && !existingBank) {
       setState(jobId, { phase: 'retrying_images' });
       const missingCount = imageQsToRetry.filter(q => !q.image_url).length;
       const replaceCount = imageQsToRetry.length - missingCount;
@@ -443,7 +445,7 @@ async function runReprocessPipeline(jobId: string): Promise<void> {
             timestamp: new Date().toISOString(),
           });
 
-          await persistFix(q, fixedQ, trail, issues, jobId);
+          await persistFix(q, fixedQ, trail, issues, jobId, existingBank);
           totalFixed++;
         }
       });
@@ -531,7 +533,7 @@ async function runReprocessPipeline(jobId: string): Promise<void> {
               changes_applied: fixResult.changesApplied || [],
               timestamp: new Date().toISOString(),
             }];
-            await persistFix(q, fixedQ, trail2, fix, jobId);
+            await persistFix(q, fixedQ, trail2, fix, jobId, existingBank);
           }
         }
       }
@@ -617,7 +619,7 @@ async function runReprocessPipeline(jobId: string): Promise<void> {
               changes_applied: fixResult.changesApplied || [],
               timestamp: new Date().toISOString(),
             }];
-            await persistFix(q, fixedQ, trail2, fix, jobId);
+            await persistFix(q, fixedQ, trail2, fix, jobId, existingBank);
           }
         }
       }

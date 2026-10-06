@@ -378,7 +378,7 @@ async function runValidatorPhase(
             .select('image_url, audit_trail').eq('id', item.dbId).single();
           const oldUrl = before?.image_url || null;
 
-          const success = await regenerateQuestionImage(item.dbId, jobId, item.feedback);
+          const success = await regenerateQuestionImage(item.dbId, jobId, item.feedback, { duringReview: true });
 
           // Record before/after in audit trail
           const { data: after } = await supabase.from('qb_questions')
@@ -627,7 +627,7 @@ async function runAdversarialPhase(
             .select('image_url, audit_trail').eq('id', item.dbId).single();
           const oldUrl = before?.image_url || null;
 
-          const success = await regenerateQuestionImage(item.dbId, jobId, item.feedback);
+          const success = await regenerateQuestionImage(item.dbId, jobId, item.feedback, { duringReview: true });
 
           const { data: after } = await supabase.from('qb_questions')
             .select('image_url, audit_trail').eq('id', item.dbId).single();
