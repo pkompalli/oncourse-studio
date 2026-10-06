@@ -2,8 +2,8 @@
  * AWS Bedrock LLM Client
  *
  * Dual-backend:
- *   - GPT 5.6 Sol → Bedrock Mantle /openai/v1/responses (via aws4fetch signing)
- *   - Claude Sonnet 5 → Bedrock Converse API (via @ai-sdk/amazon-bedrock)
+ *   - GPT 6.1 Sol → Bedrock Mantle /openai/v1/responses (via aws4fetch signing)
+ *   - Claude Sonnet 5.5 → Bedrock Converse API (via @ai-sdk/amazon-bedrock)
  *
  * Supports Anthropic thinking/reasoning mode for review tasks.
  */
@@ -31,12 +31,12 @@ const bedrock = createAmazonBedrock({
 // ── Model config ──
 
 export const MODELS = {
-  GENERATOR: process.env.BR_GENERATOR_MODEL || 'openai.gpt-5.6-sol',          // generation via Mantle
-  VALIDATOR: process.env.BR_VALIDATOR_MODEL || 'us.anthropic.claude-sonnet-5', // validator review (with thinking)
-  ADVERSARIAL: process.env.BR_ADVERSARIAL_MODEL || 'us.anthropic.claude-sonnet-5',
-  AUDITOR: process.env.BR_AUDITOR_MODEL || 'us.anthropic.claude-sonnet-5',
-  FIXER: process.env.BR_FIXER_MODEL || 'us.anthropic.claude-sonnet-5',        // apply fixes
-  STRUCTURE: process.env.BR_STRUCTURE_MODEL || 'openai.gpt-5.6-sol',          // course structure via Mantle
+  GENERATOR: process.env.BR_GENERATOR_MODEL || 'openai.gpt-6.1-sol',            // generation via Mantle
+  VALIDATOR: process.env.BR_VALIDATOR_MODEL || 'us.anthropic.claude-sonnet-5-5', // validator review (with thinking)
+  ADVERSARIAL: process.env.BR_ADVERSARIAL_MODEL || 'us.anthropic.claude-sonnet-5-5',
+  AUDITOR: process.env.BR_AUDITOR_MODEL || 'us.anthropic.claude-sonnet-5-5',
+  FIXER: process.env.BR_FIXER_MODEL || 'us.anthropic.claude-sonnet-5-5',        // apply fixes
+  STRUCTURE: process.env.BR_STRUCTURE_MODEL || 'openai.gpt-6.1-sol',            // course structure via Mantle
 };
 
 // Which models should use thinking/reasoning (Claude only)
@@ -77,7 +77,7 @@ console.log(`[Bedrock] Reviewer:  ${MODELS.VALIDATOR} (thinking=${THINKING_MODEL
 const MAX_RETRIES = 3;
 const INITIAL_BACKOFF_MS = 2000;
 
-// ── Mantle call (GPT 5.6 Sol via /openai/v1/responses) ──
+// ── Mantle call (GPT 6.1 Sol via /openai/v1/responses) ──
 
 async function mantleCall(
   model: string,
