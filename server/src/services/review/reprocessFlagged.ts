@@ -19,6 +19,7 @@ import { orCall, MODELS } from '../llm/openrouter.js';
 import type { ContentPart } from '../llm/openrouter.js';
 import { formatQuestionsForReviewWithImages, extractJsonArray } from './shared.js';
 import { routeChanges } from './changeRouting.js';
+import { reviewModeOf } from './reviewMode.js';
 
 const BATCH_SIZE = 10;
 const MAX_CONCURRENT = 4;
@@ -104,11 +105,11 @@ async function pushProgress(jobId: string) {
   }).eq('id', jobId);
 }
 
-async function getCourseInfo(jobId: string): Promise<{ name: string; examFormat: Record<string, unknown>; guidelines: Record<string, unknown>; existingBank: boolean }> {
+async function getCourseInfo(jobId: string): Promise<{ name: string; examFormat: Record<string, unknown>; guidelines: Record<string, unknown>; existingBank: boolean; restructure: boolean }> {
   const { data: job } = await supabase.from('qb_jobs').select('course_id, config').eq('id', jobId).single();
-  if (!job) return { name: 'Unknown', examFormat: {}, guidelines: {}, existingBank: false };
+  if (!job) return { name: 'Unknown', examFormat: {}, guidelines: {}, existingBank: false, restructure: false };
   const config = (job.config || {}) as Record<string, unknown>;
-  const existingBank = config.source === 'import' || config.existing_bank === true;
+  const { existingBank, restructure } = reviewModeOf(config);
 
   // Try with generation_guidelines first; fall back if column doesn't exist yet
   let course: Record<string, unknown> | null = null;
@@ -125,6 +126,7 @@ async function getCourseInfo(jobId: string): Promise<{ name: string; examFormat:
     examFormat: (course?.exam_format as Record<string, unknown>) || {},
     guidelines: (course?.generation_guidelines as Record<string, unknown>) || {},
     existingBank,
+    restructure,
   };
 }
 
@@ -342,7 +344,7 @@ async function persistFix(
 async function runReprocessPipeline(jobId: string): Promise<void> {
   try {
     setStep(jobId, 'Loading flagged questions...');
-    const { name: courseName, examFormat, guidelines, existingBank } = await getCourseInfo(jobId);
+    const { name: courseName, examFormat, guidelines, existingBank, restructure } = await getCourseInfo(jobId);
 
     // Fetch questions that are effectively flagged:
     // 1. status = 'flagged' (explicitly flagged)
@@ -432,7 +434,7 @@ async function runReprocessPipeline(jobId: string): Promise<void> {
         const issues = getAuditIssues(q);
         if (issues.length === 0) return; // nothing to fix
 
-        const fixResult = await fixQuestion(q, issues, courseName, { existingBank });
+        const fixResult = await fixQuestion(q, issues, courseName, { existingBank, restructure });
         if (fixResult.fixed && fixResult.question) {
           const fixedQ = fixResult.question;
 
@@ -482,7 +484,7 @@ async function runReprocessPipeline(jobId: string): Promise<void> {
     const vTasks = vBatches.map((batch, bi) => async () => {
       setStep(jobId, `[Validator] Batch ${bi + 1}/${vBatches.length}: scoring ${batch.length} questions...`);
 
-      const results = await runValidatorBatch(batch, 'qbank', courseName || 'exam preparation', examFormat, guidelines, { existingBank });
+      const results = await runValidatorBatch(batch, 'qbank', courseName || 'exam preparation', examFormat, guidelines, { existingBank, restructure });
 
       for (let i = 0; i < batch.length; i++) {
         const q = batch[i];
@@ -524,7 +526,7 @@ async function runReprocessPipeline(jobId: string): Promise<void> {
 
         // Apply fixes if needed
         if (score <= 7 && fix.length > 0) {
-          const fixResult = await fixQuestion(q, fix, courseName, { existingBank });
+          const fixResult = await fixQuestion(q, fix, courseName, { existingBank, restructure });
           if (fixResult.fixed && fixResult.question) {
             const fixedQ = fixResult.question;
             const trail2 = [...trail, {
@@ -569,7 +571,7 @@ async function runReprocessPipeline(jobId: string): Promise<void> {
     const aTasks = aBatches.map((batch, bi) => async () => {
       setStep(jobId, `[Adversarial] Batch ${bi + 1}/${aBatches.length}: scoring ${batch.length} questions...`);
 
-      const results = await runAdversarialBatch(batch, 'qbank', courseName || 'exam preparation', examFormat, { guidelines, existingBank });
+      const results = await runAdversarialBatch(batch, 'qbank', courseName || 'exam preparation', examFormat, { guidelines, existingBank, restructure });
 
       for (let i = 0; i < batch.length; i++) {
         const q = batch[i];
@@ -610,7 +612,7 @@ async function runReprocessPipeline(jobId: string): Promise<void> {
 
         // Apply fixes if needed
         if (score <= 7 && fix.length > 0) {
-          const fixResult = await fixQuestion(q, fix, courseName, { existingBank });
+          const fixResult = await fixQuestion(q, fix, courseName, { existingBank, restructure });
           if (fixResult.fixed && fixResult.question) {
             const fixedQ = fixResult.question;
             const trail2 = [...trail, {

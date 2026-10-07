@@ -10,6 +10,7 @@ import { schemaErrorsFor } from '../generation/schemaValidate.js';
 import { coherenceIssues } from '../generation/coherence.js';
 import { consistencyIssues, isBlockingConsistency } from '../generation/consistency.js';
 import { EXISTING_ITEM_RULES } from './changeRouting.js';
+import { RESTRUCTURE_RULES, cueIssues } from './reviewMode.js';
 
 /**
  * Per-format rules to include. High enough that no course's real spec is truncated — the
@@ -24,7 +25,7 @@ const GUIDELINE_RULE_CAP = 20;
 // ── Validator Prompt (V1 lines 5803-5857, verbatim) ──
 
 /** existingBank: the items are already in use (imported from a live bank) — see changeRouting.ts. */
-export interface ReviewOptions { existingBank?: boolean; guidelines?: Record<string, unknown> }
+export interface ReviewOptions { existingBank?: boolean; restructure?: boolean; guidelines?: Record<string, unknown> }
 
 export function getBatchValidatorPrompt(contentType: string, domain = 'exam preparation', examFormat?: Record<string, unknown>, guidelines?: Record<string, unknown>, formatsInBatch?: Set<string>, opts?: ReviewOptions): string {
   if (contentType === 'lesson') {
@@ -301,7 +302,9 @@ For EACH question ask:
 6. FORMAT COMPLIANCE (if exam format requirements are provided above):
    a. Does the stem match the expected format (e.g., scenario/vignette vs. direct recall)?
    ${opts?.existingBank
-    ? 'Stored fields (format_type, is_image_question, image_type, image_search_terms, subject, topic, chapter, tags) are kept by the platform, not written in the item: do NOT request that any be supplied or changed, and do NOT lower the score for their absence. Review what a candidate reads — stem, options, key, explanation, image.\n   b. Do NOT flag the option count. These items are already in use and every option carries recorded answers: never request that an option be added, removed, merged or reordered — edit an option\'s wording in place if it is wrong.'
+    ? 'Stored fields (format_type, is_image_question, image_type, image_search_terms, subject, topic, chapter, tags) are kept by the platform, not written in the item: do NOT request that any be supplied or changed, and do NOT lower the score for their absence. Review what a candidate reads — stem, options, key, explanation, image.\n   ' + (opts?.restructure
+      ? 'b. Exactly five options are required. Flag any other count and ask for options to be added or merged to five.'
+      : 'b. Do NOT flag the option count. These items are already in use and every option carries recorded answers: never request that an option be added, removed, merged or reordered — edit an option\'s wording in place if it is wrong.')
     : 'b. Does the option count match (e.g., 4 options vs. 5)?'}
    c. Are the distractors structured as the exam expects (homogeneous length, parallel construction)?
    d. Is the Bloom's level a valid normalized value (2_understand, 3_apply, 4_analyze, 5_evaluate)? Flag non-standard labels like NCJMM_*, raw text labels, etc.
@@ -313,7 +316,7 @@ For EACH question ask:
 ${opts?.existingBank ? `9. ANSWER KEY — these questions come from an existing bank and are reviewed in arbitrary batches, so the letters in this batch say nothing about the bank's balance:
    a. Do NOT flag answer-key distribution or runs, and do NOT compare questions with each other.
    b. Ask for the keyed answer to change ONLY when it is factually wrong for the vignette as written; give the evidence in answer_key_issue. Never ask for it to move for balance.
-${EXISTING_ITEM_RULES}` : `9. ANSWER KEY DIVERSITY — check the correct answer keys across the batch:
+${opts?.restructure ? RESTRUCTURE_RULES : EXISTING_ITEM_RULES}` : `9. ANSWER KEY DIVERSITY — check the correct answer keys across the batch:
    a. Note the correct answer letter (A/B/C/D/E) for each question.
    b. Apply the course's own answer-key rule where one is given above. Where none is, flag if more than 40% of questions in this batch share the same key. Flag the over-represented ones and request the key be changed, with the content adjustment that makes the new key correct — never relabel an option without moving the content.
    c. Flag any run of consecutive questions in this batch sharing one key that exceeds the course's stated run limit.
@@ -469,6 +472,22 @@ export async function runValidatorBatch(
     r.case_study_issues = [ ...((r.case_study_issues as string[]) || []), ...issues.map((s) => `NOT COMPLIANT — ${s}`) ];
     r.changes_required = [ ...((r.changes_required as string[]) || []), ...issues.map((s) => `Fix: ${s}`) ];
     r.summary = `Structural/gradability issue(s): ${issues.slice(0, 3).join('; ')}${issues.length > 3 ? '…' : ''}`;
+  }
+
+  // Cues to the key a model is unreliable at counting: option count, the keyed option standing out by
+  // length, all/none-of-the-above. Restructure mode only, where options may change. Each becomes a
+  // change request and holds the score at 6 so the fixer runs; none of them blocks on its own.
+  if (opts?.restructure) {
+    for (let i = 0; i < questions.length; i++) {
+      const cues = cueIssues(questions[i]);
+      if (!cues.length) continue;
+      const r = results.find((x) => (x.question_number as number) === i + 1) || results[i];
+      if (!r) continue;
+      r.overall_accuracy_score = Math.min((r.overall_accuracy_score as number) ?? 6, 6);
+      r.needs_revision = true;
+      const have = new Set((r.changes_required as string[]) || []);
+      r.changes_required = [...have, ...cues.filter((c) => !have.has(c))];
+    }
   }
 
   return results;

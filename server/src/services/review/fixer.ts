@@ -94,9 +94,9 @@ const norm = (s: string) => s.toLowerCase().replace(/\s+/g, ' ').trim();
  * Measured on 23 option edits from two USMLE pilots: the 8 real replacements scored ≤ 0.25 and
  * every rewording ≥ 0.50.
  */
-const OPTION_IDENTITY_MIN = 0.5;
+export const OPTION_IDENTITY_MIN = 0.5;
 const STOPWORDS = new Set('a an the of to in on for with and or by at as is are be from that this its their his her'.split(' '));
-function optionIdentity(before: string, after: string): number {
+export function optionIdentity(before: string, after: string): number {
   const words = (s: string) => new Set((s.toLowerCase().match(/[a-z0-9]+/g) || []).filter((w) => !STOPWORDS.has(w)));
   const A = words(before), B = words(after);
   if (!A.size || !B.size) return norm(before) === norm(after) ? 1 : 0;
@@ -146,11 +146,24 @@ export function extractFixerJson(raw: string): Record<string, unknown> {
  * whatever a change asks — a reviewer told "reduce to the standard five options" would otherwise
  * delete an option candidates have chosen. Wording and the key can still change.
  */
-export function optionDrift(before: Record<string, unknown>, after: Record<string, unknown>, asked: string, locked = false): string | null {
+export function optionDrift(before: Record<string, unknown>, after: Record<string, unknown>, asked: string, locked = false, restructure = false): string | null {
   const a = optionTexts(before);
   const b = optionTexts(after);
   if (!a || !b || !a.length) return null;
-  if (a.length !== b.length && (locked || !/\b(add|remove|delete|drop|reduce|replace|fewer|more|option count|number of options)\b[^.]{0,40}\boptions?\b|\boption count\b/.test(asked))) {
+  // Restructure mode (reviewMode.ts): options may be added, replaced, reworded or reordered to reach
+  // the exam's standard, so the checks below that protect recorded answers do not apply. What must
+  // hold is the standard itself — five options — and that the correct answer is still the same
+  // choice unless a reviewer said the key was wrong.
+  if (restructure) {
+    if (b.length !== 5) return `option count ${b.length}; five are required`;
+    const ka = keyText(before), kb = keyText(after);
+    if (ka !== null && kb !== null && optionIdentity(ka, kb) < OPTION_IDENTITY_MIN
+        && !/\b(answer key|correct answer|keyed answer|key\b|correct option)/.test(asked)) {
+      return `correct answer became a different choice ("${ka.slice(0, 50)}" -> "${kb.slice(0, 50)}") without a request to change the key`;
+    }
+    return null;
+  }
+  if (a.length !== b.length && (locked ||!/\b(add|remove|delete|drop|reduce|replace|fewer|more|option count|number of options)\b[^.]{0,40}\boptions?\b|\boption count\b/.test(asked))) {
     return `option count ${a.length} -> ${b.length}${locked ? ' on an item already in use' : ''}`;
   }
   // Same options, new order: nothing a candidate needs, and every recorded answer moves.
@@ -186,7 +199,8 @@ export function structuralDrift(
   before: Record<string, unknown>,
   after: Record<string, unknown>,
   changesRequired: string[],
-  locked = false
+  locked = false,
+  restructure = false
 ): string | null {
   const asked = changesRequired.join(' ').toLowerCase();
 
@@ -194,7 +208,7 @@ export function structuralDrift(
   // of B", the fixer reshuffled an item's options to move its key to C; asked to fix an
   // explanation, it dropped a sixth option. On an item already in use, either one reattaches every
   // recorded answer to different text.
-  const mcqDrift = optionDrift(before, after, asked, locked);
+  const mcqDrift = optionDrift(before, after, asked, locked, restructure);
   if (mcqDrift) return mcqDrift;
 
   const subsOf = (q: Record<string, unknown>) => {
@@ -226,7 +240,7 @@ export async function fixQuestion(
   question: Record<string, unknown>,
   changesRequired: string[],
   courseName: string,
-  opts?: { existingBank?: boolean }
+  opts?: { existingBank?: boolean; restructure?: boolean }
 ): Promise<FixResult> {
   if (!changesRequired || changesRequired.length === 0) {
     return { fixed: false };
@@ -244,10 +258,15 @@ CRITICAL RULES:
 • Do NOT add new content, options, or explanations beyond what the changes require.
 • Preserve ALL fields from the original JSON — the question may be any format (MCQ, SATA, ordered response, fill-in-blank, etc.).
 • NEVER change the question's STRUCTURE unless a required change explicitly asks for it. Keep the same number of sub_questions, in the same order, each with the SAME format_type. A set with one sub-question keeps exactly one; do not "complete" it by adding more. Fixing a missing field means filling that field in place, not rebuilding the question around it.
-• Keep every OPTION, in the same order, under the same letter, unless a change explicitly asks to add, remove, replace or reorder options. A wrong or weak option is fixed by editing its wording in place. Change which option is correct only when a change says the key is wrong.
+${opts?.restructure
+  ? `• The question must end with EXACTLY FIVE options, keyed A–E in the "options" object, with "correct_option" naming the keyed letter. Add, replace, reword or reorder options as the changes require; every option must be the same kind of thing, in parallel grammar, of similar length and specificity, and the keyed option must not stand out (not the longest, not the most qualified, no stem word only it repeats). Keep the correct answer the same choice unless a change says the key is wrong.
+• Explanations name each option by its text, never by letter: options are reordered afterwards.`
+  : '• Keep every OPTION, in the same order, under the same letter, unless a change explicitly asks to add, remove, replace or reorder options. A wrong or weak option is fixed by editing its wording in place. Change which option is correct only when a change says the key is wrong.'}
 • You cannot change an image. If a change can only be met by a different image, mark it "❌" — never describe in the stem or explanation what the image should show; that hands the candidate the answer.
 • Never shorten a clinical vignette into a recall question or strip clinical detail from it, and never write a "fix" that refers to other questions in a batch (overlap, answer-letter balance) — mark such a change "❌".
-• Turning a short stem into a clinical vignette keeps the SAME question being asked and the SAME options: a "most likely diagnosis" item stays a diagnosis item with the same diagnoses to choose from. If a change can only be met by asking something different, mark it "❌".
+${opts?.restructure
+  ? '• A vignette follows the exam pattern: age and sex, setting, chief complaint with duration, relevant history and medications, vital signs, examination, then the laboratory or imaging results the decision needs, ending in ONE closed lead-in with "?". Keep the concept the item tests; nothing in the stem may name the answer.'
+  : '• Turning a short stem into a clinical vignette keeps the SAME question being asked and the SAME options: a "most likely diagnosis" item stays a diagnosis item with the same diagnoses to choose from. If a change can only be met by asking something different, mark it "❌".'}
 • Write only what a candidate should read. Never put notes about the item itself into the stem, options or explanation ("the image adds no information", "this was revised to…").
 • Reply with the JSON object only — no sentence before or after it.
 
@@ -299,7 +318,7 @@ Return ONLY valid JSON. No preamble, no markdown fences.`;
       // A fix that reshapes the question is worse than no fix: the flagged defect is
       // usually cosmetic, while the rewrite replaces a valid item with a different one.
       // Retry once with the rule spelled out, then keep the ORIGINAL rather than accept it.
-      const drift = structuralDrift(question, fixed, changesRequired, Boolean(opts?.existingBank));
+      const drift = structuralDrift(question, fixed, changesRequired, Boolean(opts?.existingBank) && !opts?.restructure, Boolean(opts?.restructure));
       if (drift) {
         console.warn(`  [Fixer] attempt ${attempt}/2 changed structure it was not asked to (${drift})`);
         lastErr = `structural drift: ${drift}`;

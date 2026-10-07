@@ -16,6 +16,7 @@
  *   npx tsx src/scripts/importUsmleExport.ts --limit 20 --offset 75   # dry run of a pilot: 20 per Step
  *   npx tsx src/scripts/importUsmleExport.ts --limit 20 --offset 75 --apply
  *   npx tsx src/scripts/importUsmleExport.ts --apply                  # everything
+ *   … --restructure   content quality first: five options, cues removed, full vignettes (reviewMode.ts)
  */
 import 'dotenv/config';
 import { readFileSync } from 'node:fs';
@@ -174,6 +175,8 @@ for (const step of Object.keys(COURSES) as Step[]) {
       source_filter: "course 'US Medical PG', created_at > 2025-01-31",
       step,
       pilot: Boolean(LIMIT),
+      // Quality first: options may be added, replaced or reordered (reviewMode.ts).
+      ...(process.argv.includes('--restructure') ? { restructure: true } : {}),
       imported_at: new Date().toISOString(),
     },
   }).select('id').single();

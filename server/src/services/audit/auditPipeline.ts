@@ -11,6 +11,7 @@ import { supabase } from '../../db/supabase.js';
 import { fetchAllRows } from '../../db/pagination.js';
 import { bankMixForJob } from '../generation/bankMix.js';
 import { fixHistoryBlock, unappliedChanges } from './fixHistory.js';
+import { reviewModeOf, optionTexts, keyLengthCue } from '../review/reviewMode.js';
 import { coherenceIssues, partitionIssues } from '../generation/coherence.js';
 import { orCall, MODELS } from '../llm/openrouter.js';
 import type { ContentPart } from '../llm/openrouter.js';
@@ -284,8 +285,7 @@ async function runAuditPipeline(jobId: string): Promise<void> {
     setStep(jobId, 'Fetching reviewed questions...');
     // Imported items are audited on candidate-facing content only (getAuditPrompt).
     const { data: jobRow } = await supabase.from('qb_jobs').select('config').eq('id', jobId).single();
-    const jobConfig = ((jobRow?.config as Record<string, unknown>) || {});
-    const existingBank = jobConfig.source === 'import' || jobConfig.existing_bank === true;
+    const { existingBank, restructure } = reviewModeOf(jobRow?.config as Record<string, unknown>);
 
     // Paginate — audit must see every reviewed question, not just the first 1000.
     const questions = await fetchAllRows<Record<string, unknown>>((from, to) =>
@@ -446,7 +446,21 @@ async function runAuditPipeline(jobId: string): Promise<void> {
           result.issues = [...((result.issues as string[]) || []), `BELONGS TO ${otherExam.toUpperCase()} — ${String((q.tags as Record<string, unknown>).out_of_scope_reason ?? '')}`];
           result.reason = `Belongs to ${otherExam}, not this exam: ${String((q.tags as Record<string, unknown>).out_of_scope_reason ?? '').slice(0, 160)}`;
         }
-        const status = auditScore >= 7 && cohBlocking.length === 0 && !otherExam ? 'approved' : 'flagged';
+        // Restructure mode holds items to the exam's form: five options is a hard requirement, so an
+        // item that did not reach it is not approved. A keyed option that still stands out by length
+        // is reported but does not block — it has not been measured as a gate yet.
+        let formatBlock = '';
+        if (restructure) {
+          const n = optionTexts(q).texts.length;
+          if (n !== 5) {
+            formatBlock = `${n} options; five are required`;
+            result.issues = [...((result.issues as string[]) || []), `NOT COMPLIANT — ${formatBlock}`];
+            result.reason = `Not exam format: ${formatBlock}`;
+          }
+          const cue = keyLengthCue(q);
+          if (cue) result.issues = [...((result.issues as string[]) || []), `CUE — the keyed option is still the longest (${cue.key} words against a median of ${cue.median})`];
+        }
+        const status = auditScore >= 7 && cohBlocking.length === 0 && !otherExam && !formatBlock ? 'approved' : 'flagged';
         if (auditScore >= 7 && cohBlocking.length) {
           console.log(`    [audit] Q${qStart + i} scored ${auditScore} but flagged: ${cohBlocking[0].slice(0, 90)}`);
         }

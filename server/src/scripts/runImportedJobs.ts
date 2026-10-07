@@ -13,6 +13,8 @@ import 'dotenv/config';
 import { supabase } from '../db/supabase.js';
 import { reviewBatchForJob } from '../services/review/reviewPipeline.js';
 import { auditBatchForJob } from '../services/audit/auditPipeline.js';
+import { reviewModeOf } from '../services/review/reviewMode.js';
+import { balanceJobKeys } from '../services/review/keyBalance.js';
 
 const jobIds = process.argv.slice(2).filter((a) => /^[0-9a-f-]{36}$/.test(a));
 if (!jobIds.length) { console.log('usage: runImportedJobs.ts <jobId> [<jobId> …]'); process.exit(1); }
@@ -55,6 +57,11 @@ async function drive(id: string) {
   if (job.status === 'auditing') {
     await auditBatchForJob(id);
     job = { ...job, status: await waitWhile(id, 'auditing', tag) };
+  }
+  // Restructure jobs get their answer positions balanced across the whole job once audit is done.
+  if (job.status === 'complete' && reviewModeOf(job.config).restructure) {
+    const r = await balanceJobKeys(id, true);
+    console.log(`${tag} key balance: moved ${r.moved}/${r.items} | before ${JSON.stringify(r.before)} → after ${JSON.stringify(r.after)} | longest run ${r.maxRunAfter} | numeric kept ${r.numericKept}, not five ${r.skippedNotFive}, letter refs in explanation ${r.letterRefs.length}`);
   }
   const { data: qs } = await supabase.from('qb_questions').select('status').eq('job_id', id).is('replaced_by_id', null);
   const tally = (qs || []).reduce<Record<string, number>>((m, q) => { m[q.status] = (m[q.status] || 0) + 1; return m; }, {});
