@@ -111,8 +111,13 @@ export function routeChanges(changes: string[], extraImageFeedback: string[], ex
   // contradicted item untouched and flagged (3 of 8 flags in the second restructure pilot: an SAH CT
   // that shows blood under a stem calling it negative, a flow plot, a POLST form). Instead the fixer,
   // shown the image, aligns the text with it or removes the image (fixer.ts, IMAGE RECONCILE).
+  //
+  // Only a request that names the PICTURE is labelled a conflict. isImageChange also catches text
+  // requests that mention a modality ("Replace the CT angiography distractor…"), and labelling those
+  // IMAGE CONFLICT had the fixer remove a sound image from a glaucoma item in the third pilot.
   if (restructure && hasImage && out.image.length) {
-    out.fix = [...out.image.map((c) => (/^IMAGE (CONFLICT|NOT LOADING|MISSING)/.test(c) ? c : `IMAGE CONFLICT: ${c}`)), ...out.fix];
+    const aboutPicture = (c: string) => IMAGE_WORD_RE.test(c) && !/^(DISTRACTOR|CUE|FORMAT|EXPLANATION|DIFFICULTY):/.test(c);
+    out.fix = [...out.image.map((c) => (/^IMAGE (CONFLICT|NOT LOADING|MISSING)/.test(c) || !aboutPicture(c) ? c : `IMAGE CONFLICT: ${c}`)), ...out.fix];
     out.image = [];
     return out;
   }
