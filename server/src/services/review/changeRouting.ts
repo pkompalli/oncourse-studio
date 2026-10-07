@@ -74,6 +74,8 @@ export function isImageChange(c: string): boolean {
 /** Route one request. `existingBank` keeps batch-relative requests off the fixer. */
 export function routeChange(c: string, existingBank: boolean): ChangeRoute {
   if (/^CONCEPT OVERLAP:/i.test(c)) return existingBank ? 'batch' : 'fix';
+  // Restructure-mode image repairs are text repairs: align the stem with the image, or remove it.
+  if (/^IMAGE (CONFLICT|NOT LOADING|MISSING):/.test(c)) return 'fix';
   if (isImageChange(c)) return 'image';
   if (METADATA_RE.test(c)) return 'label';
   // "…the lead-in applies anatomy, so change bloom_level from 5_evaluate to 3_apply" is a relabel
@@ -102,9 +104,18 @@ export interface RoutedChanges {
  * written around the wrong image — a blind solve that disagreed only because the ECG was wrong
  * got "fixed" by describing the right ECG in the stem.
  */
-export function routeChanges(changes: string[], extraImageFeedback: string[], existingBank: boolean, hasImage: boolean): RoutedChanges {
+export function routeChanges(changes: string[], extraImageFeedback: string[], existingBank: boolean, hasImage: boolean, restructure = false): RoutedChanges {
   const out: RoutedChanges = { fix: [], image: [...extraImageFeedback], label: [], batch: [], heldForImage: [] };
   for (const c of changes) out[routeChange(c, existingBank)].push(c);
+  // Restructure mode cannot replace a live-bank image either, but holding the text left every
+  // contradicted item untouched and flagged (3 of 8 flags in the second restructure pilot: an SAH CT
+  // that shows blood under a stem calling it negative, a flow plot, a POLST form). Instead the fixer,
+  // shown the image, aligns the text with it or removes the image (fixer.ts, IMAGE RECONCILE).
+  if (restructure && hasImage && out.image.length) {
+    out.fix = [...out.image.map((c) => (/^IMAGE (CONFLICT|NOT LOADING|MISSING)/.test(c) ? c : `IMAGE CONFLICT: ${c}`)), ...out.fix];
+    out.image = [];
+    return out;
+  }
   // Only an item that HAS a picture can be contradicted by it; "this would benefit from an image"
   // on a text item must not block its text repairs.
   if (hasImage && out.image.length && out.fix.length) { out.heldForImage = out.fix; out.fix = []; }

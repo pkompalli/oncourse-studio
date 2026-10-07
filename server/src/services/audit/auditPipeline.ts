@@ -11,7 +11,8 @@ import { supabase } from '../../db/supabase.js';
 import { fetchAllRows } from '../../db/pagination.js';
 import { bankMixForJob } from '../generation/bankMix.js';
 import { fixHistoryBlock, unappliedChanges } from './fixHistory.js';
-import { reviewModeOf, optionTexts, keyLengthCue } from '../review/reviewMode.js';
+import { reviewModeOf, optionTexts, keyLengthCue, describeLengthCue } from '../review/reviewMode.js';
+import { probeCues, keySpotted, implausibleDistractors, type ProbeResult } from '../review/cueProbe.js';
 import { coherenceIssues, partitionIssues } from '../generation/coherence.js';
 import { orCall, MODELS } from '../llm/openrouter.js';
 import type { ContentPart } from '../llm/openrouter.js';
@@ -124,7 +125,7 @@ async function pushProgress(jobId: string) {
 
 // ── Audit prompt ──
 
-function getAuditPrompt(hasRepairs: boolean, existingBank = false): string {
+function getAuditPrompt(hasRepairs: boolean, existingBank = false, restructure = false): string {
   // Items imported from a live bank are judged on what a candidate reads. GPT 6.1 Sol docked them
   // for difficulty/Bloom labels and for stored fields (format_type, is_image_question) that are not
   // part of the item, scoring 6 and flagging sound questions the Sonnet auditor approved.
@@ -133,7 +134,13 @@ function getAuditPrompt(hasRepairs: boolean, existingBank = false): string {
 These questions are already in use in a live question bank. Score what a candidate reads: the stem,
 options, keyed answer, explanation and image. Difficulty and Bloom labels and stored fields such as
 format_type, is_image_question, subject, topic or tags are outside this score: do not lower it or
-list issues for them.` : '';
+list issues for them.${restructure ? `
+
+Where an image is shown, every statement in the stem, options and explanation must agree with what the
+image actually shows: an image that contradicts the text (a CT described as negative that shows blood,
+a form whose details differ from the vignette) makes the item unusable — score ≤ 4 and say what the
+image shows. Where a repair removed the image, the stem must state in words the findings the decision
+needs, and must not refer to an image.` : ''}` : '';
   // The verification section only appears when something in the batch was actually repaired.
   // Asking "was each change applied?" of ten questions that were never touched trains the
   // model to answer the question with an empty array, which is how a real finding gets lost.
@@ -221,7 +228,7 @@ Output ONLY the JSON array. No preamble, no trailing text.`;
 
 // ── Run audit on a batch ──
 
-export async function runAuditBatch(questions: Record<string, unknown>[], opts: { existingBank?: boolean } = {}): Promise<Record<string, unknown>[]> {
+export async function runAuditBatch(questions: Record<string, unknown>[], opts: { existingBank?: boolean; restructure?: boolean } = {}): Promise<Record<string, unknown>[]> {
   // What earlier stages asked for, and what the fixer did about it. This was always on the row
   // — reviewPipeline writes it for every repair — and audit never read it, so it re-scored each
   // question from scratch and a change that was requested and silently not applied left a
@@ -233,7 +240,7 @@ export async function runAuditBatch(questions: Record<string, unknown>[], opts: 
     ? `\nREPAIR HISTORY — what earlier stages asked for and what the fixer did:\n${histories.join('\n')}\n`
     : '';
 
-  const prompt = getAuditPrompt(histories.length > 0, Boolean(opts.existingBank));
+  const prompt = getAuditPrompt(histories.length > 0, Boolean(opts.existingBank), Boolean(opts.restructure));
   const content = await formatQuestionsForReviewWithImages(questions);
 
   let userMessage: string | ContentPart[];
@@ -331,7 +338,12 @@ async function runAuditPipeline(jobId: string): Promise<void> {
 
       setStep(jobId, `[Audit] Batch ${batchNum}/${batchesTotal}: scoring Q${qStart}–Q${qEnd} via ${MODELS.AUDITOR}...`);
 
-      const results = await runAuditBatch(batch, { existingBank });
+      // Restructure mode re-runs the options-only probe on the repaired items, so the gate below judges
+      // the version that ships, not the one the validator saw.
+      const [results, probes] = await Promise.all([
+        runAuditBatch(batch, { existingBank, restructure }),
+        restructure ? probeCues(batch) : Promise.resolve(batch.map((): ProbeResult | null => null)),
+      ]);
 
       setStep(jobId, `[Audit] Batch ${batchNum}/${batchesTotal}: processing scores for Q${qStart}–Q${qEnd}`);
 
@@ -446,19 +458,26 @@ async function runAuditPipeline(jobId: string): Promise<void> {
           result.issues = [...((result.issues as string[]) || []), `BELONGS TO ${otherExam.toUpperCase()} — ${String((q.tags as Record<string, unknown>).out_of_scope_reason ?? '')}`];
           result.reason = `Belongs to ${otherExam}, not this exam: ${String((q.tags as Record<string, unknown>).out_of_scope_reason ?? '').slice(0, 160)}`;
         }
-        // Restructure mode holds items to the exam's form: five options is a hard requirement, so an
-        // item that did not reach it is not approved. A keyed option that still stands out by length
-        // is reported but does not block — it has not been measured as a gate yet.
+        // Restructure mode holds items to the exam's form, and each of these blocks approval:
+        //   - five options;
+        //   - the keyed option not the longest (characters or words). Measured before gating: 28 of 60
+        //     originals and 18 of 60 round-2 items; the fixer now gets measured repair rounds for it;
+        //   - the options-only probe (cueProbe.ts) must not pick the key out by form, nor rule out a
+        //     distractor on sight. Measured on round 2: key spotted in 1 of 60, distractors in 3.
         let formatBlock = '';
         if (restructure && !otherExam) {
+          const blocks: string[] = [];
           const n = optionTexts(q).texts.length;
-          if (n !== 5) {
-            formatBlock = `${n} options; five are required`;
-            result.issues = [...((result.issues as string[]) || []), `NOT COMPLIANT — ${formatBlock}`];
-            result.reason = `Not exam format: ${formatBlock}`;
-          }
+          if (n !== 5) blocks.push(`${n} options; five are required`);
           const cue = keyLengthCue(q);
-          if (cue) result.issues = [...((result.issues as string[]) || []), `CUE — the keyed option is still the longest (${cue.key} words against a median of ${cue.median})`];
+          if (cue) blocks.push(`the keyed option is the longest choice (${describeLengthCue(cue)})`);
+          if (keySpotted(q, probes[i])) blocks.push(`a reader shown only the options picked the key by its form (${probes[i]!.cues.join(', ')})`);
+          for (const d of implausibleDistractors(q, probes[i])) blocks.push(`distractor "${d.text.slice(0, 80)}" can be ruled out without the case (${d.reason})`);
+          if (blocks.length) {
+            formatBlock = blocks.join('; ');
+            result.issues = [...((result.issues as string[]) || []), ...blocks.map((b) => `NOT COMPLIANT — ${b}`)];
+            result.reason = `Not exam standard: ${formatBlock.slice(0, 200)}`;
+          }
         }
         const status = auditScore >= 7 && cohBlocking.length === 0 && !otherExam && !formatBlock ? 'approved' : 'flagged';
         if (auditScore >= 7 && cohBlocking.length) {

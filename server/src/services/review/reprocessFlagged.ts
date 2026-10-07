@@ -131,8 +131,8 @@ async function getCourseInfo(jobId: string): Promise<{ name: string; examFormat:
 }
 
 /** The requests this pass may hand the fixer, and the rest recorded on the trail (changeRouting.ts). */
-function fixableChanges(q: Record<string, unknown>, changes: string[], existingBank: boolean) {
-  const routed = routeChanges(changes, [], existingBank, Boolean(q.is_image_question && q.image_url));
+function fixableChanges(q: Record<string, unknown>, changes: string[], existingBank: boolean, restructure = false) {
+  const routed = routeChanges(changes, [], existingBank, Boolean(q.is_image_question && q.image_url), restructure);
   const notSent = {
     ...(routed.image.length ? { image_feedback: routed.image } : {}),
     ...(routed.label.length ? { label_feedback: routed.label } : {}),
@@ -325,6 +325,8 @@ async function persistFix(
   }
   if (fixedQ.explanation != null) update.explanation = fixedQ.explanation;
   if (fixedQ.content != null) update.content = fixedQ.content;
+  // Restructure mode may remove a broken or contradicting image (fixer.ts); it sets image_url to null.
+  if (fixedQ.image_url === null && q.image_url) { update.image_url = null; update.is_image_question = false; }
   // image_description is a top-level column AND lives inside content; buildImagePrompt
   // prefers the column, so leaving it stale would let the old spec win over the fix.
   const desc = (fixedQ.image_description as string)
@@ -507,7 +509,7 @@ async function runReprocessPipeline(jobId: string): Promise<void> {
 
         const score = rawScore as number;
         const changes = (result.changes_required as string[]) || [];
-        const { fix, notSent } = fixableChanges(q, changes, existingBank);
+        const { fix, notSent } = fixableChanges(q, changes, existingBank, restructure);
 
         const trail = Array.isArray(q.audit_trail) ? [...(q.audit_trail as unknown[])] : [];
         trail.push({
@@ -593,7 +595,7 @@ async function runReprocessPipeline(jobId: string): Promise<void> {
 
         const score = rawScore as number;
         const changes = (result.changes_required as string[]) || [];
-        const { fix, notSent } = fixableChanges(q, changes, existingBank);
+        const { fix, notSent } = fixableChanges(q, changes, existingBank, restructure);
 
         const trail = Array.isArray(q.audit_trail) ? [...(q.audit_trail as unknown[])] : [];
         trail.push({

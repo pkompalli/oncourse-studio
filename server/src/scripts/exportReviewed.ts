@@ -71,13 +71,16 @@ const out = rows.map((q) => {
   const droppedOptions = origOptions.filter((o) => !ids.includes(o.id)).length;
   const optionTextChanged = options.some((o) => o.source_option_id && o.text !== origOptions.find((x) => x.id === o.source_option_id)?.text);
   const orderChanged = options.some((o, i) => o.source_option_id && origOptions[i]?.id !== o.source_option_id);
-  const requiresNewVersion = newOptions > 0 || droppedOptions > 0 || keyMoved;
+  const sourceImage = (s?.assets || []).find((x: Row) => x.url)?.url ?? null;
+  const imageRemoved = Boolean(s && sourceImage && !q.image_url);
+  const requiresNewVersion = newOptions > 0 || droppedOptions > 0 || keyMoved || imageRemoved;
   const blindDisagreed = (a?.changes || []).some((c: string) => /^ANSWER KEY — key [A-J], attempt [A-J]/.test(c));
 
   const clinician: string[] = [];
   if (keyMoved) clinician.push(`Keyed answer changed from "${origOptions.find((o) => o.is_correct)?.text ?? ''}" to "${options.find((o) => o.is_correct)?.text ?? ''}"`);
   if (stemChanged && stemOverlap < 0.5) clinician.push(`Stem rewritten (word overlap ${stemOverlap} with the original)`);
   if (blindDisagreed && !keyMoved) clinician.push('An independent blind solve chose a different answer; the key was kept');
+  if (imageRemoved) clinician.push('Image removed (it conflicted with the text or would not load); the stem now states its findings in words');
   if (newOptions || droppedOptions) clinician.push(`Options changed: ${newOptions} new, ${droppedOptions} removed — release as a new version`);
 
   return {
@@ -94,7 +97,7 @@ const out = rows.map((q) => {
       stem: stemChanged, stem_overlap: stemOverlap,
       explanation: s ? q.explanation !== (s.explanation || '') : false,
       option_text: optionTextChanged, option_order: orderChanged, options_added: newOptions, options_removed: droppedOptions, key_moved: keyMoved,
-      image: Boolean(s && q.image_url !== ((s.assets || []).find((x: Row) => x.url)?.url ?? null)),
+      image: Boolean(s && q.image_url !== sourceImage), image_removed: imageRemoved,
     },
     requires_new_version: requiresNewVersion,
     needs_clinician_review: clinician,

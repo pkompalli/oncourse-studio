@@ -60,14 +60,15 @@ const ANTI_PATTERNS = [
 ];
 
 const DISTRACTOR_RULES = [
-  'All options are the same kind of thing (all diagnoses, all next steps, all mechanisms, all drugs) and of similar length and specificity, so none is cued by form.',
-  'Every distractor is a plausible choice for an examinee with a specific, nameable misconception, and is clearly wrong for a reason stated in the vignette.',
+  'All options are the same kind of thing (all diagnoses, all next steps, all mechanisms, all drugs) and of similar length, structure and specificity, so none is cued by form: a candidate shown only the options cannot tell which is keyed.',
+  'The keyed option is never the longest: at least one distractor is as long or longer, in characters and in words.',
+  'Every distractor is a plausible choice for an examinee with a specific, nameable misconception, and is clearly wrong for a reason stated in the vignette. No option can be ruled out without reading the case (an administrative or legal action where a clinical decision is asked, an option of a different kind, one that does not answer the question).',
 ];
 
 const VALIDATION_CHECKS = [
   'Stem is a vignette: age and sex, setting, presenting complaint with time course, relevant history, examination, and laboratory or imaging results where they bear on the answer; it ends with one focused lead-in such as "Which of the following is the most likely diagnosis?" or "Which of the following is the most appropriate next step in management?".',
   'The vignette contains every fact needed to choose ONE best answer and to rule out the strongest distractor (e.g. hemodynamic stability, timing from onset, pregnancy status, INR, prior treatment). Name the missing decisive fact when there is one.',
-  'If an image is attached, the stem and image agree, and the stem does not name the answer the image is there to test.',
+  'If an image is attached, the stem and image agree, and the stem does not name the answer the image is there to test. An image that contradicts the stem or will not load is not kept: the stem is aligned with what the image shows, or the image is removed and its findings are stated in words.',
   'If no image is attached, the stem does not refer to one.',
   'The explanation justifies the keyed answer and gives a specific reason each other option is wrong, naming each option by its text, never by letter.',
   'The keyed answer reflects current US practice (e.g. ACC/AHA, USPSTF, IDSA, ACOG, AAP, ATLS); flag management that is outdated or non-US.',
@@ -78,7 +79,7 @@ const VALIDATION_CHECKS = [
 // the exam's form, and an item whose options change is re-released as a new version.
 const CONTENT_RULES = [
   'Exactly five options, labelled A–E, with one best answer. An item with fewer or more is brought to five.',
-  'Nothing cues the key: it is not the longest or most qualified option, it does not alone repeat a distinctive word from the stem, it matches the lead-in grammatically exactly as every other option does, absolute terms (always, never, only) do not appear only in distractors, and no option is "all of the above" or "none of the above".',
+  'Nothing cues the key: it is never the longest option (in characters or words) nor the most qualified, it is not the only option with a second clause, parenthesis, number or justification, it does not alone repeat a distinctive word from the stem, it matches the lead-in grammatically exactly as every other option does, absolute terms (always, never, only) do not appear only in distractors, and no option is "all of the above" or "none of the above".',
   'Answer positions are balanced across the bank after review (each letter about 20%, never twice running), so explanations name options by text and never by letter.',
   'Change which option is correct ONLY when the keyed answer is factually wrong; state the evidence, and expect the change to go to clinician review.',
 ];

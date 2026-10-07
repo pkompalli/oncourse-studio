@@ -33,6 +33,8 @@ interface TrailEntry {
   changed_fields?: string[];
   before_image?: string | null;
   after_image?: string | null;
+  /** Restructure mode: the image the fixer removed (fixer.ts). */
+  image_removed?: string | boolean;
   timestamp?: string;
 }
 
@@ -70,9 +72,10 @@ export function changedFields(before: Record<string, unknown> = {}, after: Recor
 }
 
 function describeMovement(e: TrailEntry): string {
-  const recorded = e.changed_fields ?? changedFields(e.before || {}, e.after || {});
+  const recorded = [...(e.changed_fields ?? changedFields(e.before || {}, e.after || {})), ...(e.image_removed ? ['image'] : [])];
   if (recorded.length) {
     const parts = recorded.map((f) => {
+      if (f === 'image') return 'image REMOVED (it conflicted with the text or would not load; the stem must now state its findings in words)';
       if (f === 'correct_option') {
         return `correct_option ${stable(e.before?.correct_option) || '(none)'} → ${stable(e.after?.correct_option) || '(none)'}`;
       }

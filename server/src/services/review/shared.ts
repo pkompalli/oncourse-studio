@@ -575,7 +575,22 @@ export function formatQuestionsForReview(questions: Record<string, unknown>[], b
 // so a single transient "fetch failed" can't throw AI_DownloadError and crash the
 // entire review pipeline — a failed image just degrades that one question to
 // text-only review.
-async function fetchImageAsDataUrl(url: string, attempts = 3): Promise<string | null> {
+// Whether each URL downloaded, so the validator can tell a broken image from a working one without
+// a second download (reviewMode.imageIssues). Booleans only: data URLs would hold every image in memory.
+const imageLoaded = new Map<string, boolean>();
+
+export async function imageLoads(url: string): Promise<boolean> {
+  if (imageLoaded.has(url)) return imageLoaded.get(url)!;
+  return (await fetchImageAsDataUrl(url)) !== null;
+}
+
+export async function fetchImageAsDataUrl(url: string, attempts = 3): Promise<string | null> {
+  const got = await fetchImageOnce(url, attempts);
+  imageLoaded.set(url, got !== null);
+  return got;
+}
+
+async function fetchImageOnce(url: string, attempts: number): Promise<string | null> {
   for (let attempt = 1; attempt <= attempts; attempt++) {
     try {
       const controller = new AbortController();

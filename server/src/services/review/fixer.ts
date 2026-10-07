@@ -3,13 +3,17 @@
  * Model: OR_MAIN_MODEL (Claude) — conservative fix, ONLY changes what's listed
  */
 
-import { orCall, MODELS } from '../llm/openrouter.js';
+import { orCall, MODELS, type ContentPart } from '../llm/openrouter.js';
+import { fetchImageAsDataUrl } from './shared.js';
+import { keyLengthCue, describeLengthCue, STEM_REFS_IMAGE } from './reviewMode.js';
 
 export interface FixResult {
   fixed: boolean;
   question?: Record<string, unknown>;
   changesApplied?: string[];
   error?: string;
+  /** Restructure mode: the image was removed and the item made self-contained in text. */
+  imageRemoved?: boolean;
 }
 
 /**
@@ -158,7 +162,7 @@ export function optionDrift(before: Record<string, unknown>, after: Record<strin
     if (b.length !== 5) return `option count ${b.length}; five are required`;
     const ka = keyText(before), kb = keyText(after);
     if (ka !== null && kb !== null && optionIdentity(ka, kb) < OPTION_IDENTITY_MIN
-        && !/\b(answer key|correct answer|keyed answer|key\b|correct option)/.test(asked)) {
+        && !/\b(answer key|correct answer|keyed answer|key\b|correct option|image conflict)/.test(asked)) {
       return `correct answer became a different choice ("${ka.slice(0, 50)}" -> "${kb.slice(0, 50)}") without a request to change the key`;
     }
     return null;
@@ -236,7 +240,38 @@ export function structuralDrift(
   return null;
 }
 
+/**
+ * Apply a reviewer's changes. In restructure mode a repair that leaves the keyed option the longest
+ * choice goes back for up to two narrow rounds with the measurements in hand: asked in general terms
+ * ("similar length"), the fixer left the key longest by characters in 16 of 60 round-2 items.
+ */
 export async function fixQuestion(
+  question: Record<string, unknown>,
+  changesRequired: string[],
+  courseName: string,
+  opts?: { existingBank?: boolean; restructure?: boolean }
+): Promise<FixResult> {
+  const first = await fixOnce(question, changesRequired, courseName, opts);
+  if (!opts?.restructure || !first.fixed || !first.question) return first;
+  let best = first;
+  for (let round = 1; round <= 2; round++) {
+    const cue = keyLengthCue(best.question!);
+    if (!cue) break;
+    const ask = `FORMAT: The keyed option is still the longest choice (${describeLengthCue(cue)}). Shorten the keyed option without changing its meaning, or lengthen one or more distractors with plausible, specific detail of the same kind, so that at least one distractor is at least as long as the keyed option in BOTH characters and words and all five look alike. Change nothing else, except explanation wording that quotes a reworded option.`;
+    const again = await fixOnce(best.question!, [ask], courseName, opts);
+    if (!again.fixed || !again.question) break;
+    // Judged against the ORIGINAL as well: rounds of shortening must not drift the key into a different choice.
+    const drift = structuralDrift(question, again.question, [...changesRequired, ask], false, true);
+    if (drift) { console.warn(`  [Fixer] cue round ${round} refused (${drift})`); break; }
+    best = { ...again, changesApplied: [...(best.changesApplied || []), ...(again.changesApplied || [])], imageRemoved: best.imageRemoved || again.imageRemoved };
+  }
+  return best;
+}
+
+const IMAGE_ASK = /^IMAGE (CONFLICT|NOT LOADING|MISSING)/;
+const IMAGE_GONE = /^IMAGE (NOT LOADING|MISSING)/;
+
+async function fixOnce(
   question: Record<string, unknown>,
   changesRequired: string[],
   courseName: string,
@@ -245,6 +280,23 @@ export async function fixQuestion(
   if (!changesRequired || changesRequired.length === 0) {
     return { fixed: false };
   }
+
+  // Restructure mode reconciles an item with its image rather than holding it (changeRouting.ts).
+  // The fixer is SHOWN the image: asked to repair a contradiction it could not see, it could only
+  // guess what the picture held.
+  const imageUrl = opts?.restructure ? ((question.image_url as string | null | undefined) || null) : null;
+  const imageAsked = Boolean(opts?.restructure) && changesRequired.some((c) => IMAGE_ASK.test(c));
+  const imageGone = Boolean(opts?.restructure) && changesRequired.some((c) => IMAGE_GONE.test(c));
+  const dataUrl = imageUrl && !imageGone ? await fetchImageAsDataUrl(imageUrl) : null;
+  const imageRules = !opts?.restructure || !(imageAsked || dataUrl) ? '' : imageGone
+    ? `
+IMAGE — REMOVE: the item's image is missing or broken and cannot be replaced. Make the item self-contained in text: state in words the findings the decision needs (as a radiology or pathology report would — "Noncontrast CT of the head shows no hemorrhage"), without naming the diagnosis or answer the item tests, and remove every reference to an image ("shown", "the image", "the figure"). Set "image_decision" to "remove".`
+    : `
+IMAGE — the item's attached image is shown after this prompt. It cannot be replaced or edited.${imageAsked ? ` A reviewer found that it conflicts with the text. Look at it yourself and choose ONE:
+  • "align" — the image is clear and the item tests reading it: rewrite the stem (and options, key and explanation if they must follow) so every statement agrees with what the image actually shows. Keep what the item tests wherever the image allows; change the keyed answer only if what the image shows makes a different answer correct, and say so in changes_applied.
+  • "remove" — the image is unreadable, wrong for this item, merely decorative, or aligning would mean testing something different: drop it and make the item self-contained in text, stating in words the findings the decision needs (as a report would), without naming the answer, and removing every reference to an image.
+  Prefer whichever keeps the item testing the same concept. Set "image_decision" to "align" or "remove".` : ` Keep every statement in the stem and explanation consistent with it, and set "image_decision" to "keep".`}
+  Never describe in the stem what the image ought to show but does not.`;
 
   const contentJson = JSON.stringify(question, null, 2);
   const changesText = changesRequired.map((c) => `  ${c}`).join('\n');
@@ -262,14 +314,16 @@ ${opts?.restructure
   ? `• The question must end with EXACTLY FIVE options, keyed A–E in the "options" object, with "correct_option" naming the keyed letter. Add, replace, reword or reorder options as the changes require; every option must be the same kind of thing, in parallel grammar, of similar length and specificity, and the keyed option must not stand out (not the longest, not the most qualified, no stem word only it repeats). Keep the correct answer the same choice unless a change says the key is wrong.
 • Explanations name each option by its text, never by letter: options are reordered afterwards.`
   : '• Keep every OPTION, in the same order, under the same letter, unless a change explicitly asks to add, remove, replace or reorder options. A wrong or weak option is fixed by editing its wording in place. Change which option is correct only when a change says the key is wrong.'}
-• You cannot change an image. If a change can only be met by a different image, mark it "❌" — never describe in the stem or explanation what the image should show; that hands the candidate the answer.
+${opts?.restructure
+  ? '• You cannot change an image, but you may align the text with it or remove it as the IMAGE section below sets out.'
+  : '• You cannot change an image. If a change can only be met by a different image, mark it "❌" — never describe in the stem or explanation what the image should show; that hands the candidate the answer.'}
 • Never shorten a clinical vignette into a recall question or strip clinical detail from it, and never write a "fix" that refers to other questions in a batch (overlap, answer-letter balance) — mark such a change "❌".
 ${opts?.restructure
   ? '• A vignette follows the exam pattern: age and sex, setting, chief complaint with duration, relevant history and medications, vital signs (stated even when normal), examination, then the laboratory or imaging results the decision needs, ending in ONE closed lead-in such as "Which of the following is the most likely diagnosis?" that fits every option and does not echo the keyed option\'s wording. Keep the concept and question type the item tests; nothing in the stem may name the answer. Keep every finding the explanation relies on, and keep plausible distractors rather than replacing them.'
   : '• Turning a short stem into a clinical vignette keeps the SAME question being asked and the SAME options: a "most likely diagnosis" item stays a diagnosis item with the same diagnoses to choose from. If a change can only be met by asking something different, mark it "❌".'}
 • Write only what a candidate should read. Never put notes about the item itself into the stem, options or explanation ("the image adds no information", "this was revised to…").
 • Reply with the JSON object only — no sentence before or after it.
-
+${imageRules}
 COURSE: ${courseName}
 
 ─── ORIGINAL QUESTION (JSON) ───
@@ -278,10 +332,11 @@ ${contentJson}
 ─── REQUIRED CHANGES (apply every one, in order) ───
 ${changesText}
 
-Return a JSON object with TWO fields:
+Return a JSON object with these fields:
 1. "question" — the complete fixed question JSON (same structure as original)
 2. "changes_applied" — array of strings, one per required change above, each prefixed with
-   "✅ " if applied, "⚠️ " if partially applied (explain why), or "❌ " if not applicable / could not apply (explain why)
+   "✅ " if applied, "⚠️ " if partially applied (explain why), or "❌ " if not applicable / could not apply (explain why)${imageRules ? `
+3. "image_decision" — "keep", "align" or "remove", as the IMAGE section sets out` : ''}
 
 Example output format:
 {
@@ -302,14 +357,13 @@ Return ONLY valid JSON. No preamble, no markdown fences.`;
   let lastErr = '';
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
-      const response = await orCall(
-        MODELS.FIXER,
-        '',
-        attempt === 1
-          ? prompt
-          : `${prompt}\n\nIMPORTANT: Return the COMPLETE JSON object — every field of the question, including every sub_question. Do NOT truncate or elide anything.`,
-        { maxTokens: MAX_TOKENS, temperature: attempt === 1 ? 0.2 : 0.1 }
-      );
+      const text = attempt === 1
+        ? prompt
+        : `${prompt}\n\nIMPORTANT: Return the COMPLETE JSON object — every field of the question, including every sub_question. Do NOT truncate or elide anything.`;
+      const message: string | ContentPart[] = dataUrl
+        ? [{ type: 'text', text }, { type: 'image_url', image_url: { url: dataUrl } }]
+        : text;
+      const response = await orCall(MODELS.FIXER, '', message, { maxTokens: MAX_TOKENS, temperature: attempt === 1 ? 0.2 : 0.1 });
 
       const wrapper = extractFixerJson(response.content);
       const fixed = (wrapper.question && typeof wrapper.question === 'object' ? wrapper.question : wrapper) as Record<string, unknown>;
@@ -327,10 +381,27 @@ Return ONLY valid JSON. No preamble, no markdown fences.`;
         return { fixed: false, error: lastErr };
       }
 
+      // The image fields are decided here, not copied from the model's JSON: only a "remove" (or an
+      // image that is already gone) clears them, and anything else keeps the original picture.
+      let imageRemoved = false;
+      if (opts?.restructure && (imageUrl || imageGone)) {
+        const decision = String(wrapper.image_decision ?? '').toLowerCase();
+        imageRemoved = imageGone || (imageAsked && decision === 'remove');
+        if (imageRemoved) { fixed.image_url = null; fixed.is_image_question = false; }
+        else fixed.image_url = imageUrl;
+        if (imageRemoved && STEM_REFS_IMAGE.test(String(fixed.question ?? ''))) {
+          lastErr = 'image removed but the stem still refers to it';
+          console.warn(`  [Fixer] attempt ${attempt}/2: ${lastErr}`);
+          if (attempt === 1) continue;
+          return { fixed: false, error: lastErr };
+        }
+      }
+
       return {
         fixed: true,
         question: fixed,
         changesApplied: Array.isArray(wrapper.changes_applied) ? (wrapper.changes_applied as string[]) : [],
+        ...(imageRemoved ? { imageRemoved } : {}),
       };
     } catch (e) {
       lastErr = e instanceof Error ? e.message : 'Fix failed';

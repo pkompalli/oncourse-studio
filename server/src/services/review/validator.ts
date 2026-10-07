@@ -5,12 +5,13 @@
 
 import { orCall, MODELS } from '../llm/openrouter.js';
 import type { ContentPart } from '../llm/openrouter.js';
-import { extractJsonArray, formatQuestionsForReviewWithImages, gradabilityIssues } from './shared.js';
+import { extractJsonArray, formatQuestionsForReviewWithImages, gradabilityIssues, imageLoads } from './shared.js';
 import { schemaErrorsFor } from '../generation/schemaValidate.js';
 import { coherenceIssues } from '../generation/coherence.js';
 import { consistencyIssues, isBlockingConsistency } from '../generation/consistency.js';
 import { EXISTING_ITEM_RULES } from './changeRouting.js';
-import { RESTRUCTURE_RULES, cueIssues } from './reviewMode.js';
+import { RESTRUCTURE_RULES, cueIssues, imageIssues } from './reviewMode.js';
+import { probeCues, probeIssues } from './cueProbe.js';
 
 /**
  * Per-format rules to include. High enough that no course's real spec is truncated — the
@@ -474,12 +475,19 @@ export async function runValidatorBatch(
     r.summary = `Structural/gradability issue(s): ${issues.slice(0, 3).join('; ')}${issues.length > 3 ? '…' : ''}`;
   }
 
-  // Cues to the key a model is unreliable at counting: option count, the keyed option standing out by
-  // length, all/none-of-the-above. Restructure mode only, where options may change. Each becomes a
-  // change request and holds the score at 6 so the fixer runs; none of them blocks on its own.
+  // Restructure mode only, where options may change. Three sources, each turned into change requests
+  // that hold the score at 6 so the fixer runs; none of them blocks on its own here (audit gates):
+  //   - what a model is unreliable at counting: option count, the key longest, the key the odd one
+  //     out in form, all/none-of-the-above (reviewMode.cueIssues);
+  //   - the options-only probe: the key picked out by form, distractors ruled out on sight (cueProbe.ts);
+  //   - an image that is missing or does not load (reviewMode.imageIssues).
   if (opts?.restructure) {
+    const [probes, loads] = await Promise.all([
+      probeCues(questions),
+      Promise.all(questions.map((q) => (q.image_url ? imageLoads(q.image_url as string) : Promise.resolve(null)))),
+    ]);
     for (let i = 0; i < questions.length; i++) {
-      const cues = cueIssues(questions[i]);
+      const cues = [...imageIssues(questions[i], loads[i]), ...cueIssues(questions[i]), ...probeIssues(questions[i], probes[i])];
       if (!cues.length) continue;
       const r = results.find((x) => (x.question_number as number) === i + 1) || results[i];
       if (!r) continue;

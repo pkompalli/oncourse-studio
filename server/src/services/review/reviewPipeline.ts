@@ -183,8 +183,8 @@ function tagOtherExam(q: Record<string, unknown>, other: { exam: string; reason:
  * Split a reviewer's requests (changeRouting.ts) and record the ones that do not go to the fixer,
  * so the trail shows every request and where it went.
  */
-function routeForFix(q: Record<string, unknown>, changes: string[], assetFeedback: string[], existingBank: boolean) {
-  const routed = routeChanges(changes, assetFeedback, existingBank, Boolean(q.is_image_question && q.image_url));
+function routeForFix(q: Record<string, unknown>, changes: string[], assetFeedback: string[], existingBank: boolean, restructure = false) {
+  const routed = routeChanges(changes, assetFeedback, existingBank, Boolean(q.is_image_question && q.image_url), restructure);
   const notSent = {
     ...(routed.label.length ? { label_feedback: routed.label } : {}),
     ...(routed.batch.length ? { batch_feedback_not_applied: routed.batch } : {}),
@@ -283,7 +283,7 @@ async function runValidatorPhase(
       ];
       const assetIssues = (result.asset_issues as string[]) || [];
       const missingImages = (result.missing_images as string[]) || [];
-      const { routed, notSent } = routeForFix(q, changes, [...assetIssues, ...missingImages], existingBank);
+      const { routed, notSent } = routeForFix(q, changes, [...assetIssues, ...missingImages], existingBank, restructure);
       const otherExam = belongsToOtherExam(result);
 
       const trail = Array.isArray(q.audit_trail) ? [...(q.audit_trail as unknown[])] : [];
@@ -338,7 +338,7 @@ async function runValidatorPhase(
           // it the trail records a case-study fix as having moved nothing, and audit reads that
           // as the fixer having done nothing.
           const { data: current } = await supabase.from('qb_questions')
-            .select('question, options, correct_option, explanation, content, audit_trail')
+            .select('question, options, correct_option, explanation, content, image_url, audit_trail')
             .eq('id', item.dbId).single();
           const trail = Array.isArray(current?.audit_trail) ? [...(current.audit_trail as unknown[])] : [];
           trail.push({
@@ -364,10 +364,13 @@ async function runValidatorPhase(
               { question: current?.question, options: current?.options, correct_option: current?.correct_option, explanation: current?.explanation, content: current?.content },
               { question: fixedQ.question, options: fixedQ.options, correct_option: fixedQ.correct_option || fixedQ.correct_answer, explanation: fixedQ.explanation, content: fixedQ.content },
             ),
+            // Restructure mode: the image conflicted with the text, or was broken, and was removed (fixer.ts).
+            ...(fixResult.imageRemoved ? { image_removed: current?.image_url ?? true } : {}),
             timestamp: new Date().toISOString(),
           });
 
           await supabase.from('qb_questions').update({
+            ...(fixResult.imageRemoved ? { image_url: null, is_image_question: false } : {}),
             question: fixedQ.question, options: fixedQ.options,
             correct_option: fixedQ.correct_option || fixedQ.correct_answer,
             explanation: fixedQ.explanation,
@@ -546,7 +549,7 @@ async function runAdversarialPhase(
       ];
       const assetIssues = (result.asset_issues as string[]) || [];
       const missingImages = (result.missing_images as string[]) || [];
-      const { routed, notSent } = routeForFix(q, changes, [...assetIssues, ...missingImages], existingBank);
+      const { routed, notSent } = routeForFix(q, changes, [...assetIssues, ...missingImages], existingBank, restructure);
 
       const trail = Array.isArray(q.audit_trail) ? [...(q.audit_trail as unknown[])] : [];
       trail.push({
@@ -595,7 +598,7 @@ async function runAdversarialPhase(
           // it the trail records a case-study fix as having moved nothing, and audit reads that
           // as the fixer having done nothing.
           const { data: current } = await supabase.from('qb_questions')
-            .select('question, options, correct_option, explanation, content, audit_trail')
+            .select('question, options, correct_option, explanation, content, image_url, audit_trail')
             .eq('id', item.dbId).single();
           const trail = Array.isArray(current?.audit_trail) ? [...(current.audit_trail as unknown[])] : [];
           trail.push({
@@ -621,10 +624,13 @@ async function runAdversarialPhase(
               { question: current?.question, options: current?.options, correct_option: current?.correct_option, explanation: current?.explanation, content: current?.content },
               { question: fixedQ.question, options: fixedQ.options, correct_option: fixedQ.correct_option || fixedQ.correct_answer, explanation: fixedQ.explanation, content: fixedQ.content },
             ),
+            // Restructure mode: the image conflicted with the text, or was broken, and was removed (fixer.ts).
+            ...(fixResult.imageRemoved ? { image_removed: current?.image_url ?? true } : {}),
             timestamp: new Date().toISOString(),
           });
 
           await supabase.from('qb_questions').update({
+            ...(fixResult.imageRemoved ? { image_url: null, is_image_question: false } : {}),
             question: fixedQ.question, options: fixedQ.options,
             correct_option: fixedQ.correct_option || fixedQ.correct_answer,
             explanation: fixedQ.explanation,
@@ -761,7 +767,11 @@ async function runReviewPipeline(jobId: string, scope: ReviewScope): Promise<voi
       const hasImage = !!q.image_url;
       const stemRefsImage = /shown\s+(below|above|here)|in\s+the\s+(image|figure|scan|x-?ray|ct|mri)|based\s+on\s+the\s+(image|figure)/i.test((q.question as string) || '');
 
-      if (isImageQ && !hasImage) {
+      // Restructure mode repairs these instead: the validator asks the fixer to make the item
+      // self-contained in text (reviewMode.imageIssues), since a live-bank image cannot be regenerated.
+      if (restructure) {
+        validQuestions.push(q);
+      } else if (isImageQ && !hasImage) {
         // Auto-score as structural failure — don't waste LLM calls
         const trail = Array.isArray(q.audit_trail) ? [...(q.audit_trail as unknown[])] : [];
         trail.push({
@@ -821,6 +831,7 @@ async function runReviewPipeline(jobId: string, scope: ReviewScope): Promise<voi
     const freshQuestions = (await fetchJobQuestions(jobId)).filter((q) => inScope.has(q.id as string));
     // Skip structural failures in adversarial too (already auto-scored)
     const freshValid = freshQuestions.filter(q => {
+      if (restructure) return true;
       if (q.is_image_question && !q.image_url) return false;
       if (!q.is_image_question && !q.image_url && /shown\s+(below|above|here)|in\s+the\s+(image|figure|scan|x-?ray|ct|mri)/i.test((q.question as string) || '')) return false;
       return true;
