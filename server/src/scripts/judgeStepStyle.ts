@@ -28,14 +28,24 @@ const render = (v: Q) => [
   `EXPLANATION:\n${v.explanation}`,
 ].join('\n\n');
 
-const prompt = (q: Q, x: Q, y: Q) => `You are a senior NBME item writer reviewing revisions of an existing ${STEP[q.step]} question bank item. Candidates have already answered the original, so a revision must keep testing the same thing with the same answer choices.
+// --rubric quality: judge exam quality only. New, replaced or reordered answer choices are not a
+// fault — the item will be re-released as a new version — but changing what is tested is.
+const QUALITY = arg('rubric') === 'quality';
+const intro = (q: Q) => QUALITY
+  ? `You are a senior NBME item writer reviewing revisions of a ${STEP[q.step]} question bank item. The revision will be released as a new version, so new, replaced or reordered answer choices are acceptable; what matters is the quality of the item as a ${STEP[q.step]} item, and that it still tests the same concept as the original.`
+  : `You are a senior NBME item writer reviewing revisions of an existing ${STEP[q.step]} question bank item. Candidates have already answered the original, so a revision must keep testing the same thing with the same answer choices.`;
+const fidelity = QUALITY
+  ? '5. Accuracy under current US practice, and internal consistency (the explanation matches the stem and options); the item still tests the same concept as the original. Answer position, and choices that are new, replaced or reordered, are NOT faults.'
+  : '5. Accuracy under current US practice, and fidelity to the original item (same question, same choices, same key unless the original key was wrong).';
+
+const prompt = (q: Q, x: Q, y: Q) => `${intro(q)}
 
 Judge which revision, X or Y, is closer to a real ${STEP[q.step]} item, using NBME item-writing standards:
 1. Clinical vignette: patient age/sex, setting, history, exam, and the labs or imaging the decision needs; no superfluous or contradictory data; nothing that names the answer.
 2. Lead-in: one focused, closed question ("Which of the following is the most likely diagnosis?" style) that can be answered before reading the options.
 3. Options: homogeneous in kind, length and specificity; no cue (longest/most qualified keyed option, grammatical cues, absolute terms); one best answer.
 4. Explanation: why the key is right and why each distractor is wrong, naming options by their text (not letter).
-5. Accuracy under current US practice, and fidelity to the original item (same question, same choices, same key unless the original key was wrong).
+${fidelity}
 
 ORIGINAL (for context):
 ${render(q.original)}

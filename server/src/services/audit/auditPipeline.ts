@@ -450,7 +450,7 @@ async function runAuditPipeline(jobId: string): Promise<void> {
         // item that did not reach it is not approved. A keyed option that still stands out by length
         // is reported but does not block — it has not been measured as a gate yet.
         let formatBlock = '';
-        if (restructure) {
+        if (restructure && !otherExam) {
           const n = optionTexts(q).texts.length;
           if (n !== 5) {
             formatBlock = `${n} options; five are required`;

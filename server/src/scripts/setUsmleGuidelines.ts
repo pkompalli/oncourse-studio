@@ -68,7 +68,7 @@ const VALIDATION_CHECKS = [
   'Stem is a vignette: age and sex, setting, presenting complaint with time course, relevant history, examination, and laboratory or imaging results where they bear on the answer; it ends with one focused lead-in such as "Which of the following is the most likely diagnosis?" or "Which of the following is the most appropriate next step in management?".',
   'The vignette contains every fact needed to choose ONE best answer and to rule out the strongest distractor (e.g. hemodynamic stability, timing from onset, pregnancy status, INR, prior treatment). Name the missing decisive fact when there is one.',
   'If an image is attached, the stem and image agree, and the stem does not name the answer the image is there to test.',
-  'If no image is attached, the stem does not refer to one; if an image is attached, answering actually depends on it.',
+  'If no image is attached, the stem does not refer to one.',
   'The explanation justifies the keyed answer and gives a specific reason each other option is wrong, naming each option by its text, never by letter.',
   'The keyed answer reflects current US practice (e.g. ACC/AHA, USPSTF, IDSA, ACOG, AAP, ATLS); flag management that is outdated or non-US.',
   'The tested topic belongs to this Step\'s content outline (see coverage rules).',
