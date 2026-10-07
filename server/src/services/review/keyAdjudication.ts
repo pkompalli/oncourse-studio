@@ -21,7 +21,7 @@ import { supabase } from '../../db/supabase.js';
 import { fetchAllRows } from '../../db/pagination.js';
 import { orCall, MODELS } from '../llm/openrouter.js';
 import { fixQuestion, sameAnswer, optionIdentity, OPTION_IDENTITY_MIN } from './fixer.js';
-import { optionTexts } from './reviewMode.js';
+import { optionTexts, keyLengthCue, cueIssues } from './reviewMode.js';
 import { changedFields } from '../audit/fixHistory.js';
 
 type Row = Record<string, any>;
@@ -163,4 +163,31 @@ export async function adjudicateJobKeys(jobId: string, courseName: string, log: 
     log(`  [Adjudicate] Q${q.question_number}: ${error ? 'FAILED' : keyStays ? 'key upheld' : 'key changed'} → "${v.correct_answer.slice(0, 70)}"${v.edits.length ? ` (${v.edits.length} edits)` : ''}${error ? ` — ${error}` : ''}`);
   }
   return report;
+}
+
+/**
+ * Last length check before audit. A later stage (the adversarial fixer, an adjudication) can leave the
+ * keyed option the longest again after the validator's repair settled it; in the fourth pilot one key
+ * was 96 characters against 93 at audit and the item was flagged. Each such item gets one more
+ * measured repair (fixQuestion's length rounds), recorded on the trail as a cue_fix that audit verifies.
+ */
+export async function sweepLengthCues(jobId: string, courseName: string, log: (s: string) => void = console.log): Promise<{ found: number; fixed: number }> {
+  const rows = await fetchAllRows<Row>((from, to) => supabase.from('qb_questions').select('*')
+    .eq('job_id', jobId).eq('status', 'reviewed').is('replaced_by_id', null).order('question_number').range(from, to));
+  const out = { found: 0, fixed: 0 };
+  for (const q of rows) {
+    if ((q.tags as Row | null)?.belongs_to_exam || !keyLengthCue(q)) continue;
+    out.found++;
+    const asks = cueIssues(q).filter((c) => /^FORMAT: The keyed option/.test(c));
+    const fix = await fixQuestion(q, asks, courseName, { existingBank: true, restructure: true });
+    if (!fix.fixed || !fix.question || keyLengthCue(fix.question)) { log(`  [CueSweep] Q${q.question_number}: still the longest (${fix.error ?? 'not resolved'})`); continue; }
+    const snap = (x: Row) => ({ question: x.question, options: x.options, correct_option: x.correct_option, explanation: x.explanation });
+    const trail = Array.isArray(q.audit_trail) ? [...q.audit_trail] : [];
+    trail.push({ phase: 'cue_fix', changes_requested: asks, before: snap(q), after: snap(fix.question), changed_fields: changedFields(snap(q), snap(fix.question)), timestamp: new Date().toISOString() });
+    const { error } = await supabase.from('qb_questions').update({ question: fix.question.question, options: fix.question.options, correct_option: fix.question.correct_option, explanation: fix.question.explanation, audit_trail: trail }).eq('id', q.id);
+    if (error) { log(`  [CueSweep] Q${q.question_number}: write failed ${error.message}`); continue; }
+    out.fixed++;
+    log(`  [CueSweep] Q${q.question_number}: key no longer the longest`);
+  }
+  return out;
 }

@@ -15,7 +15,7 @@ import { reviewBatchForJob } from '../services/review/reviewPipeline.js';
 import { auditBatchForJob } from '../services/audit/auditPipeline.js';
 import { reviewModeOf } from '../services/review/reviewMode.js';
 import { balanceJobKeys } from '../services/review/keyBalance.js';
-import { adjudicateJobKeys } from '../services/review/keyAdjudication.js';
+import { adjudicateJobKeys, sweepLengthCues } from '../services/review/keyAdjudication.js';
 
 const jobIds = process.argv.slice(2).filter((a) => /^[0-9a-f-]{36}$/.test(a));
 if (!jobIds.length) { console.log('usage: runImportedJobs.ts <jobId> [<jobId> …]'); process.exit(1); }
@@ -63,6 +63,8 @@ async function drive(id: string) {
       const { data: c } = await supabase.from('qb_courses').select('name').eq('id', j?.course_id).single();
       const r = await adjudicateJobKeys(id, String(c?.name ?? 'USMLE'), (s) => console.log(`${tag}${s}`));
       console.log(`${tag} adjudication: ${JSON.stringify(r)}`);
+      const sw = await sweepLengthCues(id, String(c?.name ?? 'USMLE'), (s) => console.log(`${tag}${s}`));
+      console.log(`${tag} length sweep: ${JSON.stringify(sw)}`);
     }
     await auditBatchForJob(id);
     job = { ...job, status: await waitWhile(id, 'auditing', tag) };

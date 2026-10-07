@@ -471,8 +471,17 @@ async function runAuditPipeline(jobId: string): Promise<void> {
           if (n !== 5) blocks.push(`${n} options; five are required`);
           const cue = keyLengthCue(q);
           if (cue) blocks.push(`the keyed option is the longest choice (${describeLengthCue(cue)})`);
-          if (keySpotted(q, probes[i])) blocks.push(`a reader shown only the options picked the key by its form (${probes[i]!.cues.join(', ')})`);
-          for (const d of implausibleDistractors(q, probes[i])) blocks.push(`distractor "${d.text.slice(0, 80)}" can be ruled out without the case (${d.reason})`);
+          // A probe finding blocks only if a second, independent run repeats it. In the fourth pilot two
+          // single-run findings were wrong (a court order on an ethics item called non-clinical; the MMR
+          // "give today" key called the only one of its kind) and flagged sound items.
+          const spotted = keySpotted(q, probes[i]);
+          const elim = implausibleDistractors(q, probes[i]);
+          if (spotted || elim.length) {
+            const [again] = await probeCues([q]);
+            if (spotted && keySpotted(q, again)) blocks.push(`a reader shown only the options picked the key by its form (${probes[i]!.cues.join(', ')}), twice`);
+            const elimAgain = new Set(implausibleDistractors(q, again).map((d) => d.text));
+            for (const d of elim.filter((x) => elimAgain.has(x.text))) blocks.push(`distractor "${d.text.slice(0, 80)}" can be ruled out without the case (${d.reason}), twice`);
+          }
           if (blocks.length) {
             formatBlock = blocks.join('; ');
             result.issues = [...((result.issues as string[]) || []), ...blocks.map((b) => `NOT COMPLIANT — ${b}`)];

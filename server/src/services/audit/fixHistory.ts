@@ -40,7 +40,7 @@ interface TrailEntry {
 
 // key_adjudication (keyAdjudication.ts) is a repair like the others: audit verifies its edits, and an
 // adjudicated key the fixer could not carry through holds the item back.
-const REPAIR_PHASES = new Set(['validator_fix', 'adversarial_fix', 'key_adjudication']);
+const REPAIR_PHASES = new Set(['validator_fix', 'adversarial_fix', 'key_adjudication', 'cue_fix']);
 const FAILED_PHASES = new Set(['validator_fix_failed', 'adversarial_fix_failed', 'key_adjudication_failed']);
 const IMAGE_PHASES = new Set(['validator_image_fix', 'adversarial_image_fix']);
 
@@ -114,14 +114,29 @@ export function fixHistoryBlock(question: Record<string, unknown>, label: string
   let repairs = 0;
   let failures = 0;
 
-  for (const e of trail) {
+  // An answer adjudication (keyAdjudication.ts) settles the key for good. Earlier requests about which
+  // answer is keyed are superseded by it: shown them as live, the auditor in the fourth pilot judged a
+  // correct adjudication "applied incorrectly" because an earlier request had asked for contraction bands.
+  const adjAt = trail.map((e) => String(e.phase || '')).lastIndexOf('key_adjudication');
+  const KEY_REQUEST = /^ANSWER KEY|\bkey [A-J]\b|\b(correct answer|keyed answer|answer key)\b/i;
+
+  for (const [idx, e] of trail.entries()) {
     const phase = String(e.phase || '');
 
     if (REPAIR_PHASES.has(phase)) {
       repairs++;
       const asked = e.changes_requested || [];
+      if (phase === 'key_adjudication') {
+        const opts = question.options as Record<string, unknown> | undefined;
+        const nowKeyed = opts && typeof opts === 'object' ? String(opts[String(question.correct_option ?? '')] ?? '') : '';
+        const ex = e as TrailEntry & { correct_answer?: string; edits?: string[] };
+        lines.push(`    [key_adjudication] FINAL answer decision: "${String(ex.correct_answer ?? '').slice(0, 200)}" — currently keyed: "${nowKeyed.slice(0, 200)}". Edits requested:`);
+        (ex.edits || []).forEach((c, i) => lines.push(`      ${i + 1}. ${String(c).slice(0, 300)}`));
+        lines.push(describeMovement(e));
+        continue;
+      }
       lines.push(`    [${phase}] ${asked.length} change(s) requested:`);
-      asked.forEach((c, i) => lines.push(`      ${i + 1}. ${String(c).slice(0, 300)}`));
+      asked.forEach((c, i) => lines.push(`      ${i + 1}. ${String(c).slice(0, 300)}${idx < adjAt && KEY_REQUEST.test(String(c)) ? '   (SUPERSEDED by the final answer decision below — do not verify)' : ''}`));
       lines.push(describeMovement(e));
       continue;
     }

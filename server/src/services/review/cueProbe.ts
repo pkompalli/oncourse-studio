@@ -59,6 +59,8 @@ For each item:
    - "absurd": no clinician would ever consider it
    - "non_clinical": an administrative or legal action where a clinical decision is asked for (e.g. reporting to a licensing board)
    NEVER list an option because it is medically incorrect, outdated or less appropriate — that is what a distractor is.
+   In ethics, law and communication items (consent, capacity, surrogates, advance directives, confidentiality, disclosure), ethics consultation, court orders and legal or administrative steps ARE the same kind as the other options: never list them as "non_clinical" or "different_kind" there.
+   Likewise, when the options are alternative courses of action (give now / delay / withhold / refer), the one that differs in direction is not "only_of_its_kind": that difference is the content being tested.
 
 Return a JSON array, one object per item in order:
 [{"item": 1, "guess": "C", "confidence": "low", "cues": [], "eliminable": [{"letter": "E", "reason": "non_clinical"}]}]
