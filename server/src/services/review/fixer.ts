@@ -150,7 +150,7 @@ export function extractFixerJson(raw: string): Record<string, unknown> {
  * whatever a change asks — a reviewer told "reduce to the standard five options" would otherwise
  * delete an option candidates have chosen. Wording and the key can still change.
  */
-export function optionDrift(before: Record<string, unknown>, after: Record<string, unknown>, asked: string, locked = false, restructure = false): string | null {
+export function optionDrift(before: Record<string, unknown>, after: Record<string, unknown>, asked: string, locked = false, restructure = false, allowKeyReword = false): string | null {
   const a = optionTexts(before);
   const b = optionTexts(after);
   if (!a || !b || !a.length) return null;
@@ -160,6 +160,9 @@ export function optionDrift(before: Record<string, unknown>, after: Record<strin
   // choice unless a reviewer said the key was wrong.
   if (restructure) {
     if (b.length !== 5) return `option count ${b.length}; five are required`;
+    // A length repair rewords the key on purpose; whether it is the same answer is settled by
+    // sameAnswer() in fixQuestion, not by word overlap.
+    if (allowKeyReword) return null;
     const ka = keyText(before), kb = keyText(after);
     if (ka !== null && kb !== null && optionIdentity(ka, kb) < OPTION_IDENTITY_MIN
         && !/\b(answer key|correct answer|keyed answer|key\b|correct option|image conflict)/.test(asked)) {
@@ -204,7 +207,8 @@ export function structuralDrift(
   after: Record<string, unknown>,
   changesRequired: string[],
   locked = false,
-  restructure = false
+  restructure = false,
+  allowKeyReword = false
 ): string | null {
   const asked = changesRequired.join(' ').toLowerCase();
 
@@ -212,7 +216,7 @@ export function structuralDrift(
   // of B", the fixer reshuffled an item's options to move its key to C; asked to fix an
   // explanation, it dropped a sixth option. On an item already in use, either one reattaches every
   // recorded answer to different text.
-  const mcqDrift = optionDrift(before, after, asked, locked, restructure);
+  const mcqDrift = optionDrift(before, after, asked, locked, restructure, allowKeyReword);
   if (mcqDrift) return mcqDrift;
 
   const subsOf = (q: Record<string, unknown>) => {
@@ -258,11 +262,19 @@ export async function fixQuestion(
     const cue = keyLengthCue(best.question!);
     if (!cue) break;
     const ask = `FORMAT: The keyed option is still the longest choice (${describeLengthCue(cue)}). Shorten the keyed option without changing its meaning, or lengthen one or more distractors with plausible, specific detail of the same kind, so that at least one distractor is at least as long as the keyed option in BOTH characters and words and all five look alike. Change nothing else, except explanation wording that quotes a reworded option.`;
-    const again = await fixOnce(best.question!, [ask], courseName, opts);
+    const again = await fixOnce(best.question!, [ask], courseName, { ...opts, allowKeyReword: true });
     if (!again.fixed || !again.question) break;
-    // Judged against the ORIGINAL as well: rounds of shortening must not drift the key into a different choice.
-    const drift = structuralDrift(question, again.question, [...changesRequired, ask], false, true);
+    // Judged against the ORIGINAL as well: rounds of shortening must not drift the key into a different
+    // choice. Word overlap cannot tell "Perform right lower quadrant ultrasound" from "Obtain
+    // graded-compression RLQ ultrasound" (refused in the third pilot), so a key that overlaps little
+    // is put to sameAnswer() instead.
+    const drift = structuralDrift(question, again.question, [...changesRequired, ask], false, true, true);
     if (drift) { console.warn(`  [Fixer] cue round ${round} refused (${drift})`); break; }
+    const ka = keyText(question), kb = keyText(again.question);
+    if (ka !== null && kb !== null && optionIdentity(ka, kb) < OPTION_IDENTITY_MIN && !(await sameAnswer(String(question.question ?? ''), ka, kb))) {
+      console.warn(`  [Fixer] cue round ${round} refused (the keyed option became a different answer: "${ka.slice(0, 50)}" -> "${kb.slice(0, 50)}")`);
+      break;
+    }
     best = { ...again, changesApplied: [...(best.changesApplied || []), ...(again.changesApplied || [])], imageRemoved: best.imageRemoved || again.imageRemoved };
   }
   return best;
@@ -271,11 +283,34 @@ export async function fixQuestion(
 const IMAGE_ASK = /^IMAGE (CONFLICT|NOT LOADING|MISSING)/;
 const IMAGE_GONE = /^IMAGE (NOT LOADING|MISSING)/;
 
+/**
+ * Whether two wordings of the keyed option name the same answer to this question. Asked of the
+ * reviewer model with both wordings and the stem; anything but a clear "same" counts as different,
+ * so a failed call keeps the earlier version.
+ */
+export async function sameAnswer(stem: string, before: string, after: string): Promise<boolean> {
+  const prompt = `A question's correct option was reworded to change its length. Decide whether the new wording names the SAME answer — the same action, diagnosis, mechanism or choice, with the same meaning for this question — or a DIFFERENT one. Added or removed detail that a candidate would read as the same choice counts as same; a different action, drug, diagnosis, structure or sequence counts as different.
+
+QUESTION:
+${stem.slice(-1500)}
+
+BEFORE: ${before}
+AFTER: ${after}
+
+Reply with exactly one word: SAME or DIFFERENT.`;
+  try {
+    const r = await orCall(MODELS.AUDITOR, '', prompt, { maxTokens: 400, temperature: 0 });
+    return /^\s*SAME\b/i.test(r.content);
+  } catch {
+    return false;
+  }
+}
+
 async function fixOnce(
   question: Record<string, unknown>,
   changesRequired: string[],
   courseName: string,
-  opts?: { existingBank?: boolean; restructure?: boolean }
+  opts?: { existingBank?: boolean; restructure?: boolean; allowKeyReword?: boolean }
 ): Promise<FixResult> {
   if (!changesRequired || changesRequired.length === 0) {
     return { fixed: false };
@@ -372,7 +407,7 @@ Return ONLY valid JSON. No preamble, no markdown fences.`;
       // A fix that reshapes the question is worse than no fix: the flagged defect is
       // usually cosmetic, while the rewrite replaces a valid item with a different one.
       // Retry once with the rule spelled out, then keep the ORIGINAL rather than accept it.
-      const drift = structuralDrift(question, fixed, changesRequired, Boolean(opts?.existingBank) && !opts?.restructure, Boolean(opts?.restructure));
+      const drift = structuralDrift(question, fixed, changesRequired, Boolean(opts?.existingBank) && !opts?.restructure, Boolean(opts?.restructure), Boolean(opts?.allowKeyReword));
       if (drift) {
         console.warn(`  [Fixer] attempt ${attempt}/2 changed structure it was not asked to (${drift})`);
         lastErr = `structural drift: ${drift}`;
