@@ -11,7 +11,7 @@
  * every request routed below matched a hand reading of it.
  *
  *   image — a request that names the picture and says it is wrong or must be replaced
- *   label — a difficulty or Bloom's relabel. The fixer's output for those fields is never
+ *   label — a difficulty or Bloom's relabel, or a request to fill in a stored metadata field. The fixer's output for those fields is never
  *           persisted, so audit then reports a repair that was "never applied" on a question
  *           whose content is fine.
  *   batch — a request about how the item sits among the others reviewed with it (concept overlap,
@@ -35,7 +35,13 @@ const IMAGE_REPLACE_RE = /\b(replace|regenerate|swap|redo)\b/i;
 const OWN_TEXT_RE = /\b(vignette|lead-in|stem)\b/i;
 const OWN_FORMAT_RE = /^(FORMAT|EXPLANATION):/i;
 
-const LABEL_RE = /^DIFFICULTY:|\b(difficulty|bloom'?s?)\s+(label|level|rating)\b|\breconsider difficulty\b|\bdifficulty\b.*\b(easy|medium|hard)\b|\bbloom'?s?\b.*\b\d_[a-z]+/i;
+// Sonnet writes "Bloom's level"; GPT 6.1 Sol writes the field name, "Change bloom_level to 3_apply".
+const LABEL_RE = /^DIFFICULTY:|\b(difficulty|bloom'?s?)\s+(label|level|rating)\b|\bblooms?_level\b|\breconsider difficulty\b|\bdifficulty\b.*\b(easy|medium|hard)\b|\bbloom'?s?\b.*\b\d_[a-z]+/i;
+// Requests to fill in stored fields the platform maintains, not the text a candidate reads. Sol asks
+// for these ("Supply format_type as mcq_single and is_image_question as false"); no text repair can
+// make them, so sent to the fixer they came back "not applied" and audit flagged 43 of 60 sound items.
+const RELABEL_ACTION_RE = /\b(change|set|relabel|re-label|reclassify|lower|raise|label it|label the item)\b[^.;]{0,30}\b(bloom'?s?|blooms?_level|difficulty)\b|\b(bloom'?s?|blooms?_level|difficulty)\b[^.;]{0,25}\b(from\s+\S+\s+)?to\s+['"]?(\d_[a-z]+|easy|medium|hard)\b/i;
+const METADATA_RE = /\b(format_type|is_image_question|image_type|image_search_terms|question_type|correct_answer field|course[- ]hierarchy)\b|\b(supply|add|set|include|provide)\b[^.]{0,40}\bmetadata\b|\bsubject, topic(,| and) chapter\b/i;
 
 // Every reviewer sees only its batch, so a request that refers to the batch at all is about the
 // batch, not the item.
@@ -51,6 +57,11 @@ export function isImageChange(c: string): boolean {
 export function routeChange(c: string, existingBank: boolean): ChangeRoute {
   if (/^CONCEPT OVERLAP:/i.test(c)) return existingBank ? 'batch' : 'fix';
   if (isImageChange(c)) return 'image';
+  if (METADATA_RE.test(c)) return 'label';
+  // "…the lead-in applies anatomy, so change bloom_level from 5_evaluate to 3_apply" is a relabel
+  // that merely cites the stem; "convert the stem into a vignette consistent with Bloom's 3_apply"
+  // is a text change. What the request asks to change decides, not what it mentions.
+  if (RELABEL_ACTION_RE.test(c)) return 'label';
   if (OWN_TEXT_RE.test(c)) return 'fix';
   if (LABEL_RE.test(c)) return 'label';
   if (OWN_FORMAT_RE.test(c)) return 'fix';

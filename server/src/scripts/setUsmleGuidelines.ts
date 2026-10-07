@@ -62,6 +62,7 @@ const VALIDATION_CHECKS = [
   'Stem is a vignette: age and sex, setting, presenting complaint with time course, relevant history, examination, and laboratory or imaging results where they bear on the answer; it ends with one focused lead-in such as "Which of the following is the most likely diagnosis?" or "Which of the following is the most appropriate next step in management?".',
   'The vignette contains every fact needed to choose ONE best answer and to rule out the strongest distractor (e.g. hemodynamic stability, timing from onset, pregnancy status, INR, prior treatment). Name the missing decisive fact when there is one.',
   'If an image is attached, the stem and image agree, and the stem does not describe the finding the image shows.',
+  'If no image is attached, the stem does not refer to one; if an image is attached, answering actually depends on it.',
   'The explanation justifies the keyed answer and gives a specific reason each other option is wrong, naming each option by its text, never by letter.',
   'The keyed answer reflects current US practice (e.g. ACC/AHA, USPSTF, IDSA, ACOG, AAP, ATLS); flag management that is outdated or non-US.',
   'The tested topic belongs to this Step\'s content outline (see coverage rules).',
@@ -149,6 +150,27 @@ function relaxOptionCount(g: Record<string, unknown>): number {
   return touched;
 }
 
+/**
+ * The generator writes output-format rules into the lists the validator reads: "Verify format_type
+ * equals 'mcq_single'", "is_image_question must be a Boolean", "subject, topic and chapter must form
+ * a valid hierarchy". They describe the generator's JSON, which content_schema already enforces, not
+ * the item a candidate reads. Sonnet passed over them; GPT 6.1 Sol applied them to every stored item
+ * and asked for the fields 177 times in one 60-item pilot. Rules that check only stored fields go.
+ */
+const STORED_FIELD_RULE_RE = /\b(format_type|is_image_question|image_type|image_search_terms|correct_answer field|required (top-level )?fields|top-level fields)\b|\bsubject, topic,? and chapter\b|\btopic and chapter must\b|\bsubject must (exactly )?match\b|\bcourse structure\b/i;
+function dropStoredFieldRules(g: Record<string, unknown>): number {
+  const mcq = ((g.format_specs as Record<string, Record<string, unknown>>) || {}).mcq_single;
+  if (!mcq) return 0;
+  let dropped = 0;
+  for (const k of ['validation_checks', 'structure_requirements', 'syntax_rules', 'content_rules']) {
+    const list = Array.isArray(mcq[k]) ? (mcq[k] as string[]) : [];
+    const kept = list.filter((r) => !STORED_FIELD_RULE_RE.test(r));
+    dropped += list.length - kept.length;
+    mcq[k] = kept;
+  }
+  return dropped;
+}
+
 /** Where the generated schema pins options to exactly num_options, widen it to 4–9 (see CONTENT_RULES). */
 function widenOptionCount(g: Record<string, unknown>): string[] {
   const notes: string[] = [];
@@ -200,6 +222,7 @@ if (APPLY) {
     }
     const merged = merge(generated, s.scope);
     console.log(`  [${s.step}] option-count rules relaxed: ${relaxOptionCount(merged)}`);
+    console.log(`  [${s.step}] stored-field rules dropped: ${dropStoredFieldRules(merged)}`);
     const notes = widenOptionCount(merged);
     writeFileSync(`${OUT}/${s.step}.json`, JSON.stringify(merged, null, 2));
     console.log(`  [${s.step}] keys: ${Object.keys(merged).join(', ')}`);

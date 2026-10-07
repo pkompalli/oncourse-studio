@@ -123,7 +123,16 @@ async function pushProgress(jobId: string) {
 
 // ── Audit prompt ──
 
-function getAuditPrompt(hasRepairs: boolean): string {
+function getAuditPrompt(hasRepairs: boolean, existingBank = false): string {
+  // Items imported from a live bank are judged on what a candidate reads. GPT 6.1 Sol docked them
+  // for difficulty/Bloom labels and for stored fields (format_type, is_image_question) that are not
+  // part of the item, scoring 6 and flagging sound questions the Sonnet auditor approved.
+  const scope = existingBank ? `
+
+These questions are already in use in a live question bank. Score what a candidate reads: the stem,
+options, keyed answer, explanation and image. Difficulty and Bloom labels and stored fields such as
+format_type, is_image_question, subject, topic or tags are outside this score: do not lower it or
+list issues for them.` : '';
   // The verification section only appears when something in the batch was actually repaired.
   // Asking "was each change applied?" of ten questions that were never touched trains the
   // model to answer the question with an empty array, which is how a real finding gets lost.
@@ -159,7 +168,7 @@ You will receive questions that have already passed validator and adversarial re
 Questions may be in ANY format: MCQ, Select All That Apply (SATA), ordered response, fill-in-the-blank, hot spot, matrix grid, extended matching, case study, etc.
 ${hasRepairs
   ? 'Your job has two parts: confirm that the repairs asked of earlier stages were actually made and made correctly, and then score the question.'
-  : 'Your job is a FINAL holistic quality check — one score per question.'}${verification}
+  : 'Your job is a FINAL holistic quality check — one score per question.'}${scope}${verification}
 
 Score each question 1-10 based on:
 1. Factual accuracy of the correct answer and explanation
@@ -211,7 +220,7 @@ Output ONLY the JSON array. No preamble, no trailing text.`;
 
 // ── Run audit on a batch ──
 
-export async function runAuditBatch(questions: Record<string, unknown>[]): Promise<Record<string, unknown>[]> {
+export async function runAuditBatch(questions: Record<string, unknown>[], opts: { existingBank?: boolean } = {}): Promise<Record<string, unknown>[]> {
   // What earlier stages asked for, and what the fixer did about it. This was always on the row
   // — reviewPipeline writes it for every repair — and audit never read it, so it re-scored each
   // question from scratch and a change that was requested and silently not applied left a
@@ -223,7 +232,7 @@ export async function runAuditBatch(questions: Record<string, unknown>[]): Promi
     ? `\nREPAIR HISTORY — what earlier stages asked for and what the fixer did:\n${histories.join('\n')}\n`
     : '';
 
-  const prompt = getAuditPrompt(histories.length > 0);
+  const prompt = getAuditPrompt(histories.length > 0, Boolean(opts.existingBank));
   const content = await formatQuestionsForReviewWithImages(questions);
 
   let userMessage: string | ContentPart[];
@@ -273,6 +282,10 @@ async function runAuditPipeline(jobId: string): Promise<void> {
   try {
     startTracking(jobId, 'audit');
     setStep(jobId, 'Fetching reviewed questions...');
+    // Imported items are audited on candidate-facing content only (getAuditPrompt).
+    const { data: jobRow } = await supabase.from('qb_jobs').select('config').eq('id', jobId).single();
+    const jobConfig = ((jobRow?.config as Record<string, unknown>) || {});
+    const existingBank = jobConfig.source === 'import' || jobConfig.existing_bank === true;
 
     // Paginate — audit must see every reviewed question, not just the first 1000.
     const questions = await fetchAllRows<Record<string, unknown>>((from, to) =>
@@ -318,7 +331,7 @@ async function runAuditPipeline(jobId: string): Promise<void> {
 
       setStep(jobId, `[Audit] Batch ${batchNum}/${batchesTotal}: scoring Q${qStart}–Q${qEnd} via ${MODELS.AUDITOR}...`);
 
-      const results = await runAuditBatch(batch);
+      const results = await runAuditBatch(batch, { existingBank });
 
       setStep(jobId, `[Audit] Batch ${batchNum}/${batchesTotal}: processing scores for Q${qStart}–Q${qEnd}`);
 

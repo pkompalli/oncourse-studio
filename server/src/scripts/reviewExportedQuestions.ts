@@ -284,7 +284,7 @@ async function reviewBatch(items: Array<{ q: Exported; step: Step; from: string 
   }));
 
   // Audit — gates copied from auditPipeline.ts.
-  const auRes = await runAuditBatch(rows);
+  const auRes = await runAuditBatch(rows, { existingBank: true });
   live.forEach(({ row, o }, i) => {
     const r = auRes[i] || {};
     const raw = typeof r.quality_score === 'number' ? r.quality_score : null;

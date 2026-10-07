@@ -300,14 +300,15 @@ For EACH question ask:
 6. FORMAT COMPLIANCE (if exam format requirements are provided above):
    a. Does the stem match the expected format (e.g., scenario/vignette vs. direct recall)?
    ${opts?.existingBank
-    ? 'b. Do NOT flag the option count. These items are already in use and every option carries recorded answers: never request that an option be added, removed, merged or reordered — edit an option\'s wording in place if it is wrong.'
+    ? 'Stored fields (format_type, is_image_question, image_type, image_search_terms, subject, topic, chapter, tags) are kept by the platform, not written in the item: do NOT request that any be supplied or changed, and do NOT lower the score for their absence. Review what a candidate reads — stem, options, key, explanation, image.\n   b. Do NOT flag the option count. These items are already in use and every option carries recorded answers: never request that an option be added, removed, merged or reordered — edit an option\'s wording in place if it is wrong.'
     : 'b. Does the option count match (e.g., 4 options vs. 5)?'}
    c. Are the distractors structured as the exam expects (homogeneous length, parallel construction)?
    d. Is the Bloom's level a valid normalized value (2_understand, 3_apply, 4_analyze, 5_evaluate)? Flag non-standard labels like NCJMM_*, raw text labels, etc.
 7. DIFFICULTY AND BLOOM — is each question labelled with a level it actually sits at?
    a. Does the question carry a difficulty of "easy", "medium" or "hard", and a normalized Bloom level? If either is missing or invalid → flag as format_compliance_issues.
    b. Is the assigned difficulty right for what the question demands? A one-step recall keyed "hard", or a multi-step derivation keyed "easy", is mislabelled — say which it should be.
-   c. Is the assigned Bloom level right for the cognitive work required? Recalling a threshold is not applying one, and applying a rule is not analysing a case. Where the whole-set targets are given above, a question labelled at a level it does not reach makes that target meaningless — so judge the label against the question, not against the target.${formatSpecificChecks}
+   c. Is the assigned Bloom level right for the cognitive work required? Recalling a threshold is not applying one, and applying a rule is not analysing a case. Where the whole-set targets are given above, a question labelled at a level it does not reach makes that target meaningless — so judge the label against the question, not against the target.${opts?.existingBank ? `
+   d. For these existing items a wrong label is recorded, not repaired: report it in difficulty_issues only, never in changes_required, and do not lower the score for it.` : ''}${formatSpecificChecks}
 ${opts?.existingBank ? `9. ANSWER KEY — these questions come from an existing bank and are reviewed in arbitrary batches, so the letters in this batch say nothing about the bank's balance:
    a. Do NOT flag answer-key distribution or runs, and do NOT compare questions with each other.
    b. Ask for the keyed answer to change ONLY when it is factually wrong for the vignette as written; give the evidence in answer_key_issue. Never ask for it to move for balance.` : `9. ANSWER KEY DIVERSITY — check the correct answer keys across the batch:
