@@ -1,7 +1,7 @@
 /**
  * Audit Pipeline — V2 Step 4
  *
- * Single-pass GPT-5.4 scoring of reviewed questions.
+ * Single-pass scoring (MODELS.AUDITOR) of reviewed questions.
  * Score >= 7 → approved, < 7 → flagged.
  * The three stage scores are kept separately: each describes the version of the question
  * that stage actually saw, and averaging them mixes pre- and post-repair states.
@@ -308,7 +308,7 @@ async function runAuditPipeline(jobId: string): Promise<void> {
     let batchesDone = 0;
 
     setState(jobId, { batchesTotal, batchesDone: 0 });
-    setStep(jobId, `Audit: sending ${batchesTotal} batches (${total} Qs) to GPT-5.4`);
+    setStep(jobId, `Audit: sending ${batchesTotal} batches (${total} Qs) to ${MODELS.AUDITOR}`);
     await pushProgress(jobId);
 
     const batchTasks = batches.map((batch, batchIdx) => async () => {
@@ -316,7 +316,7 @@ async function runAuditPipeline(jobId: string): Promise<void> {
       const qStart = batchIdx * AUDIT_BATCH_SIZE + 1;
       const qEnd = qStart + batch.length - 1;
 
-      setStep(jobId, `[Audit] Batch ${batchNum}/${batchesTotal}: scoring Q${qStart}–Q${qEnd} via GPT-5.4...`);
+      setStep(jobId, `[Audit] Batch ${batchNum}/${batchesTotal}: scoring Q${qStart}–Q${qEnd} via ${MODELS.AUDITOR}...`);
 
       const results = await runAuditBatch(batch);
 

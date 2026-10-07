@@ -1,6 +1,6 @@
 /**
  * Validator review — faithful port of V1's get_batch_validator_prompt() (app.py 5748-5857)
- * Model: OR_VALIDATOR_MODEL (GPT-5.4)
+ * Model: OR_VALIDATOR_MODEL (MODELS.VALIDATOR)
  */
 
 import { orCall, MODELS } from '../llm/openrouter.js';

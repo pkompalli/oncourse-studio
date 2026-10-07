@@ -1,6 +1,6 @@
 /**
  * Adversarial review — faithful port of V1's get_batch_adversarial_prompt() (app.py 5860-5966)
- * Model: OR_ADVERSARIAL_MODEL (GPT-5.4)
+ * Model: OR_ADVERSARIAL_MODEL (MODELS.ADVERSARIAL)
  *
  * Runs in two phases, and the order is the point.
  *

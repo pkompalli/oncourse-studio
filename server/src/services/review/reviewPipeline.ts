@@ -25,6 +25,7 @@ import { startTracking, getStepTokens } from '../llm/tokenTracker.js';
 import { distributionForJob } from '../generation/distribution.js';
 import { changedFields } from '../audit/fixHistory.js';
 import { routeChanges } from './changeRouting.js';
+import { MODELS } from '../llm/openrouter.js';
 
 const REVIEW_BATCH_SIZE = 10;
 const MAX_CONCURRENT_BATCHES = 8;
@@ -239,7 +240,7 @@ async function runValidatorPhase(
   const batchesTotal = batches.length;
 
   setState(jobId, { phase: 'validator_scoring', batchesTotal, batchesDone: 0 });
-  setStep(jobId, `Validator: sending ${batchesTotal} batches (${questions.length} Qs) to GPT-5.4`);
+  setStep(jobId, `Validator: sending ${batchesTotal} batches (${questions.length} Qs) to ${MODELS.VALIDATOR}`);
   await pushProgress(jobId);
 
   const batchTasks = batches.map((batch, batchIdx) => async () => {
@@ -248,7 +249,7 @@ async function runValidatorPhase(
     const qEnd = qStart + batch.length - 1;
 
     // ── Step: Sending to validator ──
-    setStep(jobId, `[Validator] Batch ${batchNum}/${batchesTotal}: sending Q${qStart}–Q${qEnd} to GPT-5.4...`);
+    setStep(jobId, `[Validator] Batch ${batchNum}/${batchesTotal}: sending Q${qStart}–Q${qEnd} to ${MODELS.VALIDATOR}...`);
 
     const results = await runValidatorBatch(batch, 'qbank', courseName || 'exam preparation', examFormat, guidelines, { existingBank });
 
@@ -320,7 +321,7 @@ async function runValidatorPhase(
     // ── Step: Fixing flagged ──
     if (toFix.length > 0) {
       setState(jobId, { phase: 'validator_fixing' });
-      setStep(jobId, `[Validator] Batch ${batchNum}: fixing ${toFix.length}/${batch.length} flagged Qs via Claude...`);
+      setStep(jobId, `[Validator] Batch ${batchNum}: fixing ${toFix.length}/${batch.length} flagged Qs via ${MODELS.FIXER}...`);
 
       const fixPromises = toFix.map(async (item, fixIdx) => {
         setStep(jobId, `[Validator] Batch ${batchNum}: fixing Q${qStart + fixIdx} (${fixIdx + 1}/${toFix.length})...`);
@@ -507,7 +508,7 @@ async function runAdversarialPhase(
   const batchesTotal = batches.length;
 
   setState(jobId, { phase: 'adversarial_scoring', reviewed: 0, batchesTotal, batchesDone: 0 });
-  setStep(jobId, `Adversarial: sending ${batchesTotal} batches (${questions.length} Qs) to GPT-5.4`);
+  setStep(jobId, `Adversarial: sending ${batchesTotal} batches (${questions.length} Qs) to ${MODELS.ADVERSARIAL}`);
   await pushProgress(jobId);
 
   const batchTasks = batches.map((batch, batchIdx) => async () => {
@@ -515,7 +516,7 @@ async function runAdversarialPhase(
     const qStart = batchIdx * REVIEW_BATCH_SIZE + 1;
     const qEnd = qStart + batch.length - 1;
 
-    setStep(jobId, `[Adversarial] Batch ${batchNum}/${batchesTotal}: sending Q${qStart}–Q${qEnd} to GPT-5.4...`);
+    setStep(jobId, `[Adversarial] Batch ${batchNum}/${batchesTotal}: sending Q${qStart}–Q${qEnd} to ${MODELS.ADVERSARIAL}...`);
 
     const results = await runAdversarialBatch(batch, 'qbank', courseName || 'exam preparation', examFormat, { guidelines, existingBank });
 
@@ -576,7 +577,7 @@ async function runAdversarialPhase(
 
     if (toFix.length > 0) {
       setState(jobId, { phase: 'adversarial_fixing' });
-      setStep(jobId, `[Adversarial] Batch ${batchNum}: fixing ${toFix.length}/${batch.length} flagged Qs via Claude...`);
+      setStep(jobId, `[Adversarial] Batch ${batchNum}: fixing ${toFix.length}/${batch.length} flagged Qs via ${MODELS.FIXER}...`);
 
       const fixPromises = toFix.map(async (item, fixIdx) => {
         setStep(jobId, `[Adversarial] Batch ${batchNum}: fixing Q${qStart + fixIdx} (${fixIdx + 1}/${toFix.length})...`);

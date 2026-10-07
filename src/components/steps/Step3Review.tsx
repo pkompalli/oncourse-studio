@@ -287,7 +287,7 @@ export default function Step3Review() {
               <div className="flex-1">
                 <div className="flex items-center justify-between">
                   <span className="text-sm font-medium text-slate-700">
-                    Phase 1: Validator Review (Sonnet 5)
+                    Phase 1: Validator Review (Claude Sonnet 5.5)
                     {phase === 'validator_fixing' && <span className="ml-2 text-xs text-amber-600 font-normal">fixing flagged...</span>}
                   </span>
                   {isValidatorActive(phase) && <Loader2 className="w-4 h-4 text-blue-500 animate-spin" />}
@@ -323,7 +323,7 @@ export default function Step3Review() {
               <div className="flex-1">
                 <div className="flex items-center justify-between">
                   <span className="text-sm font-medium text-slate-700">
-                    Phase 2: Adversarial Review (Sonnet 5)
+                    Phase 2: Adversarial Review (Claude Sonnet 5.5)
                     {phase === 'adversarial_fixing' && <span className="ml-2 text-xs text-amber-600 font-normal">fixing flagged...</span>}
                   </span>
                   {isAdversarialActive(phase) && <Loader2 className="w-4 h-4 text-purple-500 animate-spin" />}
