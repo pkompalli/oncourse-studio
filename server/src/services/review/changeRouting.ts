@@ -116,7 +116,11 @@ export function routeChanges(changes: string[], extraImageFeedback: string[], ex
   // requests that mention a modality ("Replace the CT angiography distractor…"), and labelling those
   // IMAGE CONFLICT had the fixer remove a sound image from a glaucoma item in the third pilot.
   if (restructure && hasImage && out.image.length) {
-    const aboutPicture = (c: string) => IMAGE_WORD_RE.test(c) && !/^(DISTRACTOR|CUE|FORMAT|EXPLANATION|DIFFICULTY):/.test(c);
+    // It must also say the picture is WRONG: "provide the biopsy class without relying on a single
+    // glomerular image" names an image but asks for text, and labelled a conflict it cost a lupus
+    // nephritis item its biopsy image in the fourth pilot.
+    const PICTURE_WRONG = /\b(contradict\w*|conflict\w*|inconsisten\w*|mismatch\w*|opposite|unreadable|illegible|wrong|incorrect|replace|regenerate|swap)\b|\b(does not|doesn't|do not|fails? to|cannot be) (show|match|depict|agree|be read|be seen)/i;
+    const aboutPicture = (c: string) => IMAGE_WORD_RE.test(c) && PICTURE_WRONG.test(c) && !/^(DISTRACTOR|CUE|FORMAT|EXPLANATION|DIFFICULTY):/.test(c);
     out.fix = [...out.image.map((c) => (/^IMAGE (CONFLICT|NOT LOADING|MISSING)/.test(c) || !aboutPicture(c) ? c : `IMAGE CONFLICT: ${c}`)), ...out.fix];
     out.image = [];
     return out;
