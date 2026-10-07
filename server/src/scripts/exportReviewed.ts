@@ -76,12 +76,20 @@ const out = rows.map((q) => {
   const requiresNewVersion = newOptions > 0 || droppedOptions > 0 || keyMoved || imageRemoved;
   const blindDisagreed = (a?.changes || []).some((c: string) => /^ANSWER KEY — key [A-J], attempt [A-J]/.test(c));
 
+  // Answer questions are settled by keyAdjudication.ts before audit; only one it could not settle is
+  // left for a person. What changed is reported separately, as notes.
+  const adj = last('key_adjudication');
+  const adjFailed = last('key_adjudication_failed');
+  const keyNote = `Keyed answer changed from "${origOptions.find((o) => o.is_correct)?.text ?? ''}" to "${options.find((o) => o.is_correct)?.text ?? ''}"`;
   const clinician: string[] = [];
-  if (keyMoved) clinician.push(`Keyed answer changed from "${origOptions.find((o) => o.is_correct)?.text ?? ''}" to "${options.find((o) => o.is_correct)?.text ?? ''}"`);
-  if (stemChanged && stemOverlap < 0.5) clinician.push(`Stem rewritten (word overlap ${stemOverlap} with the original)`);
-  if (blindDisagreed && !keyMoved) clinician.push('An independent blind solve chose a different answer; the key was kept');
-  if (imageRemoved) clinician.push('Image removed (it conflicted with the text or would not load); the stem now states its findings in words');
-  if (newOptions || droppedOptions) clinician.push(`Options changed: ${newOptions} new, ${droppedOptions} removed — release as a new version`);
+  if (adjFailed && !adj) clinician.push(`Answer adjudication could not be carried through: ${String(adjFailed.error ?? '').slice(0, 160)} (adjudicated answer: "${String(adjFailed.correct_answer ?? '').slice(0, 100)}")`);
+  else if (!adj && keyMoved) clinician.push(keyNote);
+  else if (!adj && blindDisagreed) clinician.push('An independent blind solve chose a different answer; the key was kept');
+  const notes: string[] = [];
+  if (keyMoved && (adj || adjFailed)) notes.push(keyNote);
+  if (stemChanged && stemOverlap < 0.5) notes.push(`Stem rewritten (word overlap ${stemOverlap} with the original)`);
+  if (imageRemoved) notes.push('Image removed (it conflicted with the text or would not load); the stem now states its findings in words');
+  if (newOptions || droppedOptions) notes.push(`Options changed: ${newOptions} new, ${droppedOptions} removed — release as a new version`);
 
   return {
     source_question_id: tags.source_question_id ?? null,
@@ -101,6 +109,8 @@ const out = rows.map((q) => {
     },
     requires_new_version: requiresNewVersion,
     needs_clinician_review: clinician,
+    answer_adjudication: adj ? { verdict: adj.verdict, correct_answer: adj.correct_answer, rationale: adj.rationale, basis: adj.basis, edits: adj.edits } : null,
+    change_notes: notes,
     question: { stem: q.question, explanation: q.explanation, options, image_url: q.image_url },
     original: s ? { stem: s.question_text, explanation: s.explanation, options: origOptions.map((o) => ({ source_option_id: o.id, text: o.text, is_correct: o.is_correct })) } : null,
     review: {
@@ -115,10 +125,10 @@ const out = rows.map((q) => {
 writeFileSync(`${OUT}.json`, JSON.stringify({ exported_at: new Date().toISOString(), jobs: jobIds, count: out.length, questions: out }, null, 1));
 
 const csvCell = (v: unknown) => { const t = v == null ? '' : String(v); return /[",\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t; };
-const header = ['source_question_id', 'step', 'subject', 'topic', 'status', 'exam_tags', 'audit_score', 'stem_changed', 'explanation_changed', 'key_moved', 'requires_new_version', 'needs_clinician_review', 'audit_reason', 'studio_question_id'];
+const header = ['source_question_id', 'step', 'subject', 'topic', 'status', 'exam_tags', 'audit_score', 'stem_changed', 'explanation_changed', 'key_moved', 'requires_new_version', 'needs_clinician_review', 'answer_adjudication', 'change_notes', 'audit_reason', 'studio_question_id'];
 const lines = [header.join(','), ...out.map((r) => [
   r.source_question_id, r.step, r.subject, r.topic, r.status, r.exam_tags.join('; '), r.scores.audit,
-  r.changed.stem, r.changed.explanation, r.changed.key_moved, r.requires_new_version, r.needs_clinician_review.join(' | '), r.review.audit?.reason ?? '', r.studio_question_id,
+  r.changed.stem, r.changed.explanation, r.changed.key_moved, r.requires_new_version, r.needs_clinician_review.join(' | '), r.answer_adjudication ? `${r.answer_adjudication.correct_answer} — ${r.answer_adjudication.rationale} [${(r.answer_adjudication.basis || []).join('; ')}]` : '', r.change_notes.join(' | '), r.review.audit?.reason ?? '', r.studio_question_id,
 ].map(csvCell).join(','))];
 writeFileSync(`${OUT}.csv`, lines.join('\n'));
 
@@ -126,7 +136,7 @@ const n = (f: (r: Row) => boolean) => out.filter(f).length;
 console.log(JSON.stringify({
   exported: out.length, with_source_id: n((r) => Boolean(r.source_question_id)),
   status: out.reduce((m: Row, r) => { m[r.status] = (m[r.status] || 0) + 1; return m; }, {}),
-  tagged_other_exam: n((r) => Boolean(r.belongs_to_exam)), needs_clinician_review: n((r) => r.needs_clinician_review.length > 0),
+  tagged_other_exam: n((r) => Boolean(r.belongs_to_exam)), needs_clinician_review: n((r) => r.needs_clinician_review.length > 0), answer_adjudicated: n((r) => Boolean(r.answer_adjudication)),
   requires_new_version: n((r) => r.requires_new_version), five_options: n((r) => r.question.options.length === 5),
 }));
 console.log(`→ ${OUT}.json, ${OUT}.csv`);

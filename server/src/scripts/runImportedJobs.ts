@@ -15,6 +15,7 @@ import { reviewBatchForJob } from '../services/review/reviewPipeline.js';
 import { auditBatchForJob } from '../services/audit/auditPipeline.js';
 import { reviewModeOf } from '../services/review/reviewMode.js';
 import { balanceJobKeys } from '../services/review/keyBalance.js';
+import { adjudicateJobKeys } from '../services/review/keyAdjudication.js';
 
 const jobIds = process.argv.slice(2).filter((a) => /^[0-9a-f-]{36}$/.test(a));
 if (!jobIds.length) { console.log('usage: runImportedJobs.ts <jobId> [<jobId> …]'); process.exit(1); }
@@ -55,6 +56,14 @@ async function drive(id: string) {
     job = { ...job, status: await waitWhile(id, 'reviewing', tag) };
   }
   if (job.status === 'auditing') {
+    // Restructure jobs settle every real change of the keyed answer before audit scores it
+    // (keyAdjudication.ts), rather than leaving it for a clinician.
+    if (reviewModeOf(job.config).restructure) {
+      const { data: j } = await supabase.from('qb_jobs').select('course_id').eq('id', id).single();
+      const { data: c } = await supabase.from('qb_courses').select('name').eq('id', j?.course_id).single();
+      const r = await adjudicateJobKeys(id, String(c?.name ?? 'USMLE'), (s) => console.log(`${tag}${s}`));
+      console.log(`${tag} adjudication: ${JSON.stringify(r)}`);
+    }
     await auditBatchForJob(id);
     job = { ...job, status: await waitWhile(id, 'auditing', tag) };
   }

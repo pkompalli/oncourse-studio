@@ -38,8 +38,10 @@ interface TrailEntry {
   timestamp?: string;
 }
 
-const REPAIR_PHASES = new Set(['validator_fix', 'adversarial_fix']);
-const FAILED_PHASES = new Set(['validator_fix_failed', 'adversarial_fix_failed']);
+// key_adjudication (keyAdjudication.ts) is a repair like the others: audit verifies its edits, and an
+// adjudicated key the fixer could not carry through holds the item back.
+const REPAIR_PHASES = new Set(['validator_fix', 'adversarial_fix', 'key_adjudication']);
+const FAILED_PHASES = new Set(['validator_fix_failed', 'adversarial_fix_failed', 'key_adjudication_failed']);
 const IMAGE_PHASES = new Set(['validator_image_fix', 'adversarial_image_fix']);
 
 /** The fields a repair is recorded against, in the order a reader wants them. */
