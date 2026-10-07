@@ -47,7 +47,7 @@ const STEPS = [
 const ANTI_PATTERNS = [
   'Recall or definition one-liners ("Which amino acid must be supplemented in…", "Which of the following is the combined first-trimester screen…") — every item is a clinical or experimental vignette ending in one focused lead-in.',
   'Image-only fragments ("A 68-year-old man presents with alcohol withdrawal. ECG shows:") with no clinical context around the image.',
-  'A stem that states the finding the attached image is meant to show ("ECG shows an irregularly irregular rhythm with absent P waves") — the image carries the finding; describing it in words gives the answer away.',
+  'A stem that names what the attached image is there to test ("ECG shows atrial fibrillation", or the full pattern "irregularly irregular rhythm with absent P waves" when the rhythm is the answer) — that gives the answer away. Ordinary clinical description alongside an image is fine.',
   'Provenance tags from other exams or sources in the stem or options ("(AIIMS May 2018)", "NEET PG 2019", "[Dr. X image-based questions]") — USMLE items carry no source.',
   'Explanations that refer to options by letter ("option C is wrong because…") — letters change whenever options are shuffled; refer to each option by its text.',
   'Converting an existing vignette into a recall question to shorten it, or stripping clinical detail that a Step item would carry.',
@@ -61,7 +61,7 @@ const DISTRACTOR_RULES = [
 const VALIDATION_CHECKS = [
   'Stem is a vignette: age and sex, setting, presenting complaint with time course, relevant history, examination, and laboratory or imaging results where they bear on the answer; it ends with one focused lead-in such as "Which of the following is the most likely diagnosis?" or "Which of the following is the most appropriate next step in management?".',
   'The vignette contains every fact needed to choose ONE best answer and to rule out the strongest distractor (e.g. hemodynamic stability, timing from onset, pregnancy status, INR, prior treatment). Name the missing decisive fact when there is one.',
-  'If an image is attached, the stem and image agree, and the stem does not describe the finding the image shows.',
+  'If an image is attached, the stem and image agree, and the stem does not name the answer the image is there to test.',
   'If no image is attached, the stem does not refer to one; if an image is attached, answering actually depends on it.',
   'The explanation justifies the keyed answer and gives a specific reason each other option is wrong, naming each option by its text, never by letter.',
   'The keyed answer reflects current US practice (e.g. ACC/AHA, USPSTF, IDSA, ACOG, AAP, ATLS); flag management that is outdated or non-US.',

@@ -49,6 +49,24 @@ const BATCH_RE = /^CONCEPT OVERLAP:|\bbatch\b|\boverrepresent|\bover-represent|\
 
 export type ChangeRoute = 'fix' | 'image' | 'label' | 'batch';
 
+/**
+ * What a reviewer may ask of an item candidates have already answered — shared by the validator
+ * and the adversarial prompts so the two cannot drift. Each rule is a pilot finding with GPT 6.1
+ * Sol as reviewer, where Sonnet 5.5 had already behaved this way unprompted:
+ *   - Sol asked for weak distractors to be swapped for "a plausible competing" choice; the fixer
+ *     guard refused every one (7 of 60 items), since a recorded answer would name a choice its
+ *     candidate never saw.
+ *   - Where two answers were defensible Sol re-keyed (study design, placenta previa) and audit
+ *     rejected both; Sonnet added the deciding fact to the stem and kept the key.
+ *   - Sol asked for findings the image also shows to be cut from the stem, a rewrite that left the
+ *     item resting on image fidelity and failed audit.
+ */
+export const EXISTING_ITEM_RULES = `RULES FOR ITEMS ALREADY IN USE — candidates have answered these, and every recorded answer must keep meaning what it meant:
+• Options: correct an option's wording only if it is wrong, and keep it the SAME choice. Never ask for a distractor to be replaced by a different one, however weak it is; report a weak distractor in your findings without a change request.
+• Two defensible answers: make the keyed answer uniquely correct by adding the one fact the vignette is missing (hemodynamic status, timing, a decisive lab value, a stated preference). Ask for the key to change only when it is wrong under current US practice whatever reasonable detail is added, and give the evidence.
+• Images: a stem that also describes what the image shows is acceptable. Ask for a stem change only when its wording names the answer itself (the diagnosis, rhythm, organism or structure being tested) or contradicts the image.
+• Ask for the smallest change that removes the defect. Do not rewrite a sound vignette for style or length.`;
+
 export function isImageChange(c: string): boolean {
   return (IMAGE_WORD_RE.test(c) && IMAGE_WRONG_RE.test(c)) || (IMAGE_NOUN_RE.test(c) && IMAGE_REPLACE_RE.test(c));
 }

@@ -25,6 +25,7 @@ import { orCall, MODELS } from '../llm/openrouter.js';
 import type { ContentPart } from '../llm/openrouter.js';
 import { extractJsonArray, formatQuestionsForReviewWithImages } from './shared.js';
 import type { ReviewOptions } from './validator.js';
+import { EXISTING_ITEM_RULES } from './changeRouting.js';
 
 // ── Adversarial Prompt (V1 lines 5915-5966) ──
 
@@ -134,7 +135,8 @@ Flag only if one of these is true:
       • response_instructions accuracy: must describe ONLY the response types actually present (no "enter basis points" if there is no bps entry) and specify the accepted numeric/date format. Flag mismatches.
       • Numeric options must be ordered ascending by value. Flag out-of-order option sets.
 ${opts?.existingBank ? `8. These questions come from an existing bank, already answered by candidates, and are reviewed in arbitrary batches. Do NOT compare them with each other: leave concept_overlap empty.
-9. ANSWER KEY — leave answer_key_issue empty unless the keyed answer is wrong for the vignette as written. Never ask for a key to move, or for options to be reordered, added or removed, for balance.` : `8. CONCEPT DIVERSITY — look across the entire batch:
+9. ANSWER KEY — leave answer_key_issue empty unless the keyed answer is wrong for the vignette as written. Never ask for a key to move, or for options to be reordered, added or removed, for balance.
+${EXISTING_ITEM_RULES}` : `8. CONCEPT DIVERSITY — look across the entire batch:
    a. Flag questions that test the EXACT same concept/fact as another question in the batch (conceptual duplicate even if worded differently)
    b. Flag questions that are too similar in scenario/presentation (e.g., 3 questions built on the same fact pattern → suggest varying it)
 9. ANSWER KEY BALANCE — check correct answer distribution across the batch:
