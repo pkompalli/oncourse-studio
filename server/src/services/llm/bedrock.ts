@@ -1,11 +1,7 @@
 /**
  * AWS Bedrock LLM Client
  *
- * Dual-backend:
- *   - GPT 6.1 Sol → Bedrock Mantle /openai/v1/responses (via aws4fetch signing)
- *   - Claude Sonnet 5.5 → Bedrock Converse API (via @ai-sdk/amazon-bedrock)
- *
- * Supports Anthropic thinking/reasoning mode for review tasks.
+ * GPT 6.1 Sol is routed through Bedrock Mantle's OpenAI-compatible Responses API.
  */
 
 import { createAmazonBedrock } from '@ai-sdk/amazon-bedrock';
@@ -32,19 +28,15 @@ const bedrock = createAmazonBedrock({
 
 export const MODELS = {
   GENERATOR: process.env.BR_GENERATOR_MODEL || 'openai.gpt-6.1-sol',            // generation via Mantle
-  VALIDATOR: process.env.BR_VALIDATOR_MODEL || 'us.anthropic.claude-sonnet-5-5', // validator review (with thinking)
-  ADVERSARIAL: process.env.BR_ADVERSARIAL_MODEL || 'us.anthropic.claude-sonnet-5-5',
-  AUDITOR: process.env.BR_AUDITOR_MODEL || 'us.anthropic.claude-sonnet-5-5',
-  FIXER: process.env.BR_FIXER_MODEL || 'us.anthropic.claude-sonnet-5-5',        // apply fixes
+  VALIDATOR: process.env.BR_VALIDATOR_MODEL || 'openai.gpt-6.1-sol',
+  ADVERSARIAL: process.env.BR_ADVERSARIAL_MODEL || 'openai.gpt-6.1-sol',
+  AUDITOR: process.env.BR_AUDITOR_MODEL || 'openai.gpt-6.1-sol',
+  FIXER: process.env.BR_FIXER_MODEL || 'openai.gpt-6.1-sol',
   STRUCTURE: process.env.BR_STRUCTURE_MODEL || 'openai.gpt-6.1-sol',            // course structure via Mantle
 };
 
-// Which models should use thinking/reasoning (Claude only)
-const THINKING_MODELS = new Set([
-  MODELS.VALIDATOR,
-  MODELS.ADVERSARIAL,
-  MODELS.AUDITOR,
-]);
+// Kept as a compatibility set for the provider options; Sol reasoning is handled by Mantle.
+const THINKING_MODELS = new Set<string>();
 
 // Claude 5 reasons adaptively and shares the output budget with its answer. Left
 // uncapped on a large review batch it spends the WHOLE budget thinking and returns
