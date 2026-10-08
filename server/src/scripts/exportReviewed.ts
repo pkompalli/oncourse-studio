@@ -53,7 +53,12 @@ const out = rows.map((q) => {
   const s = src.get(tags.source_question_id);
   const trail = (q.audit_trail || []) as Row[];
   const last = (phase: string) => trail.filter((e) => e.phase === phase).pop();
-  const v = last('validator'), a = last('adversarial'), au = last('audit');
+  const v = last('validator'), a = last('adversarial');
+  // A reverted style repair (keyAdjudication.revertRegressions) restores the version the EARLIER audit
+  // approved; the last audit judged the discarded one.
+  const revertedAt = trail.map((e) => e.phase).lastIndexOf('audit_fix_reverted');
+  const fixAt = trail.map((e) => e.phase).lastIndexOf('audit_fix');
+  const au = revertedAt >= 0 && fixAt >= 0 ? trail.slice(0, fixAt).filter((e) => e.phase === 'audit').pop() : last('audit');
   const letters = Object.keys(q.options || {}).sort();
   const origOptions = (s?.options || []) as Row[];
   // Each final option is matched to the live option it came from by TEXT — options may have been
