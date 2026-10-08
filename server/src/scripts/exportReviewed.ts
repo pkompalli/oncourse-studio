@@ -85,8 +85,8 @@ const out = rows.map((q) => {
   // the one thing reported as unresolved.
   const unresolved: string[] = [];
   if (adjFailed && !adj) unresolved.push(`Answer adjudication could not be carried through: ${String(adjFailed.error ?? '').slice(0, 160)} (adjudicated answer: "${String(adjFailed.correct_answer ?? '').slice(0, 100)}")`);
-  else if (!adj && keyMoved) unresolved.push(`${keyNote} (not adjudicated)`);
-  else if (!adj && blindDisagreed) unresolved.push('An independent blind solve chose a different answer and was not adjudicated');
+  // A key whose text no longer matches a live option without an adjudication was judged the SAME answer,
+  // reworded (keyAdjudication.ts only adjudicates a different answer), so it is not unresolved.
   // The final audit's checklist (reviewChecklist.ts): what failed, and the standard gaps an approved
   // item still carries.
   const finalChecks = ((au?.checks || []) as Row[]).filter((c) => c.result === 'fail');

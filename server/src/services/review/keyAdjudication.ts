@@ -28,6 +28,19 @@ import { probeCues, probeIssues } from './cueProbe.js';
 
 type Row = Record<string, any>;
 
+/**
+ * The columns a repaired item is saved with. `content` must go with them: reviews and audit read the
+ * stem, options, key and explanation from content first (shared.ts formatOneQuestion), so saving only
+ * the legacy columns left audit judging the unrepaired text. In the sixth pilot all ten items whose
+ * post-audit fix "did not take" were this — the fixer had made the change in both places.
+ */
+function savedFields(x: Row): Row {
+  return {
+    question: x.question, options: x.options, correct_option: x.correct_option, explanation: x.explanation,
+    ...(x.content && typeof x.content === 'object' ? { content: x.content } : {}),
+  };
+}
+
 const keyOf = (q: Row): string | null => {
   const o = q?.options;
   const k = String(q?.correct_option ?? '');
@@ -154,7 +167,7 @@ export async function adjudicateJobKeys(jobId: string, courseName: string, log: 
       timestamp: new Date().toISOString(),
     });
     const { error: upErr } = await supabase.from('qb_questions').update({
-      ...(after !== q ? { question: after.question, options: after.options, correct_option: after.correct_option, explanation: after.explanation, image_url: after.image_url ?? null, is_image_question: Boolean(after.is_image_question) } : {}),
+      ...(after !== q ? { ...savedFields(after), image_url: after.image_url ?? null, is_image_question: Boolean(after.is_image_question) } : {}),
       audit_trail: trail,
     }).eq('id', q.id);
     if (upErr) { report.failed++; log(`  [Adjudicate] Q${q.question_number}: write failed ${upErr.message}`); continue; }
@@ -186,7 +199,7 @@ export async function sweepLengthCues(jobId: string, courseName: string, log: (s
     const snap = (x: Row) => ({ question: x.question, options: x.options, correct_option: x.correct_option, explanation: x.explanation });
     const trail = Array.isArray(q.audit_trail) ? [...q.audit_trail] : [];
     trail.push({ phase: 'cue_fix', changes_requested: asks, before: snap(q), after: snap(fix.question), changed_fields: changedFields(snap(q), snap(fix.question)), timestamp: new Date().toISOString() });
-    const { error } = await supabase.from('qb_questions').update({ question: fix.question.question, options: fix.question.options, correct_option: fix.question.correct_option, explanation: fix.question.explanation, audit_trail: trail }).eq('id', q.id);
+    const { error } = await supabase.from('qb_questions').update({ ...savedFields(fix.question), audit_trail: trail }).eq('id', q.id);
     if (error) { log(`  [CueSweep] Q${q.question_number}: write failed ${error.message}`); continue; }
     out.fixed++;
     log(`  [CueSweep] Q${q.question_number}: key no longer the longest`);
@@ -233,7 +246,7 @@ export async function repairAfterAudit(jobId: string, courseName: string, log: (
       timestamp: new Date().toISOString(),
     });
     const { error } = await supabase.from('qb_questions').update({
-      question: fix.question.question, options: fix.question.options, correct_option: fix.question.correct_option, explanation: fix.question.explanation,
+      ...savedFields(fix.question),
       ...(fix.imageRemoved ? { image_url: null, is_image_question: false } : {}),
       status: 'reviewed', audit_trail: trail,
     }).eq('id', q.id);
