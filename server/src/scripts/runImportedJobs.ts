@@ -41,6 +41,12 @@ async function waitWhile(id: string, status: string, tag: string) {
   }
 }
 
+/** Whether the job's answer positions have been balanced: its last post-audit step. */
+async function balanced(id: string): Promise<boolean> {
+  const { data } = await supabase.from('qb_questions').select('audit_trail').eq('job_id', id).is('replaced_by_id', null);
+  return (data || []).some((q) => ((q.audit_trail || []) as Array<{ phase?: string }>).some((e) => e?.phase === 'key_balance'));
+}
+
 async function drive(id: string) {
   const tag = `[${id.slice(0, 8)}]`;
   let job = await jobOf(id);
@@ -68,26 +74,27 @@ async function drive(id: string) {
     }
     await auditBatchForJob(id);
     job = { ...job, status: await waitWhile(id, 'auditing', tag) };
-    // One fix pass on what audit found, then a final audit of the repaired items only.
-    if (job.status === 'complete' && reviewModeOf(job.config).restructure) {
-      const { data: j } = await supabase.from('qb_jobs').select('course_id').eq('id', id).single();
-      const { data: c } = await supabase.from('qb_courses').select('name').eq('id', j?.course_id).single();
-      const r = await repairAfterAudit(id, String(c?.name ?? 'USMLE'), (s) => console.log(`${tag}${s}`));
-      console.log(`${tag} post-audit repair: ${JSON.stringify(r)}`);
-      if (r.repaired) {
-        const { error } = await supabase.from('qb_jobs').update({ status: 'auditing' }).eq('id', id);
-        if (error) throw new Error(error.message);
-        await auditBatchForJob(id);
-        job = { ...job, status: await waitWhile(id, 'auditing', tag) };
-        const reverted = await revertRegressions(id, (s) => console.log(`${tag}${s}`));
-        console.log(`${tag} style repairs reverted: ${reverted}`);
-      }
-    }
   }
-  // Restructure jobs get their answer positions balanced across the whole job once audit is done.
-  if (job.status === 'complete' && reviewModeOf(job.config).restructure) {
-    const r = await balanceJobKeys(id, true);
-    console.log(`${tag} key balance: moved ${r.moved}/${r.items} | before ${JSON.stringify(r.before)} → after ${JSON.stringify(r.after)} | longest run ${r.maxRunAfter} | numeric kept ${r.numericKept}, not five ${r.skippedNotFive}, letter refs in explanation ${r.letterRefs.length}`);
+  // Restructure jobs, once audited: one fix pass on what audit found, a final audit of the repaired
+  // items, then answer positions balanced across the job. Keyed on whether the job has been balanced,
+  // so a run stopped part-way through the fix pass resumes it: the items already repaired sit at
+  // 'reviewed' and go straight to the final audit, and the fix pass picks up the rest.
+  if (job.status === 'complete' && reviewModeOf(job.config).restructure && !(await balanced(id))) {
+    const { data: j } = await supabase.from('qb_jobs').select('course_id').eq('id', id).single();
+    const { data: c } = await supabase.from('qb_courses').select('name').eq('id', j?.course_id).single();
+    const r = await repairAfterAudit(id, String(c?.name ?? 'USMLE'), (s) => console.log(`${tag}${s}`));
+    console.log(`${tag} post-audit repair: ${JSON.stringify(r)}`);
+    const { count } = await supabase.from('qb_questions').select('*', { count: 'exact', head: true }).eq('job_id', id).eq('status', 'reviewed').is('replaced_by_id', null);
+    if (count) {
+      const { error } = await supabase.from('qb_jobs').update({ status: 'auditing' }).eq('id', id);
+      if (error) throw new Error(error.message);
+      await auditBatchForJob(id);
+      job = { ...job, status: await waitWhile(id, 'auditing', tag) };
+      const reverted = await revertRegressions(id, (s) => console.log(`${tag}${s}`));
+      console.log(`${tag} style repairs reverted: ${reverted}`);
+    }
+    const b = await balanceJobKeys(id, true);
+    console.log(`${tag} key balance: moved ${b.moved}/${b.items} | before ${JSON.stringify(b.before)} → after ${JSON.stringify(b.after)} | longest run ${b.maxRunAfter} | numeric kept ${b.numericKept}, not five ${b.skippedNotFive}, letter refs in explanation ${b.letterRefs.length}`);
   }
   const { data: qs } = await supabase.from('qb_questions').select('status').eq('job_id', id).is('replaced_by_id', null);
   const tally = (qs || []).reduce<Record<string, number>>((m, q) => { m[q.status] = (m[q.status] || 0) + 1; return m; }, {});

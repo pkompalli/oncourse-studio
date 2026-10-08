@@ -223,13 +223,15 @@ export async function repairAfterAudit(jobId: string, courseName: string, log: (
   const rows = await fetchAllRows<Row>((from, to) => supabase.from('qb_questions').select('*')
     .eq('job_id', jobId).in('status', ['flagged', 'approved']).is('replaced_by_id', null).order('question_number').range(from, to));
   const out = { flagged: 0, polished: 0, repaired: 0, failed: 0 };
-  for (const q of rows) {
-    if ((q.tags as Row | null)?.belongs_to_exam) continue;
+  // In parallel, under the same LLM_CONCURRENCY as review and audit: one at a time, the fix pass
+  // took about 35 minutes for 19 of 50 Step 1 items in the 150-question batch.
+  const work = async (q: Row): Promise<void> => {
+    if ((q.tags as Row | null)?.belongs_to_exam) return;
     const trail = Array.isArray(q.audit_trail) ? [...q.audit_trail] : [];
     const audit = [...trail].reverse().find((e: Row) => e?.phase === 'audit');
     const checks = parseChecks(audit);
     const wasApproved = q.status === 'approved';
-    if (wasApproved && !(checks || []).some((c) => c.result === 'fail')) continue;
+    if (wasApproved && !(checks || []).some((c) => c.result === 'fail')) return;
     if (wasApproved) out.polished++; else out.flagged++;
     const [probe] = await probeCues([q]);
     const asks = [
@@ -237,16 +239,16 @@ export async function repairAfterAudit(jobId: string, courseName: string, log: (
       ...cueIssues(q),
       ...probeIssues(q, probe),
     ];
-    if (!asks.length) continue;
+    if (!asks.length) return;
     const fix = await fixQuestion(q, asks, courseName, { existingBank: true, restructure: true });
     const snap = (x: Row) => ({ question: x.question, options: x.options, correct_option: x.correct_option, explanation: x.explanation });
     if (!fix.fixed || !fix.question) {
       out.failed++;
-      if (wasApproved) continue;
+      if (wasApproved) return;
       trail.push({ phase: 'audit_fix_failed', changes_requested: asks, error: fix.error || 'no usable question', timestamp: new Date().toISOString() });
       await supabase.from('qb_questions').update({ audit_trail: trail }).eq('id', q.id);
       log(`  [AuditFix] Q${q.question_number}: fix failed (${fix.error ?? 'no question'})`);
-      continue;
+      return;
     }
     trail.push({
       phase: 'audit_fix', changes_requested: asks, changes_applied: fix.changesApplied || [],
@@ -260,10 +262,14 @@ export async function repairAfterAudit(jobId: string, courseName: string, log: (
       ...(fix.imageRemoved ? { image_url: null, is_image_question: false } : {}),
       status: 'reviewed', audit_trail: trail,
     }).eq('id', q.id);
-    if (error) { out.failed++; log(`  [AuditFix] Q${q.question_number}: write failed ${error.message}`); continue; }
+    if (error) { out.failed++; log(`  [AuditFix] Q${q.question_number}: write failed ${error.message}`); return; }
     out.repaired++;
     log(`  [AuditFix] Q${q.question_number}: ${asks.length} finding(s) ${wasApproved ? 'polished' : 'repaired'}, back to audit`);
-  }
+  
+  };
+  const queue = [...rows];
+  const lanes = Math.max(1, Number(process.env.LLM_CONCURRENCY) || 8);
+  await Promise.all(Array.from({ length: lanes }, async () => { for (let q = queue.shift(); q; q = queue.shift()) await work(q); }));
   return out;
 }
 
