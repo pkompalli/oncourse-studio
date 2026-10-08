@@ -120,7 +120,11 @@ export function routeChanges(changes: string[], extraImageFeedback: string[], ex
     // glomerular image" names an image but asks for text, and labelled a conflict it cost a lupus
     // nephritis item its biopsy image in the fourth pilot.
     const PICTURE_WRONG = /\b(contradict\w*|conflict\w*|inconsisten\w*|mismatch\w*|opposite|unreadable|illegible|wrong|incorrect|replace|regenerate|swap)\b|\b(does not|doesn't|do not|fails? to|cannot be) (show|match|depict|agree|be read|be seen)/i;
-    const aboutPicture = (c: string) => IMAGE_WORD_RE.test(c) && PICTURE_WRONG.test(c) && !/^(DISTRACTOR|CUE|FORMAT|EXPLANATION|DIFFICULTY):/.test(c);
+    // A checklist request names its check ("[EXPLANATION_COMPLETE] Replace the explanation…"); only the
+    // image check is about the picture. An explanation fix that mentioned the "tracing" and said
+    // "replace" cost a fetal-monitoring item its CTG in the 150-question batch.
+    const otherCheck = /^\[(?!IMAGE_CONSISTENT\])[A-Z_]+\]/;
+    const aboutPicture = (c: string) => IMAGE_WORD_RE.test(c) && PICTURE_WRONG.test(c) && !otherCheck.test(c) && !/^(DISTRACTOR|CUE|FORMAT|EXPLANATION|DIFFICULTY):/.test(c);
     out.fix = [...out.image.map((c) => (/^IMAGE (CONFLICT|NOT LOADING|MISSING)/.test(c) || !aboutPicture(c) ? c : `IMAGE CONFLICT: ${c}`)), ...out.fix];
     out.image = [];
     return out;
