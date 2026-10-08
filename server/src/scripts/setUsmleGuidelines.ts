@@ -81,7 +81,7 @@ const CONTENT_RULES = [
   'Exactly five options, labelled A–E, with one best answer. An item with fewer or more is brought to five.',
   'Nothing cues the key: it is never the longest option (in characters or words) nor the most qualified, it is not the only option with a second clause, parenthesis, number or justification, it does not alone repeat a distinctive word from the stem, it matches the lead-in grammatically exactly as every other option does, absolute terms (always, never, only) do not appear only in distractors, and no option is "all of the above" or "none of the above".',
   'Answer positions are balanced across the bank after review (each letter about 20%, never twice running), so explanations name options by text and never by letter.',
-  'Change which option is correct ONLY when the keyed answer is factually wrong; state the evidence, and expect the change to go to clinician review.',
+  'Change which option is correct ONLY when the keyed answer is factually wrong; name the correct option and its guideline basis. There is no clinician or expert review after this pipeline: never defer a decision to one.',
 ];
 
 // The NBME vignette shape for each Step, read by the validator (validation_checks lead the list)

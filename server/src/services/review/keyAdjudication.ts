@@ -23,6 +23,8 @@ import { orCall, MODELS } from '../llm/openrouter.js';
 import { fixQuestion, sameAnswer, optionIdentity, OPTION_IDENTITY_MIN } from './fixer.js';
 import { optionTexts, keyLengthCue, cueIssues } from './reviewMode.js';
 import { changedFields } from '../audit/fixHistory.js';
+import { parseChecks, checkChanges } from './reviewChecklist.js';
+import { probeCues, probeIssues } from './cueProbe.js';
 
 type Row = Record<string, any>;
 
@@ -188,6 +190,56 @@ export async function sweepLengthCues(jobId: string, courseName: string, log: (s
     if (error) { log(`  [CueSweep] Q${q.question_number}: write failed ${error.message}`); continue; }
     out.fixed++;
     log(`  [CueSweep] Q${q.question_number}: key no longer the longest`);
+  }
+  return out;
+}
+
+/**
+ * One fix pass after audit, aimed at exactly what audit found: each flagged item's failed checks
+ * (reviewChecklist.ts), its remaining length or option-form cues, and any distractor or key the
+ * options-only probe still catches. The repaired items go back to 'reviewed' for a second audit,
+ * whose verdict is final. Audit used to be the last word, so whatever it found was never repaired;
+ * in the fifth pilot that was five of seven flags. Items tagged for another exam are not repaired.
+ */
+export async function repairAfterAudit(jobId: string, courseName: string, log: (s: string) => void = console.log): Promise<{ flagged: number; repaired: number; failed: number }> {
+  const rows = await fetchAllRows<Row>((from, to) => supabase.from('qb_questions').select('*')
+    .eq('job_id', jobId).eq('status', 'flagged').is('replaced_by_id', null).order('question_number').range(from, to));
+  const out = { flagged: rows.length, repaired: 0, failed: 0 };
+  for (const q of rows) {
+    if ((q.tags as Row | null)?.belongs_to_exam) continue;
+    const trail = Array.isArray(q.audit_trail) ? [...q.audit_trail] : [];
+    const audit = [...trail].reverse().find((e: Row) => e?.phase === 'audit');
+    const checks = parseChecks(audit);
+    const [probe] = await probeCues([q]);
+    const asks = [
+      ...(checks ? checkChanges(checks, Boolean(q.image_url)) : ((audit?.issues || []) as string[])),
+      ...cueIssues(q),
+      ...probeIssues(q, probe),
+    ];
+    if (!asks.length) continue;
+    const fix = await fixQuestion(q, asks, courseName, { existingBank: true, restructure: true });
+    const snap = (x: Row) => ({ question: x.question, options: x.options, correct_option: x.correct_option, explanation: x.explanation });
+    if (!fix.fixed || !fix.question) {
+      out.failed++;
+      trail.push({ phase: 'audit_fix_failed', changes_requested: asks, error: fix.error || 'no usable question', timestamp: new Date().toISOString() });
+      await supabase.from('qb_questions').update({ audit_trail: trail }).eq('id', q.id);
+      log(`  [AuditFix] Q${q.question_number}: fix failed (${fix.error ?? 'no question'})`);
+      continue;
+    }
+    trail.push({
+      phase: 'audit_fix', changes_requested: asks, changes_applied: fix.changesApplied || [],
+      before: snap(q), after: snap(fix.question), changed_fields: changedFields(snap(q), snap(fix.question)),
+      ...(fix.imageRemoved ? { image_removed: q.image_url ?? true } : {}),
+      timestamp: new Date().toISOString(),
+    });
+    const { error } = await supabase.from('qb_questions').update({
+      question: fix.question.question, options: fix.question.options, correct_option: fix.question.correct_option, explanation: fix.question.explanation,
+      ...(fix.imageRemoved ? { image_url: null, is_image_question: false } : {}),
+      status: 'reviewed', audit_trail: trail,
+    }).eq('id', q.id);
+    if (error) { out.failed++; log(`  [AuditFix] Q${q.question_number}: write failed ${error.message}`); continue; }
+    out.repaired++;
+    log(`  [AuditFix] Q${q.question_number}: ${asks.length} finding(s) repaired, back to audit`);
   }
   return out;
 }

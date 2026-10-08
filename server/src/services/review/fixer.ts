@@ -6,6 +6,7 @@
 import { orCall, MODELS, type ContentPart } from '../llm/openrouter.js';
 import { fetchImageAsDataUrl } from './shared.js';
 import { keyLengthCue, describeLengthCue, STEM_REFS_IMAGE } from './reviewMode.js';
+import { CHECKLIST_FOR_FIXER } from './reviewChecklist.js';
 
 export interface FixResult {
   fixed: boolean;
@@ -255,8 +256,18 @@ export async function fixQuestion(
   courseName: string,
   opts?: { existingBank?: boolean; restructure?: boolean }
 ): Promise<FixResult> {
-  const first = await fixOnce(question, changesRequired, courseName, opts);
+  // Restructure mode: any fix may reword the keyed option (asked to "add nintedanib to the current
+  // treatment", the word-overlap guard refused "Initiate nintedanib or pirfenidone" -> "Add nintedanib…"
+  // in the fifth pilot). Unless a change asks for a different key, sameAnswer() must agree it is the
+  // same answer.
+  const first = await fixOnce(question, changesRequired, courseName, opts?.restructure ? { ...opts, allowKeyReword: true } : opts);
   if (!opts?.restructure || !first.fixed || !first.question) return first;
+  const keyAsked = /\b(answer key|correct answer|keyed answer|key\b|correct option|image conflict|KEY_CORRECT|ONE_BEST_ANSWER)/i.test(changesRequired.join(' '));
+  const k0 = keyText(question), k1 = keyText(first.question);
+  if (!keyAsked && k0 !== null && k1 !== null && optionIdentity(k0, k1) < OPTION_IDENTITY_MIN && !(await sameAnswer(String(question.question ?? ''), k0, k1))) {
+    console.error(`  [Fixer] REFUSED the fix — the keyed option became a different answer ("${k0.slice(0, 50)}" -> "${k1.slice(0, 50)}") without a request to change the key`);
+    return { fixed: false, error: `correct answer became a different choice ("${k0.slice(0, 50)}" -> "${k1.slice(0, 50)}") without a request to change the key` };
+  }
   let best = first;
   for (let round = 1; round <= 2; round++) {
     const cue = keyLengthCue(best.question!);
@@ -347,7 +358,9 @@ CRITICAL RULES:
 • NEVER change the question's STRUCTURE unless a required change explicitly asks for it. Keep the same number of sub_questions, in the same order, each with the SAME format_type. A set with one sub-question keeps exactly one; do not "complete" it by adding more. Fixing a missing field means filling that field in place, not rebuilding the question around it.
 ${opts?.restructure
   ? `• The question must end with EXACTLY FIVE options, keyed A–E in the "options" object, with "correct_option" naming the keyed letter. Add, replace, reword or reorder options as the changes require; every option must be the same kind of thing, in parallel grammar, of similar length and specificity, and the keyed option must not stand out (not the longest, not the most qualified, no stem word only it repeats). Keep the correct answer the same choice unless a change says the key is wrong.
-• Explanations name each option by its text, never by letter: options are reordered afterwards.`
+• Explanations name each option by its text, never by letter: options are reordered afterwards.
+• ${CHECKLIST_FOR_FIXER.replace(/\n/g, '\n  ')}
+• There is no human review after you: never write that anything needs clinician, expert or further review. Where a change cannot be made, mark it "❌" and say why.`
   : '• Keep every OPTION, in the same order, under the same letter, unless a change explicitly asks to add, remove, replace or reorder options. A wrong or weak option is fixed by editing its wording in place. Change which option is correct only when a change says the key is wrong.'}
 ${opts?.restructure
   ? '• You cannot change an image, but you may align the text with it or remove it as the IMAGE section below sets out.'

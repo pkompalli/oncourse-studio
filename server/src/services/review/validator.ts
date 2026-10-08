@@ -12,6 +12,7 @@ import { consistencyIssues, isBlockingConsistency } from '../generation/consiste
 import { EXISTING_ITEM_RULES } from './changeRouting.js';
 import { RESTRUCTURE_RULES, cueIssues, imageIssues } from './reviewMode.js';
 import { probeCues, probeIssues } from './cueProbe.js';
+import { CHECKLIST_PROMPT, parseChecks, checkChanges } from './reviewChecklist.js';
 
 /**
  * Per-format rules to include. High enough that no course's real spec is truncated — the
@@ -317,7 +318,9 @@ For EACH question ask:
 ${opts?.existingBank ? `9. ANSWER KEY — these questions come from an existing bank and are reviewed in arbitrary batches, so the letters in this batch say nothing about the bank's balance:
    a. Do NOT flag answer-key distribution or runs, and do NOT compare questions with each other.
    b. Ask for the keyed answer to change ONLY when it is factually wrong for the vignette as written; give the evidence in answer_key_issue. Never ask for it to move for balance.
-${opts?.restructure ? RESTRUCTURE_RULES : EXISTING_ITEM_RULES}` : `9. ANSWER KEY DIVERSITY — check the correct answer keys across the batch:
+${opts?.restructure ? `${RESTRUCTURE_RULES}
+
+${CHECKLIST_PROMPT}` : EXISTING_ITEM_RULES}` : `9. ANSWER KEY DIVERSITY — check the correct answer keys across the batch:
    a. Note the correct answer letter (A/B/C/D/E) for each question.
    b. Apply the course's own answer-key rule where one is given above. Where none is, flag if more than 40% of questions in this batch share the same key. Flag the over-represented ones and request the key be changed, with the content adjustment that makes the new key correct — never relabel an option without moving the content.
    c. Flag any run of consecutive questions in this batch sharing one key that exceeds the course's stated run limit.
@@ -487,14 +490,26 @@ export async function runValidatorBatch(
       Promise.all(questions.map((q) => (q.image_url ? imageLoads(q.image_url as string) : Promise.resolve(null)))),
     ]);
     for (let i = 0; i < questions.length; i++) {
-      const cues = [...imageIssues(questions[i], loads[i]), ...cueIssues(questions[i]), ...probeIssues(questions[i], probes[i])];
-      if (!cues.length) continue;
       const r = results.find((x) => (x.question_number as number) === i + 1) || results[i];
       if (!r) continue;
-      r.overall_accuracy_score = Math.min((r.overall_accuracy_score as number) ?? 6, 6);
-      r.needs_revision = true;
+      // The request list is rebuilt from the checklist (reviewChecklist.ts): one request per failed
+      // check, plus the deterministic gate's "Fix:" entries. Free-form requests are dropped, so every
+      // run asks the same questions of every item. A reply without checks keeps its own list.
+      const checks = parseChecks(r);
+      if (checks) {
+        r.checks = checks;
+        const gate = ((r.changes_required as string[]) || []).filter((c) => /^Fix: /.test(c));
+        r.changes_required = [...checkChanges(checks, Boolean(questions[i].image_url)), ...gate];
+      } else {
+        console.warn(`  [Validator] Q${i + 1}: no checklist in the reply; keeping its free-form requests`);
+      }
+      const cues = [...imageIssues(questions[i], loads[i]), ...cueIssues(questions[i]), ...probeIssues(questions[i], probes[i])];
       const have = new Set((r.changes_required as string[]) || []);
       r.changes_required = [...have, ...cues.filter((c) => !have.has(c))];
+      if ((r.changes_required as string[]).length) {
+        r.overall_accuracy_score = Math.min((r.overall_accuracy_score as number) ?? 6, 6);
+        r.needs_revision = true;
+      }
     }
   }
 

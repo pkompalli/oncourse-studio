@@ -13,6 +13,7 @@ import { bankMixForJob } from '../generation/bankMix.js';
 import { fixHistoryBlock, unappliedChanges } from './fixHistory.js';
 import { reviewModeOf, optionTexts, keyLengthCue, describeLengthCue } from '../review/reviewMode.js';
 import { probeCues, keySpotted, implausibleDistractors, type ProbeResult } from '../review/cueProbe.js';
+import { CHECKLIST_PROMPT, parseChecks, failedMust, failedStandard } from '../review/reviewChecklist.js';
 import { coherenceIssues, partitionIssues } from '../generation/coherence.js';
 import { orCall, MODELS } from '../llm/openrouter.js';
 import type { ContentPart } from '../llm/openrouter.js';
@@ -233,14 +234,18 @@ export async function runAuditBatch(questions: Record<string, unknown>[], opts: 
   // — reviewPipeline writes it for every repair — and audit never read it, so it re-scored each
   // question from scratch and a change that was requested and silently not applied left a
   // question that reads well, scores nine, and still has the defect.
-  const histories = questions
+  // Restructure mode audits the item as it now stands against the review checklist
+  // (reviewChecklist.ts) instead of verifying each earlier request: open-ended requests verified
+  // literally were most of the run-to-run variation in the fifth pilot.
+  const histories = opts.restructure ? [] : questions
     .map((q, i) => fixHistoryBlock(q, `Q${i + 1}`))
     .filter((h): h is string => Boolean(h));
   const historyBlock = histories.length
     ? `\nREPAIR HISTORY — what earlier stages asked for and what the fixer did:\n${histories.join('\n')}\n`
     : '';
 
-  const prompt = getAuditPrompt(histories.length > 0, Boolean(opts.existingBank), Boolean(opts.restructure));
+  const prompt = getAuditPrompt(histories.length > 0, Boolean(opts.existingBank), Boolean(opts.restructure))
+    + (opts.restructure ? `\n\n${CHECKLIST_PROMPT}\nJudge each check on the item EXACTLY as shown — the final version. "changes_required" is not needed here; give each failing check its "fix".` : '');
   const content = await formatQuestionsForReviewWithImages(questions);
 
   let userMessage: string | ContentPart[];
@@ -402,7 +407,9 @@ async function runAuditPipeline(jobId: string): Promise<void> {
         //
         // The auditor's per-change verdicts are the second source, covering the case the record
         // cannot see: a change that WAS applied and applied wrongly.
-        const unapplied = unappliedChanges(q);
+        // Restructure mode decides by the checklist below, not by verifying earlier requests.
+        const checks = restructure ? parseChecks(result) : null;
+        const unapplied = checks ? [] : unappliedChanges(q);
         const verdicts = (result?.repair_verification as Array<Record<string, unknown>>) || [];
         const badVerdicts = verdicts.filter((v) =>
           ['not_applied', 'applied_incorrectly'].includes(String(v?.verdict || '').toLowerCase()));
@@ -488,7 +495,21 @@ async function runAuditPipeline(jobId: string): Promise<void> {
             result.reason = `Not exam standard: ${formatBlock.slice(0, 200)}`;
           }
         }
-        const status = auditScore >= 7 && cohBlocking.length === 0 && !otherExam && !formatBlock ? 'approved' : 'flagged';
+        // Restructure mode: the MUST checks and the mechanical gates decide; a STANDARD check is listed
+        // but does not hold the item back, and the holistic score is kept for information only.
+        let mustBlock = false;
+        if (checks) {
+          const must = failedMust(checks), std = failedStandard(checks);
+          const gates = ((result.issues as string[]) || []).filter((x) => /^(NOT COMPLIANT|BELONGS TO)/.test(x));
+          result.issues = [
+            ...must.map((c) => `MUST — [${c.id}] ${c.evidence}`),
+            ...std.map((c) => `STANDARD — [${c.id}] ${c.evidence}`),
+            ...gates,
+          ];
+          mustBlock = must.length > 0 || gradabilityIssues(q).length > 0;
+          if (!otherExam && !formatBlock) result.reason = must.length ? `Fails ${must.map((c) => c.id).join(', ')}: ${must[0].evidence}`.slice(0, 300) : `All required checks pass${std.length ? `; standard gaps: ${std.map((c) => c.id).join(', ')}` : ''}`;
+        }
+        const status = (checks ? !mustBlock : auditScore >= 7) && cohBlocking.length === 0 && !otherExam && !formatBlock ? 'approved' : 'flagged';
         if (auditScore >= 7 && cohBlocking.length) {
           console.log(`    [audit] Q${qStart + i} scored ${auditScore} but flagged: ${cohBlocking[0].slice(0, 90)}`);
         }
@@ -497,6 +518,7 @@ async function runAuditPipeline(jobId: string): Promise<void> {
         trail.push({
           phase: 'audit',
           score: auditScore,
+          ...(checks ? { checks } : {}),
           reason: (result.reason as string) || '',
           issues: (result.issues as string[]) || [],
           timestamp: new Date().toISOString(),

@@ -27,6 +27,7 @@ import { extractJsonArray, formatQuestionsForReviewWithImages } from './shared.j
 import type { ReviewOptions } from './validator.js';
 import { EXISTING_ITEM_RULES } from './changeRouting.js';
 import { RESTRUCTURE_RULES } from './reviewMode.js';
+import { CHECKLIST_PROMPT, parseChecks, checkChanges } from './reviewChecklist.js';
 
 // ── Adversarial Prompt (V1 lines 5915-5966) ──
 
@@ -137,7 +138,10 @@ Flag only if one of these is true:
       • Numeric options must be ordered ascending by value. Flag out-of-order option sets.
 ${opts?.existingBank ? `8. These questions come from an existing bank, already answered by candidates, and are reviewed in arbitrary batches. Do NOT compare them with each other: leave concept_overlap empty.
 9. ANSWER KEY — leave answer_key_issue empty unless the keyed answer is wrong for the vignette as written. Never ask for a key to move for balance.
-${opts?.restructure ? RESTRUCTURE_RULES : EXISTING_ITEM_RULES}` : `8. CONCEPT DIVERSITY — look across the entire batch:
+${opts?.restructure ? `${RESTRUCTURE_RULES}
+
+${CHECKLIST_PROMPT}
+Your blind attempt above is your evidence for KEY_CORRECT and ONE_BEST_ANSWER.` : EXISTING_ITEM_RULES}` : `8. CONCEPT DIVERSITY — look across the entire batch:
    a. Flag questions that test the EXACT same concept/fact as another question in the batch (conceptual duplicate even if worded differently)
    b. Flag questions that are too similar in scenario/presentation (e.g., 3 questions built on the same fact pattern → suggest varying it)
 9. ANSWER KEY BALANCE — check correct answer distribution across the batch:
@@ -409,6 +413,19 @@ export async function runAdversarialBatch(
     } catch (e) {
       console.warn(`  [Adversarial] Retry LLM call failed: ${e instanceof Error ? e.message : e}`);
     }
+  }
+
+  // Restructure mode: the request list is the failed checks only (reviewChecklist.ts); the blind
+  // attempt's findings are added below as before, and answer adjudication settles them.
+  if (opts?.restructure) {
+    questions.forEach((q, i) => {
+      const r = results.find((x) => (x.question_number as number) === i + 1) || results[i];
+      const checks = r ? parseChecks(r) : null;
+      if (!r || !checks) return;
+      r.checks = checks;
+      r.changes_required = checkChanges(checks, Boolean(q.image_url));
+      if ((r.changes_required as string[]).length) r.adversarial_score = Math.min((r.adversarial_score as number) ?? 6, 6);
+    });
   }
 
   // HARD GATE (deterministic, regardless of the phase-2 score):

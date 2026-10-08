@@ -272,7 +272,9 @@ async function runValidatorPhase(
       const explanationIssues = (result.explanation_issues as string[]) || [];
       const hotspotIssues = (result.hotspot_issues as string[]) || [];
       const answerKeyIssue = (result.answer_key_issue as string) || '';
-      const changes = [
+      // Restructure mode reviews against the checklist, so its request list is already complete; the
+      // free-form issue arrays are not added on top (reviewChecklist.ts).
+      const changes = restructure && result.checks ? ((result.changes_required as string[]) || []) : [
         ...((result.changes_required as string[]) || []),
         ...formatIssues.map((fi: string) => `FORMAT: ${fi}`),
         ...caseStudyIssues.map((ci: string) => `CASE_STUDY: ${ci}`),
@@ -291,6 +293,7 @@ async function runValidatorPhase(
         phase: 'validator', score,
         changes: changes.length > 0 ? changes : null,
         ...notSent,
+        ...(result.checks ? { checks: result.checks } : {}),
         ...(otherExam ? { belongs_to_other_exam: otherExam } : {}),
         summary: (result.summary as string) || '',
         timestamp: new Date().toISOString(),
@@ -540,7 +543,7 @@ async function runAdversarialPhase(
       const answerKeyIssue = (result.answer_key_issue as string) || '';
       const caseStudyIssues = (result.case_study_issues as string[]) || [];
       const explanationIssues = (result.explanation_contradictions as string[]) || [];
-      const changes = [
+      const changes = restructure && result.checks ? ((result.changes_required as string[]) || []) : [
         ...((result.changes_required as string[]) || []),
         ...(conceptOverlap ? [`CONCEPT OVERLAP: ${conceptOverlap}`] : []),
         ...(answerKeyIssue ? [`ANSWER KEY: ${answerKeyIssue}`] : []),
@@ -556,6 +559,7 @@ async function runAdversarialPhase(
         phase: 'adversarial', score,
         changes: changes.length > 0 ? changes : null,
         ...notSent,
+        ...(result.checks ? { checks: result.checks } : {}),
         summary: (result.summary as string) || '',
         timestamp: new Date().toISOString(),
       });
