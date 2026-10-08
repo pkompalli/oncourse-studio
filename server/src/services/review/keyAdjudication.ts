@@ -214,15 +214,23 @@ export async function sweepLengthCues(jobId: string, courseName: string, log: (s
  * whose verdict is final. Audit used to be the last word, so whatever it found was never repaired;
  * in the fifth pilot that was five of seven flags. Items tagged for another exam are not repaired.
  */
-export async function repairAfterAudit(jobId: string, courseName: string, log: (s: string) => void = console.log): Promise<{ flagged: number; repaired: number; failed: number }> {
+//
+// Approved items with a STANDARD gap get the same pass, so the style checks raise quality rather than
+// only being listed: the seventh pilot approved 58 of 60 but lost the blind quality comparison with the
+// fourth 14-34, on parallel options and explanations. If the final audit then fails such an item on a
+// MUST check, revertRegressions() restores its approved version, so a style repair cannot cost an approval.
+export async function repairAfterAudit(jobId: string, courseName: string, log: (s: string) => void = console.log): Promise<{ flagged: number; polished: number; repaired: number; failed: number }> {
   const rows = await fetchAllRows<Row>((from, to) => supabase.from('qb_questions').select('*')
-    .eq('job_id', jobId).eq('status', 'flagged').is('replaced_by_id', null).order('question_number').range(from, to));
-  const out = { flagged: rows.length, repaired: 0, failed: 0 };
+    .eq('job_id', jobId).in('status', ['flagged', 'approved']).is('replaced_by_id', null).order('question_number').range(from, to));
+  const out = { flagged: 0, polished: 0, repaired: 0, failed: 0 };
   for (const q of rows) {
     if ((q.tags as Row | null)?.belongs_to_exam) continue;
     const trail = Array.isArray(q.audit_trail) ? [...q.audit_trail] : [];
     const audit = [...trail].reverse().find((e: Row) => e?.phase === 'audit');
     const checks = parseChecks(audit);
+    const wasApproved = q.status === 'approved';
+    if (wasApproved && !(checks || []).some((c) => c.result === 'fail')) continue;
+    if (wasApproved) out.polished++; else out.flagged++;
     const [probe] = await probeCues([q]);
     const asks = [
       ...(checks ? checkChanges(checks, Boolean(q.image_url)) : ((audit?.issues || []) as string[])),
@@ -234,6 +242,7 @@ export async function repairAfterAudit(jobId: string, courseName: string, log: (
     const snap = (x: Row) => ({ question: x.question, options: x.options, correct_option: x.correct_option, explanation: x.explanation });
     if (!fix.fixed || !fix.question) {
       out.failed++;
+      if (wasApproved) continue;
       trail.push({ phase: 'audit_fix_failed', changes_requested: asks, error: fix.error || 'no usable question', timestamp: new Date().toISOString() });
       await supabase.from('qb_questions').update({ audit_trail: trail }).eq('id', q.id);
       log(`  [AuditFix] Q${q.question_number}: fix failed (${fix.error ?? 'no question'})`);
@@ -242,6 +251,7 @@ export async function repairAfterAudit(jobId: string, courseName: string, log: (
     trail.push({
       phase: 'audit_fix', changes_requested: asks, changes_applied: fix.changesApplied || [],
       before: snap(q), after: snap(fix.question), changed_fields: changedFields(snap(q), snap(fix.question)),
+      ...(wasApproved ? { was_approved: true, restore: { ...savedFields(q), image_url: q.image_url ?? null, is_image_question: Boolean(q.is_image_question), quality_score: q.quality_score } } : {}),
       ...(fix.imageRemoved ? { image_removed: q.image_url ?? true } : {}),
       timestamp: new Date().toISOString(),
     });
@@ -252,7 +262,25 @@ export async function repairAfterAudit(jobId: string, courseName: string, log: (
     }).eq('id', q.id);
     if (error) { out.failed++; log(`  [AuditFix] Q${q.question_number}: write failed ${error.message}`); continue; }
     out.repaired++;
-    log(`  [AuditFix] Q${q.question_number}: ${asks.length} finding(s) repaired, back to audit`);
+    log(`  [AuditFix] Q${q.question_number}: ${asks.length} finding(s) ${wasApproved ? 'polished' : 'repaired'}, back to audit`);
   }
   return out;
+}
+
+/** After the final audit: an item that was approved before its style repair and is now flagged gets its approved version back. */
+export async function revertRegressions(jobId: string, log: (s: string) => void = console.log): Promise<number> {
+  const rows = await fetchAllRows<Row>((from, to) => supabase.from('qb_questions').select('id, question_number, audit_trail')
+    .eq('job_id', jobId).eq('status', 'flagged').is('replaced_by_id', null).range(from, to));
+  let n = 0;
+  for (const q of rows) {
+    const trail = Array.isArray(q.audit_trail) ? [...q.audit_trail] : [];
+    const fix = [...trail].reverse().find((e: Row) => e?.phase === 'audit_fix');
+    if (!fix?.was_approved || !fix.restore) continue;
+    trail.push({ phase: 'audit_fix_reverted', reason: 'the style repair failed a required check at final audit; the approved version is restored', timestamp: new Date().toISOString() });
+    const { error } = await supabase.from('qb_questions').update({ ...fix.restore, status: 'approved', audit_trail: trail }).eq('id', q.id);
+    if (error) { log(`  [AuditFix] Q${q.question_number}: revert failed ${error.message}`); continue; }
+    n++;
+    log(`  [AuditFix] Q${q.question_number}: style repair reverted, approved version kept`);
+  }
+  return n;
 }

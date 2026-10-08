@@ -360,6 +360,7 @@ ${opts?.restructure
   ? `• The question must end with EXACTLY FIVE options, keyed A–E in the "options" object, with "correct_option" naming the keyed letter. Add, replace, reword or reorder options as the changes require; every option must be the same kind of thing, in parallel grammar, of similar length and specificity, and the keyed option must not stand out (not the longest, not the most qualified, no stem word only it repeats). Keep the correct answer the same choice unless a change says the key is wrong.
 • Explanations name each option by its text, never by letter: options are reordered afterwards.
 • ${CHECKLIST_FOR_FIXER.replace(/\n/g, '\n  ')}
+• Integrate every edit. Put an added finding where it belongs in the case presentation (history with history, vital signs with vital signs) and rewrite the sentence around it rather than appending a sentence. When an option changes, rewrite that option's part of the explanation to match; keep the explanation free of repeated or truncated sentences.
 • There is no human review after you: never write that anything needs clinician, expert or further review. Where a change cannot be made, mark it "❌" and say why.`
   : '• Keep every OPTION, in the same order, under the same letter, unless a change explicitly asks to add, remove, replace or reorder options. A wrong or weak option is fixed by editing its wording in place. Change which option is correct only when a change says the key is wrong.'}
 ${opts?.restructure

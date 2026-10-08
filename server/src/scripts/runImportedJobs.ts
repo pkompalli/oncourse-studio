@@ -15,7 +15,7 @@ import { reviewBatchForJob } from '../services/review/reviewPipeline.js';
 import { auditBatchForJob } from '../services/audit/auditPipeline.js';
 import { reviewModeOf } from '../services/review/reviewMode.js';
 import { balanceJobKeys } from '../services/review/keyBalance.js';
-import { adjudicateJobKeys, sweepLengthCues, repairAfterAudit } from '../services/review/keyAdjudication.js';
+import { adjudicateJobKeys, sweepLengthCues, repairAfterAudit, revertRegressions } from '../services/review/keyAdjudication.js';
 
 const jobIds = process.argv.slice(2).filter((a) => /^[0-9a-f-]{36}$/.test(a));
 if (!jobIds.length) { console.log('usage: runImportedJobs.ts <jobId> [<jobId> …]'); process.exit(1); }
@@ -79,6 +79,8 @@ async function drive(id: string) {
         if (error) throw new Error(error.message);
         await auditBatchForJob(id);
         job = { ...job, status: await waitWhile(id, 'auditing', tag) };
+        const reverted = await revertRegressions(id, (s) => console.log(`${tag}${s}`));
+        console.log(`${tag} style repairs reverted: ${reverted}`);
       }
     }
   }
