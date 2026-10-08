@@ -95,6 +95,9 @@ async function drive(id: string) {
 }
 
 const t0 = Date.now();
-await Promise.all(jobIds.map((id) => drive(id).catch((e) => console.error(`[${id.slice(0, 8)}] FAILED: ${e instanceof Error ? e.message : e}`))));
+// --sequential drives one job at a time: three in parallel overran Sol's per-minute output quota.
+const fail = (id: string) => (e: unknown) => console.error(`[${id.slice(0, 8)}] FAILED: ${e instanceof Error ? e.message : e}`);
+if (process.argv.includes('--sequential')) { for (const id of jobIds) await drive(id).catch(fail(id)); }
+else await Promise.all(jobIds.map((id) => drive(id).catch(fail(id))));
 console.log(`all done in ${((Date.now() - t0) / 60000).toFixed(1)} min`);
 process.exit(0);

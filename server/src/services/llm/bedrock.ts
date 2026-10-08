@@ -76,6 +76,13 @@ console.log(`[Bedrock] Reviewer:  ${MODELS.VALIDATOR} (thinking=${THINKING_MODEL
 
 const MAX_RETRIES = 3;
 const INITIAL_BACKOFF_MS = 2000;
+// A quota is per minute, so a 2–8 s backoff retries straight into the same window: the 150-question
+// USMLE batch hit 513 quota errors and lost 42 fixes that way. Quota errors wait 15 s, doubling to 120 s.
+const QUOTA_RETRIES = 6;
+const QUOTA_BACKOFF_MS = 15000;
+const isQuotaError = (msg: string) => /\b429\b|ThrottlingException|quota|Too Many Requests/i.test(msg);
+/** The HTTP status in our own "Mantle 401: …" message — not any "401" in a quota figure such as 154017.07. */
+const isAuthError = (msg: string) => /Mantle 40[13]\b|AccessDenied|UnrecognizedClient|InvalidSignature/.test(msg);
 
 // ── Mantle call (GPT 6.1 Sol via /openai/v1/responses) ──
 
@@ -123,7 +130,8 @@ async function mantleCall(
 
   const body = JSON.stringify(reqBody);
 
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+  // Quota errors get more attempts than other transient errors (see QUOTA_RETRIES); the catch stops the rest at MAX_RETRIES.
+  for (let attempt = 0; attempt <= QUOTA_RETRIES; attempt++) {
     try {
       const signer = new AwsV4Signer({
         url,
@@ -174,12 +182,15 @@ async function mantleCall(
     } catch (e) {
       const errMsg = e instanceof Error ? e.message : String(e);
 
-      if (errMsg.includes('403') || errMsg.includes('401') || errMsg.includes('AccessDenied')) {
+      if (isAuthError(errMsg)) {
         throw new Error(`Mantle auth error: ${errMsg}`);
       }
 
-      if (attempt < MAX_RETRIES && isTransientLlmError(e)) {
-        const delay = INITIAL_BACKOFF_MS * Math.pow(2, attempt);
+      const quota = isQuotaError(errMsg);
+      if (attempt < (quota ? QUOTA_RETRIES : MAX_RETRIES) && isTransientLlmError(e)) {
+        const delay = quota
+          ? Math.min(QUOTA_BACKOFF_MS * Math.pow(2, attempt), 120000) + Math.floor(Math.random() * 5000)
+          : INITIAL_BACKOFF_MS * Math.pow(2, attempt);
         console.log(`  [Mantle] ${errMsg.slice(0, 80)} — retry ${attempt + 1} in ${delay}ms`);
         await new Promise((r) => setTimeout(r, delay));
         continue;

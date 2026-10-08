@@ -29,7 +29,8 @@ import { reviewModeOf } from './reviewMode.js';
 import { MODELS } from '../llm/openrouter.js';
 
 const REVIEW_BATCH_SIZE = 10;
-const MAX_CONCURRENT_BATCHES = 8;
+// LLM_CONCURRENCY lowers this where a model's per-minute quota is the limit (GPT 6.1 Sol on Mantle).
+const MAX_CONCURRENT_BATCHES = Number(process.env.LLM_CONCURRENCY) || 8;
 
 // ── In-memory state — the single source of truth for polling ──
 interface SubjectStatus {
