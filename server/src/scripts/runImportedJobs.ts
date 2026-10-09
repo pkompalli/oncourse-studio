@@ -58,11 +58,18 @@ async function waitWhile(id: string, status: string, tag: string) {
 
 /** Whether the job's answer positions have been balanced: its last post-audit step. */
 async function balanced(id: string): Promise<boolean> {
-  // A count with a JSON containment filter: reading every row's full audit trail timed out under load.
-  const { count, error } = await supabase.from('qb_questions').select('id', { count: 'exact', head: true })
-    .eq('job_id', id).is('replaced_by_id', null).contains('audit_trail', [{ phase: 'key_balance' }]);
+  // Recorded on the job when balancing finishes. Jobs balanced before that marker existed are found
+  // from their audit trails, read 20 rows at a time: reading all of a job's trails at once timed out
+  // under load, and audit_trail is json, so a containment filter is not available.
+  const { data: job, error } = await supabase.from('qb_jobs').select('config').eq('id', id).single();
   if (error) throw new Error(error.message);
-  return (count ?? 0) > 0;
+  if ((job?.config as Record<string, unknown> | null)?.key_balanced_at) return true;
+  for (let from = 0; ; from += 20) {
+    const { data, error: e } = await supabase.from('qb_questions').select('audit_trail').eq('job_id', id).is('replaced_by_id', null).order('id').range(from, from + 19);
+    if (e) throw new Error(e.message || `audit trail read failed (${from})`);
+    if ((data || []).some((q) => ((q.audit_trail || []) as Array<{ phase?: string }>).some((x) => x?.phase === 'key_balance'))) return true;
+    if (!data || data.length < 20) return false;
+  }
 }
 
 async function drive(id: string) {
@@ -123,6 +130,7 @@ async function drive(id: string) {
       console.log(`${tag} style repairs reverted: ${reverted}`);
     }
     const b = await balanceJobKeys(id, true);
+    await supabase.from('qb_jobs').update({ config: { ...(job.config || {}), key_balanced_at: new Date().toISOString() } }).eq('id', id);
     console.log(`${tag} key balance: moved ${b.moved}/${b.items} | before ${JSON.stringify(b.before)} → after ${JSON.stringify(b.after)} | longest run ${b.maxRunAfter} | numeric kept ${b.numericKept}, not five ${b.skippedNotFive}, letter refs in explanation ${b.letterRefs.length}`);
   }
   const { data: qs } = await supabase.from('qb_questions').select('status').eq('job_id', id).is('replaced_by_id', null);
