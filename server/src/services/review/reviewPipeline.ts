@@ -108,6 +108,13 @@ async function runWithConcurrency<T>(tasks: (() => Promise<T>)[], max: number): 
   });
 }
 
+/**
+ * Restructure jobs: questions a review batch returned no result for (the model call failed twice).
+ * They used to go on with a default score and no findings — reviewed in name only. They are left at
+ * 'generated' instead, and runImportedJobs reviews them again before audit.
+ */
+const unreviewed = new Map<string, Set<string>>();
+
 async function fetchJobQuestions(jobId: string, status?: string): Promise<Record<string, unknown>[]> {
   // Paginate — a job can have >1000 questions; the PostgREST 1000-row cap would
   // otherwise make review silently skip everything past the first 1000.
@@ -265,6 +272,12 @@ async function runValidatorPhase(
 
     for (let i = 0; i < batch.length; i++) {
       const q = batch[i];
+      if (restructure && !results[i]) {
+        if (!unreviewed.has(jobId)) unreviewed.set(jobId, new Set());
+        unreviewed.get(jobId)!.add(q.id as string);
+        console.warn(`   [Review] Q${q.question_number}: no review result — left unreviewed for another pass`);
+        continue;
+      }
       const result = results[i] || {};
       const score = (result.overall_accuracy_score as number) || 5;
       const formatIssues = (result.format_compliance_issues as string[]) || [];
@@ -538,6 +551,12 @@ async function runAdversarialPhase(
 
     for (let i = 0; i < batch.length; i++) {
       const q = batch[i];
+      if (restructure && !results[i]) {
+        if (!unreviewed.has(jobId)) unreviewed.set(jobId, new Set());
+        unreviewed.get(jobId)!.add(q.id as string);
+        console.warn(`   [Review] Q${q.question_number}: no review result — left unreviewed for another pass`);
+        continue;
+      }
       const result = results[i] || {};
       const score = (result.adversarial_score as number) || 5;
       const conceptOverlap = (result.concept_overlap as string) || '';
@@ -856,7 +875,10 @@ async function runReviewPipeline(jobId: string, scope: ReviewScope): Promise<voi
     // Mark only what this run actually reviewed. The blanket job-wide update this
     // replaced demoted every approved question in the job back to 'reviewed'.
     setStep(jobId, `Marking ${questions.length} reviewed question(s)...`);
-    const reviewedIds = questions.map((q) => q.id as string);
+    const skipped = unreviewed.get(jobId) ?? new Set<string>();
+    unreviewed.delete(jobId);
+    const reviewedIds = questions.map((q) => q.id as string).filter((id) => !skipped.has(id));
+    if (skipped.size) console.warn(`  [Review] ${skipped.size} question(s) had no review result and stay at 'generated'`);
     for (let i = 0; i < reviewedIds.length; i += 200) {
       await supabase.from('qb_questions').update({ status: 'reviewed' })
         .in('id', reviewedIds.slice(i, i + 200));

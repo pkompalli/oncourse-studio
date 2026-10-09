@@ -60,7 +60,7 @@ const statusOf = (e: unknown) => (APICallError.isInstance(e) ? e.statusCode : un
 // could not hold while retrying upstream. Retried on the 2–8 s schedule, the first full-run attempt
 // lost its calls within a minute; they need the quota backoff.
 const isQuotaError = (e: unknown, msg: string) =>
-  statusOf(e) === 429 || statusOf(e) === 507 || /\b429\b|quota|Too Many Requests|rate limit|auth_unavailable|no auth available|request buffer limit/i.test(msg);
+  statusOf(e) === 429 || statusOf(e) === 507 || /\b429\b|quota|Too Many Requests|rate limit|auth_unavailable|no auth available|request buffer limit|overloaded/i.test(msg);
 const isAuthError = (e: unknown) => statusOf(e) === 401 || statusOf(e) === 403;
 
 /**
@@ -78,7 +78,9 @@ function isTransientLlmError(e: unknown): boolean {
   const err = e as { message?: string; code?: string; cause?: { message?: string; code?: string } };
   const blob = [err?.message, err?.code, err?.cause?.message, err?.cause?.code]
     .filter(Boolean).join(' | ');
-  return /429|\b5\d\d\b|ServiceUnavailable|ETIMEDOUT|ECONNRESET|fetch failed|HeadersTimeout|BodyTimeout|UND_ERR|socket hang up|ECONNREFUSED|ENOTFOUND|EPIPE|network|terminated|AbortError/i
+  // A streamed call reports the provider's errors inside the stream, with no HTTP status ("Our servers
+  // are currently overloaded", "stream disconnected before completion"); they were thrown at once.
+  return /overloaded|stream error|stream disconnected|stream closed|response\.completed|server_error|429|\b5\d\d\b|ServiceUnavailable|ETIMEDOUT|ECONNRESET|fetch failed|HeadersTimeout|BodyTimeout|UND_ERR|socket hang up|ECONNREFUSED|ENOTFOUND|EPIPE|network|terminated|AbortError/i
     .test(blob);
 }
 

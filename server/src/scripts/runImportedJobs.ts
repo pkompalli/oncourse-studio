@@ -76,6 +76,17 @@ async function drive(id: string) {
     await reviewBatchForJob(id, 'pending');
     job = { ...job, status: await waitWhile(id, 'reviewing', tag) };
   }
+  // A review batch whose model call failed leaves its questions at 'generated' (reviewPipeline.ts).
+  // Two more passes before audit; anything still unreviewed after that is reported, not audited.
+  for (let pass = 1; pass <= 2 && job.status === 'auditing'; pass++) {
+    const { count } = await supabase.from('qb_questions').select('*', { count: 'exact', head: true }).eq('job_id', id).eq('status', 'generated').is('replaced_by_id', null);
+    if (!count) break;
+    console.log(`${tag} ${count} question(s) without a review result — review pass ${pass + 1}`);
+    const { error } = await supabase.from('qb_jobs').update({ status: 'reviewing' }).eq('id', id);
+    if (error) throw new Error(error.message);
+    await reviewBatchForJob(id, 'pending');
+    job = { ...job, status: await waitWhile(id, 'reviewing', tag) };
+  }
   if (job.status === 'auditing') {
     // Restructure jobs settle every real change of the keyed answer before audit scores it
     // (keyAdjudication.ts), rather than leaving it for a clinician.
