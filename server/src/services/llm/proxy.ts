@@ -6,7 +6,7 @@
  */
 
 import { createOpenAI } from '@ai-sdk/openai';
-import { APICallError, generateText, NoObjectGeneratedError, Output } from 'ai';
+import { APICallError, NoObjectGeneratedError, Output, streamText } from 'ai';
 import type { FinishReason, LanguageModelUsage } from 'ai';
 import type { LLMResponse, ContentPart } from './openrouter.js';
 import { addTokens } from './tokenTracker.js';
@@ -34,7 +34,10 @@ export const MODELS = {
 // can use its whole max_output_tokens budget and return EMPTY text. Callers parse '' into
 // zero results and every question in the batch lands in needs_review with no error logged.
 // The guard below retries such a call once with a bigger budget.
-const REASONING_EFFORT = 'high';
+// LLM_REASONING_EFFORT overrides it for one run: the USMLE full run uses 'low', the setting every pilot
+// and the 150-question batch were validated on; high made a ten-question review take 17 minutes.
+const REASONING_EFFORT = (['minimal', 'low', 'medium', 'high'].includes(String(process.env.LLM_REASONING_EFFORT))
+  ? process.env.LLM_REASONING_EFFORT : 'high') as 'minimal' | 'low' | 'medium' | 'high';
 /** Smallest budget for the retry after an empty, reasoning-exhausted answer. */
 const EMPTY_ANSWER_RETRY_TOKENS = 32000;
 /** No retry once a call already had this much; an empty answer at this size is not a budget problem. */
@@ -147,9 +150,21 @@ export async function proxyCall(
         ...(options?.jsonMode ? { output: Output.json() } : {}),
       };
 
-      const result = typeof userPrompt === 'string'
-        ? await generateText({ ...common, prompt: userPrompt })
-        : await generateText({ ...common, messages: [{ role: 'user' as const, content: toUserContent(userPrompt) }] });
+      // Streamed, then collected. The proxy sits behind Cloudflare, which ends a request with 524 when
+      // the origin sends nothing for 100 s; a high-effort review of ten questions takes minutes, so
+      // every review call of the first full run timed out. A stream sends headers and events at once.
+      let streamErr: unknown;
+      const stream = typeof userPrompt === 'string'
+        ? streamText({ ...common, prompt: userPrompt, onError: ({ error }) => { streamErr = error; } })
+        : streamText({ ...common, messages: [{ role: 'user' as const, content: toUserContent(userPrompt) }], onError: ({ error }) => { streamErr = error; } });
+      let result: { text: string; usage: LanguageModelUsage; finishReason: FinishReason };
+      try {
+        const [t, u, f] = await Promise.all([stream.text, stream.usage, stream.finishReason]);
+        result = { text: t, usage: u, finishReason: f };
+      } catch (e) {
+        throw streamErr ?? e;
+      }
+      if (streamErr) throw streamErr;
       release();
       report({ tokensIn: result.usage?.inputTokens, tokensOut: result.usage?.outputTokens });
       text = result.text;
@@ -158,7 +173,7 @@ export async function proxyCall(
     } catch (e) {
       release();
       const st = statusOf(e);
-      report({ congested: st === 429 || st === 502 || st === 503 || st === 504 || st === 507 || isQuotaError(e, describeError(e)) });
+      report({ failed: !NoObjectGeneratedError.isInstance(e), congested: st === 429 || st === 502 || st === 503 || st === 504 || st === 507 || isQuotaError(e, describeError(e)) });
       if (NoObjectGeneratedError.isInstance(e)) {
         // JSON mode parses the answer, and throws when it is cut off or malformed. Callers
         // have always received the raw text and repair truncated JSON themselves, so hand

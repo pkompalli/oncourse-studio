@@ -33,6 +33,7 @@ let calls = 0, errors429 = 0, tokensIn = 0, tokensOut = 0, peak = 0;
 // Review calls at high effort take several minutes, and growing on 'calls queued' alone raised the
 // limit 8 -> 18 in two minutes before a single call had returned.
 let okSinceGrow = 0;
+let errorsOther = 0;
 
 function pump() {
   while (inFlight < limit && waiters.length) {
@@ -57,10 +58,13 @@ export function release(): void {
 }
 
 /** Record a finished call: its tokens, and whether the provider refused it for load. */
-export function report(outcome: { congested?: boolean; tokensIn?: number; tokensOut?: number }): void {
+export function report(outcome: { congested?: boolean; failed?: boolean; tokensIn?: number; tokensOut?: number }): void {
   if (!ENABLED) return;
   calls++;
-  if (!outcome.congested) okSinceGrow++;
+  // Only a completed call is evidence: a 524 timeout counted as a success grew the limit to 140
+  // while nothing came back.
+  if (!outcome.congested && !outcome.failed) okSinceGrow++;
+  if (outcome.failed && !outcome.congested) errorsOther++;
   tokensIn += outcome.tokensIn ?? 0;
   tokensOut += outcome.tokensOut ?? 0;
   if (!outcome.congested) return;
@@ -92,9 +96,9 @@ if (ENABLED) {
       okSinceGrow = 0;
     }
     if (calls || inFlight) {
-      console.log(`  [limiter] limit ${limit} | in flight ${inFlight} (peak ${peak}) | queued ${waiters.length} | calls/min ${calls} | 429/min ${errors429} | tokens/min in ${tokensIn} out ${tokensOut}`);
+      console.log(`  [limiter] limit ${limit} | in flight ${inFlight} (peak ${peak}) | queued ${waiters.length} | calls/min ${calls} | 429/min ${errors429} | other errors/min ${errorsOther} | tokens/min in ${tokensIn} out ${tokensOut}`);
     }
-    calls = 0; errors429 = 0; tokensIn = 0; tokensOut = 0; peak = inFlight;
+    calls = 0; errors429 = 0; errorsOther = 0; tokensIn = 0; tokensOut = 0; peak = inFlight;
   }, 60000);
   timer.unref();
   console.log(`[limiter] adaptive LLM concurrency on — start ${limit}, max ${MAX}`);
