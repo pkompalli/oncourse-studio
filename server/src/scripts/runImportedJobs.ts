@@ -58,8 +58,11 @@ async function waitWhile(id: string, status: string, tag: string) {
 
 /** Whether the job's answer positions have been balanced: its last post-audit step. */
 async function balanced(id: string): Promise<boolean> {
-  const { data } = await supabase.from('qb_questions').select('audit_trail').eq('job_id', id).is('replaced_by_id', null);
-  return (data || []).some((q) => ((q.audit_trail || []) as Array<{ phase?: string }>).some((e) => e?.phase === 'key_balance'));
+  // A count with a JSON containment filter: reading every row's full audit trail timed out under load.
+  const { count, error } = await supabase.from('qb_questions').select('id', { count: 'exact', head: true })
+    .eq('job_id', id).is('replaced_by_id', null).contains('audit_trail', [{ phase: 'key_balance' }]);
+  if (error) throw new Error(error.message);
+  return (count ?? 0) > 0;
 }
 
 async function drive(id: string) {
@@ -162,9 +165,18 @@ async function writeReadyParts() {
 const t0 = Date.now();
 // --sequential drives one job at a time: three in parallel overran Sol's per-minute output quota.
 const fail = (id: string) => (e: unknown) => console.error(`[${id.slice(0, 8)}] FAILED: ${e instanceof Error ? e.message : e}`);
+// A job that throws (a database statement timeout when fifteen jobs start at once) is retried after a
+// pause; it resumes from its saved status. Only a job that completes counts toward a part file.
 const driveOne = async (id: string) => {
-  await drive(id).catch(fail(id));
-  finished.add(id);
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try { await drive(id); finished.add(id); break; }
+    catch (e) {
+      fail(id)(e);
+      if (attempt === 3) { console.error(`[${id.slice(0, 8)}] GIVING UP after 3 attempts — rerun the manifest to resume it`); return; }
+      console.log(`[${id.slice(0, 8)}] retrying in ${attempt} min (attempt ${attempt + 1}/3)`);
+      await sleep(attempt * 60000);
+    }
+  }
   console.log(`[progress] ${finished.size}/${jobIds.length} jobs done, ${((Date.now() - t0) / 60000).toFixed(1)} min`);
   await writeReadyParts();
 };
