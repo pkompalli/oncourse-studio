@@ -52,8 +52,12 @@ const INITIAL_BACKOFF_MS = 2000;
 const QUOTA_RETRIES = 6;
 const QUOTA_BACKOFF_MS = 15000;
 const statusOf = (e: unknown) => (APICallError.isInstance(e) ? e.statusCode : undefined);
+// The proxy's own capacity errors are quota errors too: "503 auth_unavailable: no auth available"
+// means every upstream account is busy, and "507 exceeded request buffer limit" a large request it
+// could not hold while retrying upstream. Retried on the 2–8 s schedule, the first full-run attempt
+// lost its calls within a minute; they need the quota backoff.
 const isQuotaError = (e: unknown, msg: string) =>
-  statusOf(e) === 429 || /\b429\b|quota|Too Many Requests|rate limit/i.test(msg);
+  statusOf(e) === 429 || statusOf(e) === 507 || /\b429\b|quota|Too Many Requests|rate limit|auth_unavailable|no auth available|request buffer limit/i.test(msg);
 const isAuthError = (e: unknown) => statusOf(e) === 401 || statusOf(e) === 403;
 
 /**
@@ -154,7 +158,7 @@ export async function proxyCall(
     } catch (e) {
       release();
       const st = statusOf(e);
-      report({ congested: st === 429 || st === 502 || st === 503 || st === 504 || isQuotaError(e, e instanceof Error ? e.message : String(e)) });
+      report({ congested: st === 429 || st === 502 || st === 503 || st === 504 || st === 507 || isQuotaError(e, describeError(e)) });
       if (NoObjectGeneratedError.isInstance(e)) {
         // JSON mode parses the answer, and throws when it is cut off or malformed. Callers
         // have always received the raw text and repair truncated JSON themselves, so hand
