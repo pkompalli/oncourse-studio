@@ -29,6 +29,10 @@ const waiters: Array<() => void> = [];
 
 // Per-minute counters for the log line.
 let calls = 0, errors429 = 0, tokensIn = 0, tokensOut = 0, peak = 0;
+// Successes since the last growth step: the limit rises only on evidence that the current level works.
+// Review calls at high effort take several minutes, and growing on 'calls queued' alone raised the
+// limit 8 -> 18 in two minutes before a single call had returned.
+let okSinceGrow = 0;
 
 function pump() {
   while (inFlight < limit && waiters.length) {
@@ -56,6 +60,7 @@ export function release(): void {
 export function report(outcome: { congested?: boolean; tokensIn?: number; tokensOut?: number }): void {
   if (!ENABLED) return;
   calls++;
+  if (!outcome.congested) okSinceGrow++;
   tokensIn += outcome.tokensIn ?? 0;
   tokensOut += outcome.tokensOut ?? 0;
   if (!outcome.congested) return;
@@ -65,6 +70,7 @@ export function report(outcome: { congested?: boolean; tokensIn?: number; tokens
   if (now - lastCut < 30000) return;
   lastCut = now;
   lastGrow = now;
+  okSinceGrow = 0;
   const next = Math.max(MIN, Math.floor(Math.max(inFlight, 1) * 0.7));
   if (next < limit) {
     console.log(`  [limiter] provider refused for load — limit ${limit} → ${next}`);
@@ -78,10 +84,12 @@ if (ENABLED) {
   const timer = setInterval(() => {
     const now = Date.now();
     const queued = waiters.length > 0 || (busySince && now - busySince > 5000);
-    if (queued && now - lastGrow >= 60000 && now - lastCut >= 60000 && limit < MAX) {
+    // At least half the slots' worth of calls must have come back without refusal since the last step.
+    if (queued && okSinceGrow >= Math.ceil(limit / 2) && now - lastGrow >= 60000 && now - lastCut >= 60000 && limit < MAX) {
       const next = Math.min(MAX, seenCongestion ? Math.ceil(limit * 1.1) : Math.ceil(limit * 1.5));
-      if (next > limit) { console.log(`  [limiter] no refusals, calls queued — limit ${limit} → ${next}`); limit = next; pump(); }
+      if (next > limit) { console.log(`  [limiter] ${okSinceGrow} calls succeeded, calls queued — limit ${limit} → ${next}`); limit = next; pump(); }
       lastGrow = now;
+      okSinceGrow = 0;
     }
     if (calls || inFlight) {
       console.log(`  [limiter] limit ${limit} | in flight ${inFlight} (peak ${peak}) | queued ${waiters.length} | calls/min ${calls} | 429/min ${errors429} | tokens/min in ${tokensIn} out ${tokensOut}`);
