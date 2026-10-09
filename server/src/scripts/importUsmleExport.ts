@@ -19,7 +19,7 @@
  *   … --restructure   content quality first: five options, cues removed, full vignettes (reviewMode.ts)
  */
 import 'dotenv/config';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { supabase } from '../db/supabase.js';
 
 const argStr = (name: string, fallback = ''): string => {
@@ -34,6 +34,15 @@ const OFFSET = Number(argStr('offset', '0'));
 // creating one — used to finish an import that was stopped part-way.
 const ONLY_STEPS = argStr('steps') ? argStr('steps').split(',') : null;
 const INTO_JOB = argStr('job');
+// A full run: --exclude <file> skips ids already processed (one id per line, or a JSON array);
+// --chunk N splits each Step into jobs of N questions so many can run at once; --manifest <file>
+// records the jobs created, in order, for runImportedJobs --manifest and the part exports.
+const EXCLUDE = argStr('exclude')
+  ? new Set<string>(((t) => (t.trim().startsWith('[') ? JSON.parse(t) : t.split(/\s+/)))(readFileSync(argStr('exclude'), 'utf8')).filter(Boolean))
+  : new Set<string>();
+const CHUNK = Number(argStr('chunk', '0'));
+const MANIFEST = argStr('manifest');
+const created: Array<{ job: string; step: string; count: number }> = [];
 
 type Step = 'step1' | 'step2' | 'step3';
 const COURSES: Record<Step, string> = {
@@ -128,7 +137,8 @@ function toRow(q: Exported, step: Step, from: string, jobId: string, courseName:
 
 const all = (JSON.parse(readFileSync(IN, 'utf8')) as { questions: Exported[] }).questions;
 const byStep: Record<Step, Array<{ q: Exported; from: string }>> = { step1: [], step2: [], step3: [] };
-for (const q of all) { const s = stepOf(q); byStep[s.step].push({ q, from: s.from }); }
+for (const q of all) { if (EXCLUDE.has(q.id)) continue; const s = stepOf(q); byStep[s.step].push({ q, from: s.from }); }
+if (EXCLUDE.size) console.log(`excluded ${all.length - Object.values(byStep).reduce((n, x) => n + x.length, 0)} already-processed questions`);
 
 // A pilot takes LIMIT per Step, evenly spaced through each Step's id-sorted list (ids are random).
 const pick = <T>(xs: T[]) => {
@@ -153,13 +163,16 @@ for (const step of Object.keys(COURSES) as Step[]) {
   console.log(`${step}: ${chosen.length} of ${byStep[step].length} questions → ${course.name}${LIMIT ? ' (pilot)' : ''} | ${images} with images | ${noKey} with no keyed option`);
   if (!APPLY || !chosen.length) continue;
 
+  const size = CHUNK > 0 && !INTO_JOB ? CHUNK : chosen.length;
+  for (let c0 = 0; c0 < chosen.length; c0 += size) {
+  const part = chosen.slice(c0, c0 + size);
   let job: { id: string };
   if (INTO_JOB) {
     const { count } = await supabase.from('qb_questions').select('id', { count: 'exact', head: true }).eq('job_id', INTO_JOB);
     if (count) throw new Error(`job ${INTO_JOB} already has ${count} questions — refusing to add more`);
     job = { id: INTO_JOB };
   } else {
-  const { data: created, error: jErr } = await supabase.from('qb_jobs').insert({
+  const { data: newJob, error: jErr } = await supabase.from('qb_jobs').insert({
     course_id: COURSES[step],
     type: 'mock_exam',
     // Parked, not 'reviewing': the server resumes every job at reviewing on startup
@@ -175,20 +188,27 @@ for (const step of Object.keys(COURSES) as Step[]) {
       source_filter: "course 'US Medical PG', created_at > 2025-01-31",
       step,
       pilot: Boolean(LIMIT),
+      ...(CHUNK > 0 ? { full_run: true, chunk: c0 / size + 1 } : {}),
       // Quality first: options may be added, replaced or reordered (reviewMode.ts).
       ...(process.argv.includes('--restructure') ? { restructure: true } : {}),
       imported_at: new Date().toISOString(),
     },
   }).select('id').single();
   if (jErr) throw new Error(jErr.message);
-  job = created;
+  job = newJob;
   }
 
-  const rows = chosen.map(({ q, from }, i) => toRow(q, step, from, job.id, course.name, i + 1));
+  const rows = part.map(({ q, from }, i) => toRow(q, step, from, job.id, course.name, i + 1));
   for (let i = 0; i < rows.length; i += 500) {
     const { error } = await supabase.from('qb_questions').insert(rows.slice(i, i + 500));
     if (error) throw new Error(`insert ${step} rows ${i}–${i + 499}: ${error.message}`);
   }
   console.log(`  ${INTO_JOB ? "filled" : "created"} job ${job.id} with ${rows.length} questions`);
+  created.push({ job: job.id, step, count: rows.length });
+  }
+}
+if (MANIFEST && created.length) {
+  writeFileSync(MANIFEST, JSON.stringify({ created_at: new Date().toISOString(), jobs: created }, null, 2));
+  console.log(`manifest: ${created.length} jobs → ${MANIFEST}`);
 }
 if (!APPLY) console.log('dry run — rerun with --apply to create the jobs');

@@ -8,8 +8,17 @@
  * review picks up only questions still at 'generated', audit only those at 'reviewed'.
  *
  *   npx tsx src/scripts/runImportedJobs.ts <jobId> [<jobId> …]
+ *
+ * A full run: --manifest <file> (from importUsmleExport --manifest) supplies the jobs, --pool N runs N
+ * of them at once (a new one starting as each finishes), and --parts <dir> writes each block of about
+ * 1,000 questions to <dir>/part_NN.json (approved, simple format) and part_NN_detail.json (every
+ * question, with outcome and checks) as soon as all of its jobs are done. With LLM_ADAPTIVE=1 one
+ * process-wide limiter (llm/limiter.ts) caps the calls in flight. --quiet drops the per-job progress lines.
  */
 import 'dotenv/config';
+import { readFileSync, existsSync, mkdirSync } from 'node:fs';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { supabase } from '../db/supabase.js';
 import { reviewBatchForJob } from '../services/review/reviewPipeline.js';
 import { auditBatchForJob } from '../services/audit/auditPipeline.js';
@@ -17,8 +26,14 @@ import { reviewModeOf } from '../services/review/reviewMode.js';
 import { balanceJobKeys } from '../services/review/keyBalance.js';
 import { adjudicateJobKeys, sweepLengthCues, repairAfterAudit, revertRegressions } from '../services/review/keyAdjudication.js';
 
-const jobIds = process.argv.slice(2).filter((a) => /^[0-9a-f-]{36}$/.test(a));
-if (!jobIds.length) { console.log('usage: runImportedJobs.ts <jobId> [<jobId> …]'); process.exit(1); }
+const arg = (name: string) => { const i = process.argv.indexOf(`--${name}`); return i >= 0 ? process.argv[i + 1] : undefined; };
+const MANIFEST = arg('manifest');
+const manifestJobs: Array<{ job: string; step: string; count: number }> = MANIFEST ? JSON.parse(readFileSync(MANIFEST, 'utf8')).jobs : [];
+const jobIds = MANIFEST ? manifestJobs.map((j) => j.job) : process.argv.slice(2).filter((a) => /^[0-9a-f-]{36}$/.test(a));
+if (!jobIds.length) { console.log('usage: runImportedJobs.ts <jobId> [<jobId> …] | --manifest <file> [--pool N] [--parts <dir>]'); process.exit(1); }
+const POOL = Number(arg('pool')) || 0;
+const PARTS = arg('parts');
+const QUIET = process.argv.includes('--quiet');
 
 const POLL_MS = 15_000;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -36,7 +51,7 @@ async function waitWhile(id: string, status: string, tag: string) {
     if (job.status !== status) return job.status;
     const p = job.progress || {};
     const line = `${tag} ${status}: ${p.reviewed ?? p.audited ?? '?'}/${p.total ?? '?'} — ${String(p.step ?? '').slice(0, 110)}`;
-    if (line !== last) { console.log(line); last = line; }
+    if (line !== last && !QUIET) { console.log(line); last = line; }
     await sleep(POLL_MS);
   }
 }
@@ -101,10 +116,52 @@ async function drive(id: string) {
   console.log(`${tag} finished at status=${job.status} | questions: ${JSON.stringify(tally)}`);
 }
 
+// ── Parts: consecutive manifest jobs grouped into blocks of about 1,000 questions ──
+const parts: string[][] = [];
+{
+  let cur: string[] = [], n = 0;
+  for (const j of manifestJobs) {
+    cur.push(j.job); n += j.count;
+    if (n >= 1000) { parts.push(cur); cur = []; n = 0; }
+  }
+  if (cur.length) parts.push(cur);
+}
+const finished = new Set<string>();
+const written = new Set<number>();
+const run = promisify(execFile);
+async function writeReadyParts() {
+  if (!PARTS || !parts.length) return;
+  mkdirSync(PARTS, { recursive: true });
+  for (const [i, jobs] of parts.entries()) {
+    const name = `part_${String(i + 1).padStart(2, '0')}`;
+    if (written.has(i) || !jobs.every((j) => finished.has(j)) || existsSync(`${PARTS}/${name}.json`)) continue;
+    written.add(i);
+    try {
+      const tsx = ['tsx'];
+      const a = await run('npx', [...tsx, 'src/scripts/exportSimple.ts', ...jobs, '--out', `${PARTS}/${name}.json`], { maxBuffer: 1 << 26 });
+      await run('npx', [...tsx, 'src/scripts/exportReviewed.ts', ...jobs, '--out', `${PARTS}/${name}_detail`], { maxBuffer: 1 << 26 });
+      console.log(`[parts] ${name} written (${jobs.length} jobs): ${a.stdout.split('\n').find((l) => l.startsWith('{')) ?? ''}`);
+    } catch (e) {
+      written.delete(i);
+      console.error(`[parts] ${name} export FAILED: ${e instanceof Error ? e.message.slice(0, 200) : e}`);
+    }
+  }
+}
+
 const t0 = Date.now();
 // --sequential drives one job at a time: three in parallel overran Sol's per-minute output quota.
 const fail = (id: string) => (e: unknown) => console.error(`[${id.slice(0, 8)}] FAILED: ${e instanceof Error ? e.message : e}`);
-if (process.argv.includes('--sequential')) { for (const id of jobIds) await drive(id).catch(fail(id)); }
-else await Promise.all(jobIds.map((id) => drive(id).catch(fail(id))));
+const driveOne = async (id: string) => {
+  await drive(id).catch(fail(id));
+  finished.add(id);
+  console.log(`[progress] ${finished.size}/${jobIds.length} jobs done, ${((Date.now() - t0) / 60000).toFixed(1)} min`);
+  await writeReadyParts();
+};
+if (process.argv.includes('--sequential')) { for (const id of jobIds) await driveOne(id); }
+else if (POOL > 0) {
+  const queue = [...jobIds];
+  await Promise.all(Array.from({ length: Math.min(POOL, queue.length) }, async () => { for (let id = queue.shift(); id; id = queue.shift()) await driveOne(id); }));
+}
+else await Promise.all(jobIds.map((id) => driveOne(id)));
 console.log(`all done in ${((Date.now() - t0) / 60000).toFixed(1)} min`);
 process.exit(0);

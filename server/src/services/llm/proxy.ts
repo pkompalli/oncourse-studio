@@ -10,6 +10,7 @@ import { APICallError, generateText, NoObjectGeneratedError, Output } from 'ai';
 import type { FinishReason, LanguageModelUsage } from 'ai';
 import type { LLMResponse, ContentPart } from './openrouter.js';
 import { addTokens } from './tokenTracker.js';
+import { acquire, release, report } from './limiter.js';
 
 const proxy = createOpenAI({
   baseURL: process.env.AI_PROXY_URL,
@@ -128,6 +129,8 @@ export async function proxyCall(
     let usage: LanguageModelUsage | undefined;
     let finishReason: FinishReason | undefined;
 
+    // One slot of the process-wide cap (limiter.ts) for the HTTP call itself; released before any backoff.
+    await acquire();
     try {
       // Reasoning models (Sol) don't support temperature — options.temperature is ignored.
       const common = {
@@ -143,10 +146,15 @@ export async function proxyCall(
       const result = typeof userPrompt === 'string'
         ? await generateText({ ...common, prompt: userPrompt })
         : await generateText({ ...common, messages: [{ role: 'user' as const, content: toUserContent(userPrompt) }] });
+      release();
+      report({ tokensIn: result.usage?.inputTokens, tokensOut: result.usage?.outputTokens });
       text = result.text;
       usage = result.usage;
       finishReason = result.finishReason;
     } catch (e) {
+      release();
+      const st = statusOf(e);
+      report({ congested: st === 429 || st === 502 || st === 503 || st === 504 || isQuotaError(e, e instanceof Error ? e.message : String(e)) });
       if (NoObjectGeneratedError.isInstance(e)) {
         // JSON mode parses the answer, and throws when it is cut off or malformed. Callers
         // have always received the raw text and repair truncated JSON themselves, so hand
