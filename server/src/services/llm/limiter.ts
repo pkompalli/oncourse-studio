@@ -27,6 +27,18 @@ let lastGrow = Date.now();
 let busySince = 0;
 const waiters: Array<() => void> = [];
 
+// Stepped mode (LLM_STEPS="12,20,25,30,…", LLM_STEP_MIN=5): hold each level for a few minutes and step
+// up only when that whole hold went cleanly, instead of reacting to every call. Refusals do not cut on
+// their own: a minute where at least a quarter of the calls (and 3 or more) were refused steps down one
+// level. In the afternoon the provider refused even at 2-3 calls in flight, so cutting on each refusal
+// shrank our share to nothing without stopping them.
+const STEPS = (process.env.LLM_STEPS || '').split(',').map(Number).filter((n) => n > 0);
+const STEP_MS = (Number(process.env.LLM_STEP_MIN) || 5) * 60000;
+let step = 0;
+let stepSince = Date.now();
+let holdCalls = 0, holdRefused = 0;
+if (STEPS.length) limit = STEPS[0];
+
 // Per-minute counters for the log line.
 let calls = 0, errors429 = 0, tokensIn = 0, tokensOut = 0, peak = 0;
 // Successes since the last growth step: the limit rises only on evidence that the current level works.
@@ -67,6 +79,7 @@ export function report(outcome: { congested?: boolean; failed?: boolean; tokensI
   if (outcome.failed && !outcome.congested) errorsOther++;
   tokensIn += outcome.tokensIn ?? 0;
   tokensOut += outcome.tokensOut ?? 0;
+  if (STEPS.length) { holdCalls++; if (outcome.congested) { holdRefused++; errors429++; } return; }
   if (!outcome.congested) return;
   errors429++;
   seenCongestion = true;
@@ -88,6 +101,20 @@ if (ENABLED) {
   const timer = setInterval(() => {
     const now = Date.now();
     const queued = waiters.length > 0 || (busySince && now - busySince > 5000);
+    if (STEPS.length) {
+      const refusedRate = calls ? errors429 / calls : 0;
+      if (errors429 >= 3 && refusedRate >= 0.25 && step > 0) {
+        step--; limit = STEPS[step]; stepSince = now; holdCalls = 0; holdRefused = 0;
+        console.log(`  [limiter] ${errors429}/${calls} calls refused this minute — back to ${limit}`);
+      } else if (now - stepSince >= STEP_MS) {
+        const holdRate = holdCalls ? holdRefused / holdCalls : 0;
+        if (queued && holdRate < 0.05 && step < STEPS.length - 1) {
+          step++; limit = STEPS[step]; pump();
+          console.log(`  [limiter] ${holdCalls} calls, ${holdRefused} refused over ${STEP_MS / 60000} min — step up to ${limit}`);
+        }
+        stepSince = now; holdCalls = 0; holdRefused = 0;
+      }
+    } else
     // At least half the slots' worth of calls must have come back without refusal since the last step.
     if (queued && okSinceGrow >= Math.ceil(limit / 2) && now - lastGrow >= 60000 && now - lastCut >= 60000 && limit < MAX) {
       const next = Math.min(MAX, seenCongestion ? Math.ceil(limit * 1.1) : Math.ceil(limit * 1.5));
@@ -101,7 +128,9 @@ if (ENABLED) {
     calls = 0; errors429 = 0; errorsOther = 0; tokensIn = 0; tokensOut = 0; peak = inFlight;
   }, 60000);
   timer.unref();
-  console.log(`[limiter] adaptive LLM concurrency on — start ${limit}, max ${MAX}`);
+  console.log(STEPS.length
+    ? `[limiter] stepped LLM concurrency — ${STEPS.join(' → ')}, ${STEP_MS / 60000} min per step`
+    : `[limiter] adaptive LLM concurrency on — start ${limit}, max ${MAX}`);
 }
 
 export const limiterEnabled = ENABLED;
