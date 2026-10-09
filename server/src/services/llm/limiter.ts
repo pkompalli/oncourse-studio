@@ -37,6 +37,9 @@ const STEP_MS = (Number(process.env.LLM_STEP_MIN) || 5) * 60000;
 let step = 0;
 let stepSince = Date.now();
 let holdCalls = 0, holdRefused = 0;
+// A level that just failed is not retried for 30 minutes. Probing 80 sent the provider's account pool
+// into cool-down twice, each time sliding the limit to 35 and costing 30-40 minutes to climb back.
+let ceiling = Infinity, ceilingUntil = 0;
 if (STEPS.length) limit = STEPS[0];
 
 // Per-minute counters for the log line.
@@ -104,11 +107,13 @@ if (ENABLED) {
     if (STEPS.length) {
       const refusedRate = calls ? errors429 / calls : 0;
       if (errors429 >= 3 && refusedRate >= 0.25 && step > 0) {
+        if (now > ceilingUntil || STEPS[step] < ceiling) { ceiling = STEPS[step]; ceilingUntil = now + 30 * 60000; }
         step--; limit = STEPS[step]; stepSince = now; holdCalls = 0; holdRefused = 0;
         console.log(`  [limiter] ${errors429}/${calls} calls refused this minute — back to ${limit}`);
       } else if (now - stepSince >= STEP_MS) {
         const holdRate = holdCalls ? holdRefused / holdCalls : 0;
-        if (queued && holdRate < 0.05 && step < STEPS.length - 1) {
+        const capped = now < ceilingUntil && step + 1 < STEPS.length && STEPS[step + 1] >= ceiling;
+        if (queued && holdRate < 0.05 && step < STEPS.length - 1 && !capped) {
           step++; limit = STEPS[step]; pump();
           console.log(`  [limiter] ${holdCalls} calls, ${holdRefused} refused over ${STEP_MS / 60000} min — step up to ${limit}`);
         }
