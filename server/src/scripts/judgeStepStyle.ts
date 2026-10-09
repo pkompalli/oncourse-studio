@@ -1,7 +1,7 @@
 /**
  * Blind pairwise judgement: which revision of a live-bank item reads more like a real USMLE Step
  * item. Two pilot runs of the same items (e.g. Sonnet 5.5 vs GPT 6.1 Sol reviewers) are compared
- * item by item by a third model that is neither reviewer, shown both versions as X and Y in random
+ * item by item by a judge model (--judge, default GPT 6.1 Sol), shown both versions as X and Y in random
  * order, then again with the order swapped. A version wins only if it wins both orderings; a split
  * is a tie. The original is shown for context, so a revision that changes what was asked loses.
  *
@@ -15,7 +15,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { orCall, extractJson } from './_judgeLib.js';
 
 const arg = (n: string, d = '') => { const i = process.argv.indexOf(`--${n}`); return i >= 0 ? process.argv[i + 1] : d; };
-const JUDGE = arg('judge', 'us.anthropic.claude-opus-5-5');
+const JUDGE = arg('judge', 'gpt-6.1-sol');
 type Q = Record<string, any>;
 const load = (f: string) => new Map((JSON.parse(readFileSync(f, 'utf8')).questions as Q[]).map((q) => [q.source_id, q]));
 const A = load(arg('a')), Bm = load(arg('b'));

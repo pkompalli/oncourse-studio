@@ -259,7 +259,7 @@ export async function runAuditBatch(questions: Record<string, unknown>[], opts: 
     ];
   }
 
-  // Never throw: a Bedrock/network failure here would otherwise crash the whole
+  // Never throw: an ai-proxy/network failure here would otherwise crash the whole
   // audit pipeline. Return whatever we can parse; empty is handled downstream as
   // needs_review (not a fabricated score-5 flag).
   let results: Record<string, unknown>[] = [];

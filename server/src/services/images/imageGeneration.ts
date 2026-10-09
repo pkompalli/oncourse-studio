@@ -5,8 +5,7 @@
  *   - _build_openai_safe_prompt() — safety-filter-aware prompt
  *   - generate_image_with_openrouter() — direct OpenAI images API (gpt-image-2.5-flare)
  *
- * Uses direct OpenAI API (not OpenRouter) because OpenRouter doesn't
- * expose /v1/images/generations.
+ * Goes through the shared ai-proxy, which serves the OpenAI images API at /v1/images/generations.
  */
 
 import OpenAI from 'openai';
@@ -14,15 +13,15 @@ import { supabase } from '../../db/supabase.js';
 import { fetchAllRows } from '../../db/pagination.js';
 import crypto from 'crypto';
 
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
+const AI_PROXY_KEY = process.env.AI_PROXY_KEY || '';
 const OPENAI_IMAGE_MODEL = process.env.OPENAI_IMAGE_MODEL || 'gpt-image-2.5-flare';
 
-const openaiClient = OPENAI_API_KEY ? new OpenAI({ apiKey: OPENAI_API_KEY }) : null;
+const openaiClient = AI_PROXY_KEY ? new OpenAI({ apiKey: AI_PROXY_KEY, baseURL: process.env.AI_PROXY_URL }) : null;
 
 if (openaiClient) {
   console.log(`OpenAI image client initialised (model: ${OPENAI_IMAGE_MODEL})`);
 } else {
-  console.warn('OPENAI_API_KEY not set — image generation disabled');
+  console.warn('AI_PROXY_KEY not set — image generation disabled');
 }
 
 // ── Ensure Supabase storage bucket ──
@@ -465,7 +464,7 @@ export async function processAllImageQuestions(jobId: string): Promise<{
   totalFailed: number;
 }> {
   if (!openaiClient) {
-    console.warn('Skipping image generation — OPENAI_API_KEY not configured');
+    console.warn('Skipping image generation — AI_PROXY_KEY not configured');
     return { totalProcessed: 0, totalSuccess: 0, totalFailed: 0 };
   }
 

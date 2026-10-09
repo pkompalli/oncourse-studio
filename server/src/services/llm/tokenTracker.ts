@@ -1,6 +1,6 @@
 /**
  * Per-job token usage tracker.
- * Pipeline steps call start/stop, and brCall automatically accumulates tokens.
+ * Pipeline steps call start/stop, and proxyCall automatically accumulates tokens.
  */
 
 export interface TokenUsage {
@@ -22,7 +22,7 @@ export function startTracking(jobId: string, step: string) {
   if (!steps.has(step)) steps.set(step, { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, calls: 0 });
 }
 
-/** Add token usage from an LLM call (called automatically by brCall). */
+/** Add token usage from an LLM call (called automatically by proxyCall). */
 export function addTokens(prompt: number, completion: number) {
   if (!activeJob.jobId || !activeJob.step) return;
   const steps = jobTokens.get(activeJob.jobId);

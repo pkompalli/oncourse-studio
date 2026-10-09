@@ -10,7 +10,7 @@
  * and tags anything it still can't auto-review as needs_manual_check.
  */
 import { supabase } from '../../db/supabase.js';
-import { brCall, MODELS } from '../llm/bedrock.js';
+import { orCall, MODELS } from '../llm/openrouter.js';
 import { gradabilityIssues } from './shared.js';
 
 const CONCURRENCY = 6;
@@ -61,7 +61,7 @@ ${sharedStimulus}
 RESPONSE_INSTRUCTIONS:${c.response_instructions || ''}
 SUB_QUESTIONS:${JSON.stringify(c.sub_questions || [])}
 Return ONLY JSON {"changed":bool,"exhibits":[...],"sub_questions":[...],"response_instructions":"..."}.`;
-  const r = await brCall(MODELS.AUDITOR, '', prompt, { maxTokens: 26000, thinking: true });
+  const r = await orCall(MODELS.AUDITOR, '', prompt, { maxTokens: 26000 });
   const p = grabJson(r.content);
   if (!p?.sub_questions) return null;
   const nc = { ...c, exhibits: p.exhibits || c.exhibits, sub_questions: p.sub_questions, response_instructions: p.response_instructions ?? c.response_instructions };
@@ -85,7 +85,7 @@ EXHIBITS:${JSON.stringify(c.exhibits || [])}
 NARRATIVE:${String(c.case_narrative || '').slice(0, 1200)}
 SUB_QUESTIONS:${JSON.stringify(slice)}
 Return ONLY JSON {"changed":bool,"sub_questions":[...]} with exactly these ${slice.length} sub-question(s), keeping structure/keys.`;
-    const r = await brCall(MODELS.AUDITOR, '', prompt, { maxTokens: 12000, thinking: true });
+    const r = await orCall(MODELS.AUDITOR, '', prompt, { maxTokens: 12000 });
     const p = grabJson(r.content);
     const subsOut = p?.sub_questions as Record<string, unknown>[] | undefined;
     if (subsOut && subsOut.length === slice.length) { fixed.push(...subsOut); if (p!.changed) changed = true; }
@@ -109,7 +109,7 @@ EXPLANATION:${String(c.explanation || q.explanation || '').slice(0, 900)}
 Return ONLY JSON {"changed":bool,"stem":"...","options":[{"key","text"}],"answer":{...},"explanation":"..."}.`;
   // 8000 (not 3500) so verbose items — e.g. LSAT parallel-reasoning with long
   // analytical options — don't truncate mid-JSON and fall to manual-check.
-  const r = await brCall(MODELS.AUDITOR, '', prompt, { maxTokens: 8000 });
+  const r = await orCall(MODELS.AUDITOR, '', prompt, { maxTokens: 8000 });
   const p = grabJson(r.content);
   if (!p) return null;
   const nc = { ...c, stem: p.stem ?? c.stem, options: p.options ?? c.options, answer: p.answer ?? c.answer, explanation: p.explanation ?? c.explanation };

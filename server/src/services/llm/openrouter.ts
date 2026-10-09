@@ -1,7 +1,7 @@
 /**
  * LLM abstraction layer
  *
- * Currently backed by AWS Bedrock. The orCall function and MODELS export
+ * Backed by the shared ai-proxy (GPT 6.1 Sol). The orCall function and MODELS export
  * are kept for backward compatibility — all callers use these names.
  */
 
@@ -15,13 +15,12 @@ export type ContentPart =
   | { type: 'text'; text: string }
   | { type: 'image_url'; image_url: { url: string } };
 
-// Re-export from bedrock
-import { brCall, MODELS as BR_MODELS } from './bedrock.js';
+import { proxyCall, MODELS as PROXY_MODELS } from './proxy.js';
 
-export const MODELS = BR_MODELS;
+export const MODELS = PROXY_MODELS;
 
 /**
- * Unified LLM call — delegates to Bedrock.
+ * Unified LLM call — delegates to the ai-proxy.
  * Signature kept identical so all existing callers work unchanged.
  */
 export async function orCall(
@@ -34,5 +33,5 @@ export async function orCall(
     jsonMode?: boolean;
   }
 ): Promise<LLMResponse> {
-  return brCall(model, systemPrompt, userPrompt, options);
+  return proxyCall(model, systemPrompt, userPrompt, options);
 }

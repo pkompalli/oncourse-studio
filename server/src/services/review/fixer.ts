@@ -1,6 +1,6 @@
 /**
  * Fixer — faithful port of V1's fix_content() qbank branch (app.py 6410-6582)
- * Model: OR_MAIN_MODEL (Claude) — conservative fix, ONLY changes what's listed
+ * Model: MODELS.FIXER (GPT 6.1 Sol via the ai-proxy) — conservative fix, ONLY changes what's listed
  */
 
 import { orCall, MODELS, type ContentPart } from '../llm/openrouter.js';

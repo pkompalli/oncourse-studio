@@ -93,7 +93,7 @@ async function runWithConcurrency<T>(tasks: (() => Promise<T>)[], max: number): 
         tasks[i]()
           .then((r) => { results[i] = r; })
           .catch((e) => {
-            // Isolate batch failures: a single batch throwing (Bedrock API error,
+            // Isolate batch failures: a single batch throwing (ai-proxy API error,
             // network, fixer, image regen) must NOT crash the whole review run and
             // lose every other question's progress. Log and continue — those
             // questions fall through to audit / needs_review handling.

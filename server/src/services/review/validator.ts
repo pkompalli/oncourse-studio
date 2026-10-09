@@ -414,7 +414,7 @@ export async function runValidatorBatch(
     ];
   }
 
-  // Never throw: a Bedrock/network failure here would otherwise crash the whole
+  // Never throw: an ai-proxy/network failure here would otherwise crash the whole
   // review pipeline (losing all questions). Return whatever we can parse; empty
   // results are handled downstream as needs_review.
   let results: Record<string, unknown>[] = [];

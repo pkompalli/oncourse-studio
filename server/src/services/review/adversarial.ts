@@ -387,7 +387,7 @@ export async function runAdversarialBatch(
     ];
   }
 
-  // Never throw: a Bedrock/network failure here would otherwise crash the whole
+  // Never throw: an ai-proxy/network failure here would otherwise crash the whole
   // review pipeline. Return whatever we can parse; empty is handled downstream.
   let results: Record<string, unknown>[] = [];
   try {
