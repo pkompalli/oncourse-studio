@@ -123,9 +123,16 @@ async function same(stem: string, a: string, b: string): Promise<boolean> {
 
 export interface AdjudicationReport { candidates: number; adjudicated: number; keyChanged: number; edited: number; failed: number }
 
-export async function adjudicateJobKeys(jobId: string, courseName: string, log: (s: string) => void = console.log): Promise<AdjudicationReport> {
-  const rows = await fetchAllRows<Row>((from, to) => supabase.from('qb_questions').select('*')
-    .eq('job_id', jobId).eq('status', 'reviewed').is('replaced_by_id', null).order('question_number').range(from, to));
+/**
+ * `only`: adjudicate exactly these question ids, at whatever status, whether or not their key changed —
+ * for flagged items whose final audit failed KEY_CORRECT or ONE_BEST_ANSWER (reworkFlagged.ts).
+ */
+export async function adjudicateJobKeys(jobId: string, courseName: string, log: (s: string) => void = console.log, only?: Set<string>): Promise<AdjudicationReport> {
+  const rows = (await fetchAllRows<Row>((from, to) => {
+    let qb = supabase.from('qb_questions').select('*').eq('job_id', jobId).is('replaced_by_id', null);
+    if (!only) qb = qb.eq('status', 'reviewed');
+    return qb.order('question_number').range(from, to);
+  })).filter((q) => !only || only.has(q.id));
   const report: AdjudicationReport = { candidates: 0, adjudicated: 0, keyChanged: 0, edited: 0, failed: 0 };
 
   for (const q of rows) {
@@ -136,7 +143,7 @@ export async function adjudicateJobKeys(jobId: string, courseName: string, log: 
     const origKey = original ? keyOf(original) : null;
     const blind = blindDisagreements(q);
     const changed = Boolean(origKey) && !(await same(String(q.question ?? ''), origKey!, cur));
-    if (!changed && !blind.length) continue;
+    if (!only && !changed && !blind.length) continue;
     report.candidates++;
 
     const v = await judge(q, original, blind, courseName);
@@ -219,9 +226,12 @@ export async function sweepLengthCues(jobId: string, courseName: string, log: (s
 // only being listed: the seventh pilot approved 58 of 60 but lost the blind quality comparison with the
 // fourth 14-34, on parallel options and explanations. If the final audit then fails such an item on a
 // MUST check, revertRegressions() restores its approved version, so a style repair cannot cost an approval.
-export async function repairAfterAudit(jobId: string, courseName: string, log: (s: string) => void = console.log): Promise<{ flagged: number; polished: number; repaired: number; failed: number }> {
-  const rows = await fetchAllRows<Row>((from, to) => supabase.from('qb_questions').select('*')
-    .eq('job_id', jobId).in('status', ['flagged', 'approved']).is('replaced_by_id', null).order('question_number').range(from, to));
+// `only` restricts the pass to those question ids (a second round on items still flagged; reworkFlagged.ts),
+// where an image that is still inconsistent after one repair is removed rather than re-aligned.
+export async function repairAfterAudit(jobId: string, courseName: string, log: (s: string) => void = console.log, only?: Set<string>): Promise<{ flagged: number; polished: number; repaired: number; failed: number }> {
+  const rows = (await fetchAllRows<Row>((from, to) => supabase.from('qb_questions').select('*')
+    .eq('job_id', jobId).in('status', ['flagged', 'approved']).is('replaced_by_id', null).order('question_number').range(from, to)))
+    .filter((q) => !only || only.has(q.id));
   const out = { flagged: 0, polished: 0, repaired: 0, failed: 0 };
   // In parallel, under the same LLM_CONCURRENCY as review and audit: one at a time, the fix pass
   // took about 35 minutes for 19 of 50 Step 1 items in the 150-question batch.
@@ -234,11 +244,15 @@ export async function repairAfterAudit(jobId: string, courseName: string, log: (
     if (wasApproved && !(checks || []).some((c) => c.result === 'fail')) return;
     if (wasApproved) out.polished++; else out.flagged++;
     const [probe] = await probeCues([q]);
-    const asks = [
-      ...(checks ? checkChanges(checks, Boolean(q.image_url)) : ((audit?.issues || []) as string[])),
+    // An answer adjudication after this audit has settled KEY_CORRECT and ONE_BEST_ANSWER.
+    const auditAt = trail.lastIndexOf(audit as Row);
+    const adjudicated = trail.slice(auditAt + 1).some((e: Row) => e?.phase === 'key_adjudication');
+    let asks = [
+      ...(checks ? checkChanges(checks.filter((c) => !(adjudicated && (c.id === 'KEY_CORRECT' || c.id === 'ONE_BEST_ANSWER'))), Boolean(q.image_url)) : ((audit?.issues || []) as string[])),
       ...cueIssues(q),
       ...probeIssues(q, probe),
     ];
+    if (only) asks = asks.map((a) => a.replace(/^IMAGE CONFLICT: /, 'IMAGE REMOVE: '));
     if (!asks.length) return;
     const fix = await fixQuestion(q, asks, courseName, { existingBank: true, restructure: true });
     const snap = (x: Row) => ({ question: x.question, options: x.options, correct_option: x.correct_option, explanation: x.explanation });

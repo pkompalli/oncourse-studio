@@ -48,7 +48,10 @@ for (const jobId of jobIds) {
     .eq('job_id', jobId).is('replaced_by_id', null).order('question_number').range(from, to)));
 }
 
-const out = rows.map((q) => {
+// --only <ids.json>: just these qb_questions ids (reworkFlagged.ts output).
+const ONLY_I = process.argv.indexOf('--only');
+const ONLY = ONLY_I >= 0 ? new Set<string>(JSON.parse(readFileSync(process.argv[ONLY_I + 1], 'utf8'))) : null;
+const out = rows.filter((q) => !ONLY || ONLY.has(q.id)).map((q) => {
   const tags = (q.tags || {}) as Row;
   const s = src.get(tags.source_question_id);
   const trail = (q.audit_trail || []) as Row[];

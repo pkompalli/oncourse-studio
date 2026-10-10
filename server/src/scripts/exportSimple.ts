@@ -8,7 +8,7 @@
  * Approved questions only, unless --all. Read-only on the database.
  */
 import 'dotenv/config';
-import { writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { supabase } from '../db/supabase.js';
 import { fetchAllRows } from '../db/pagination.js';
 import { fetchImageAsDataUrl } from '../services/review/shared.js';
@@ -18,6 +18,8 @@ const jobIds = process.argv.slice(2).filter((a) => /^[0-9a-f-]{36}$/.test(a));
 const oi = process.argv.indexOf('--out');
 const OUT = oi >= 0 ? process.argv[oi + 1] : 'backups/usmle_export/simple_export.json';
 const ALL = process.argv.includes('--all');
+// --only <ids.json>: just these qb_questions ids (reworkFlagged.ts output).
+const ONLY = process.argv.indexOf('--only') >= 0 ? new Set<string>(JSON.parse(readFileSync(process.argv[process.argv.indexOf('--only') + 1], 'utf8'))) : null;
 if (!jobIds.length) { console.log('usage: exportSimple.ts <jobId> [<jobId> …] --out <file.json> [--all]'); process.exit(1); }
 
 const STEP_TAG: Record<string, string> = { step1: 'USMLE - Step 1', step2: 'USMLE - Step 2 CK', step3: 'USMLE - Step 3' };
@@ -28,7 +30,7 @@ for (const jobId of jobIds) {
   rows.push(...await fetchAllRows<Row>((from, to) => supabase.from('qb_questions').select('*')
     .eq('job_id', jobId).is('replaced_by_id', null).order('question_number').range(from, to)));
 }
-const chosen = rows.filter((q) => ALL || q.status === 'approved');
+const chosen = rows.filter((q) => (ALL || q.status === 'approved') && (!ONLY || ONLY.has(q.id)));
 
 const out: Row[] = [];
 let missingImages = 0;

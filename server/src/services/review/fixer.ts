@@ -291,8 +291,21 @@ export async function fixQuestion(
   return best;
 }
 
-const IMAGE_ASK = /^IMAGE (CONFLICT|NOT LOADING|MISSING)/;
-const IMAGE_GONE = /^IMAGE (NOT LOADING|MISSING)/;
+// IMAGE REMOVE: an image that stayed inconsistent through a repair already; removed, not re-aligned.
+const IMAGE_ASK = /^IMAGE (CONFLICT|NOT LOADING|MISSING|REMOVE)/;
+const IMAGE_GONE = /^IMAGE (NOT LOADING|MISSING|REMOVE)/;
+
+/** Options as a letter map: { A: text, … }. Accepts the [{ key, text }] or [text] list forms. */
+export function normaliseOptions(o: unknown): unknown {
+  if (!Array.isArray(o)) return o;
+  const out: Record<string, string> = {};
+  o.forEach((x, i) => {
+    const r = x as Record<string, unknown> | string;
+    const key = typeof r === 'object' && r && /^[A-J]$/.test(String(r.key ?? r.letter ?? '')) ? String(r.key ?? r.letter) : 'ABCDEFGHIJ'[i];
+    out[key] = typeof r === 'string' ? r : String(r?.text ?? r?.option_text ?? '');
+  });
+  return out;
+}
 
 /**
  * Whether two wordings of the keyed option name the same answer to this question. Asked of the
@@ -417,6 +430,10 @@ Return ONLY valid JSON. No preamble, no markdown fences.`;
       const wrapper = extractFixerJson(response.content);
       const fixed = (wrapper.question && typeof wrapper.question === 'object' ? wrapper.question : wrapper) as Record<string, unknown>;
       unflatten(fixed);
+      // The options column is a letter map. Shown an item whose content holds [{key, text}], the fixer
+      // sometimes returned that list in the options column too, and 34 items of the full run were then
+      // read as having no options at all.
+      fixed.options = normaliseOptions(fixed.options);
 
       // A fix that reshapes the question is worse than no fix: the flagged defect is
       // usually cosmetic, while the rewrite replaces a valid item with a different one.
