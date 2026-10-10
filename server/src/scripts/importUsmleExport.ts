@@ -41,6 +41,12 @@ const EXCLUDE = argStr('exclude')
   ? new Set<string>(((t) => (t.trim().startsWith('[') ? JSON.parse(t) : t.split(/\s+/)))(readFileSync(argStr('exclude'), 'utf8')).filter(Boolean))
   : new Set<string>();
 const CHUNK = Number(argStr('chunk', '0'));
+// --ids <file>: import only these ids (a JSON array or one per line); --as step2: put them in that Step
+// whatever their recorded one — for items a review retagged to another Step.
+const ONLY_IDS = argStr('ids')
+  ? new Set<string>(((t) => (t.trim().startsWith('[') ? JSON.parse(t) : t.split(/\s+/)))(readFileSync(argStr('ids'), 'utf8')).filter(Boolean))
+  : null;
+const AS_STEP = argStr('as') as Step | '';
 const MANIFEST = argStr('manifest');
 const created: Array<{ job: string; step: string; count: number }> = [];
 
@@ -137,7 +143,11 @@ function toRow(q: Exported, step: Step, from: string, jobId: string, courseName:
 
 const all = (JSON.parse(readFileSync(IN, 'utf8')) as { questions: Exported[] }).questions;
 const byStep: Record<Step, Array<{ q: Exported; from: string }>> = { step1: [], step2: [], step3: [] };
-for (const q of all) { if (EXCLUDE.has(q.id)) continue; const s = stepOf(q); byStep[s.step].push({ q, from: s.from }); }
+for (const q of all) {
+  if (EXCLUDE.has(q.id) || (ONLY_IDS && !ONLY_IDS.has(q.id))) continue;
+  const s = stepOf(q);
+  byStep[AS_STEP || s.step].push({ q, from: AS_STEP ? 'metadata' : s.from });
+}
 if (EXCLUDE.size) console.log(`excluded ${all.length - Object.values(byStep).reduce((n, x) => n + x.length, 0)} already-processed questions`);
 
 // A pilot takes LIMIT per Step, evenly spaced through each Step's id-sorted list (ids are random).
