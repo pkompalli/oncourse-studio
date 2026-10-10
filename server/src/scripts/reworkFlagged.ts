@@ -27,8 +27,17 @@ const tally = { flagged: 0, options_restored: 0, adjudicated: 0, repaired: 0, ap
 
 async function rework(job: string) {
   const tag = `[${job.slice(0, 8)}]`;
-  const { data: rows } = await supabase.from('qb_questions').select('id, options, tags, audit_trail').eq('job_id', job).eq('status', 'flagged').is('replaced_by_id', null);
-  const mine = (rows || []).filter((q) => !q.tags?.belongs_to_exam);
+  // Ids first, then the heavy audit trails five at a time: one query for all of a job's flagged rows
+  // timed out with twelve jobs starting at once.
+  const { data: idRows, error: idErr } = await supabase.from('qb_questions').select('id, tags').eq('job_id', job).eq('status', 'flagged').is('replaced_by_id', null);
+  if (idErr) throw new Error(idErr.message);
+  const wanted = (idRows || []).filter((q) => !q.tags?.belongs_to_exam).map((q) => q.id as string);
+  const mine: Row[] = [];
+  for (let i = 0; i < wanted.length; i += 5) {
+    const { data, error } = await supabase.from('qb_questions').select('id, options, tags, audit_trail').in('id', wanted.slice(i, i + 5));
+    if (error) throw new Error(error.message);
+    mine.push(...(data || []));
+  }
   if (!mine.length) return;
   tally.flagged += mine.length;
   const ids = new Set(mine.map((q) => q.id as string));
