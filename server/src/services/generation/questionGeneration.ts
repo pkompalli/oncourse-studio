@@ -133,6 +133,27 @@ interface SubjectTask {
   _batch?: string;
 }
 
+/**
+ * One line naming what a generated question tests, for the do-not-duplicate list. A stem prefix
+ * says nothing for a bow-tie (every stem opens "A 43-year-old client…"), so its keyed condition leads.
+ */
+export function conceptLine(q: Record<string, unknown>): string {
+  const c = (q.content as Record<string, unknown>) || q;
+  const conds = (c.condition_options as Array<{ key: string; text: string }>) || [];
+  const key = String(((c.answer as Record<string, unknown>) || {}).condition ?? '');
+  const cond = conds.find((o) => o.key === key)?.text;
+  const stem = String(q.question ?? c.stem ?? '').replace(/\s+/g, ' ');
+  return cond ? `Condition: ${cond} — ${stem.slice(0, 70)}` : stem.slice(0, 80);
+}
+
+/** Merge lines into a task's exclusion list under the untagged group. */
+function withExclusions(task: SubjectTask, lines: string[]): Map<string, string[]> | undefined {
+  if (!lines.length) return task.existing_stems_by_topic;
+  const m = new Map(task.existing_stems_by_topic || []);
+  m.set('_general', [...(m.get('_general') || []), ...lines]);
+  return m;
+}
+
 // ── Distribute question types across a subject ──
 
 function allocateQuestionTypes(
@@ -872,6 +893,26 @@ Schema for image_regions (ONLY for true images with no discrete text):
 }
 
 Self-check before returning: correct_ids non-empty, every id in correct_ids exists in targets/regions, NO answer.region/label/landmark, ≥2 targets, rationale has entry per target id.`;
+        break;
+      case 'bow_tie':
+        schema = `FORMAT: bow_tie (${alloc.name}) — ${alloc.count} question(s)
+A stand-alone Next Generation NCLEX bow-tie item. The scenario supplies the cues (history, assessment findings, vital signs, results); the candidate completes the diagram: centre = the condition the client is most likely experiencing (1 of 4), left = actions to take (2 of 5), right = parameters to monitor (2 of 5).
+{
+  "format_type": "bow_tie",
+  "question": "<client scenario of 80-200 words with the cues the decision needs, ending: 'Complete the diagram by selecting from the choices below to specify the condition the client is most likely experiencing, 2 actions the nurse should take to address that condition, and 2 parameters the nurse should monitor to assess the client's progress.'>",
+  "condition_options": [{"key": "C1", "text": "<condition>"}, {"key": "C2", "text": "<condition>"}, {"key": "C3", "text": "<condition>"}, {"key": "C4", "text": "<condition>"}],
+  "action_options": [{"key": "A1", "text": "<nursing action>"}, {"key": "A2", "text": "..."}, {"key": "A3", "text": "..."}, {"key": "A4", "text": "..."}, {"key": "A5", "text": "..."}],
+  "parameter_options": [{"key": "P1", "text": "<parameter to monitor>"}, {"key": "P2", "text": "..."}, {"key": "P3", "text": "..."}, {"key": "P4", "text": "..."}, {"key": "P5", "text": "..."}],
+  "answer": {"condition": "C2", "actions": ["A1", "A4"], "parameters": ["P2", "P5"]},
+  "scoring": "0/1",
+  "explanation": "<why the cues point to the keyed condition and not each other condition; why each keyed action and parameter follows from it; why each distractor action and parameter is wrong or lower priority — name options by their text>",
+  "difficulty": "<easy|medium|hard>",
+  "bloom_level": "<3_apply|4_analyze|5_evaluate>",
+  "is_image_question": false,
+  "image_type": null,
+  "image_search_terms": []
+}
+Rules: the stem gives cues only — it must NOT list prescriptions, orders, standing protocols or a care plan that name the correct actions or treatment (the candidate infers the actions from the condition), and it never names the condition; each item in the set keys a different condition; exactly 4 conditions, 5 actions, 5 parameters; exactly 1 keyed condition, 2 keyed actions, 2 keyed parameters; vary which keys are correct across items; options in each group are the same kind of thing and similar in length; no option names the condition in the stem's own words.`;
         break;
       case 'matrix_grid':
         schema = `FORMAT: matrix_grid (${alloc.name}) — ${alloc.count} question(s)
@@ -1711,8 +1752,12 @@ export async function professorGenerateQuestions(
       if (batchAllocations.length === 0) batchAllocations = undefined;
     }
 
+    // Earlier batches of this subject count as existing: batches were written blind to each other,
+    // and the first NCLEX bow-tie run keyed two cord prolapses, two intussusceptions and two lithium
+    // toxicities across batches of one subject.
     const batchTask: SubjectTask = {
       ...subjectTask,
+      existing_stems_by_topic: withExclusions(subjectTask, allQuestions.map(conceptLine)),
       num_questions: batchSize,
       num_image_qs: Math.max(0, batchImgQ),
       bloom_counts: batchBloom,
@@ -2030,6 +2075,16 @@ function buildContentFromQuestion(q: Record<string, unknown>): Record<string, un
 
       return content;
     }
+    case 'bow_tie':
+      return {
+        stem: q.question as string,
+        condition_options: (q.condition_options as unknown[]) || [],
+        action_options: (q.action_options as unknown[]) || [],
+        parameter_options: (q.parameter_options as unknown[]) || [],
+        answer: (q.answer as Record<string, unknown>) || {},
+        scoring: (q.scoring as string) || '0/1',
+        explanation: (q.explanation as string) || '',
+      };
     case 'matrix_grid':
       return {
         stem: q.question as string,
@@ -2731,6 +2786,12 @@ export async function replaceBatchForJob(
 
     let replaced = 0, failed = 0, manualReview = 0;
 
+    // What the job keeps (everything not being replaced), for the replacements' exclusion list.
+    const retiring = new Set(batch.map((q) => q.id as string));
+    const keepers = await fetchAllRows<Record<string, any>>((from, to) => supabase.from('qb_questions')
+      .select('id, question, content').eq('job_id', jobId).is('replaced_by_id', null).range(from, to))
+      .then((rows) => rows.filter((q) => !retiring.has(q.id as string)));
+
     for (const [subject, olds] of bySubject) {
       const before = await questionIdsForJob(jobId);
 
@@ -2766,6 +2827,9 @@ export async function replaceBatchForJob(
         exam_pattern: examFormat.exam_pattern as Record<string, unknown>,
         question_type_allocations: allocations,
         guidelines,
+        // Everything else in the job, so a replacement is a new concept rather than the same topic
+        // written again (the bow-tie replacements re-keyed three opioid overdoses).
+        existing_stems_by_topic: new Map([['_general', keepers.map(conceptLine)]]),
       };
 
       let fresh: Record<string, unknown>[] = [];
@@ -3006,6 +3070,37 @@ export async function generateBatchForJob(
   }
 
   allocateFormatsAcrossTasks(tasks, guidelines);
+
+  // Job overrides for a targeted set: config.subject_question_counts sets each subject's size
+  // (subjects not listed are dropped), config.format_only generates one format throughout — e.g.
+  // 60 NCLEX bow-tie items across the subjects the format fits.
+  const subjectCounts = jobConfig.subject_question_counts as Record<string, number> | undefined;
+  if (subjectCounts && Object.keys(subjectCounts).length) {
+    for (let i = tasks.length - 1; i >= 0; i--) {
+      const t = tasks[i];
+      const n = subjectCounts[t.subject];
+      if (!n) { tasks.splice(i, 1); continue; }
+      const total = Object.values(t.bloom_counts || {}).reduce((x, y) => x + y, 0) || 1;
+      let left = n;
+      const levels = Object.entries(t.bloom_counts || {}).sort((x, y) => y[1] - x[1]);
+      t.bloom_counts = Object.fromEntries(levels.map(([lvl, c], j) => {
+        const v = j === levels.length - 1 ? Math.max(0, left) : Math.round((c / total) * n);
+        left -= v; return [lvl, v];
+      }));
+      t.num_image_qs = Math.round((t.num_image_qs / Math.max(1, t.num_questions)) * n);
+      t.num_questions = n;
+    }
+    if (!tasks.length) throw new Error('subject_question_counts matched no subject in the course structure');
+  }
+  const formatOnly = jobConfig.format_only ? canonicalizeFormatSlug(String(jobConfig.format_only)) : '';
+  if (formatOnly) {
+    const contract = FORMAT_CONTRACTS[formatOnly];
+    for (const t of tasks) {
+      t.question_type_allocations = [{ slug: formatOnly, name: contract?.label ?? formatOnly, count: t.num_questions, percentage: 100 }];
+      if (formatOnly === 'bow_tie') t.num_image_qs = 0;
+    }
+    console.log(`[generation] format_only=${formatOnly}: ${tasks.map((t) => `${t.subject} ${t.num_questions}`).join(', ')}`);
+  }
 
   const totalSubjects = tasks.length;
 

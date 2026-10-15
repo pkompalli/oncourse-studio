@@ -84,6 +84,17 @@ export const FORMAT_CONTRACTS: Record<string, FormatContract> = {
     syntax: ['≥2 targets.', 'text_targets for discrete text elements; image_regions ONLY for genuine photos/figures.', 'scoring: dichotomous (single) | plus_minus (multiple).'],
     stimulusRule: 'The stimulus (targets or image) is REQUIRED — it is what the candidate clicks.',
   },
+  bow_tie: {
+    slug: 'bow_tie',
+    label: 'Bow-Tie (NGN)',
+    structure: 'stem (client scenario); condition_options[] (4, each {key,text}); action_options[] (5); parameter_options[] (5); answer.condition = one condition key; answer.actions[] = exactly 2 action keys; answer.parameters[] = exactly 2 parameter keys; explanation.',
+    gradability: 'answer.condition is one key of condition_options; answer.actions has exactly 2 keys of action_options; answer.parameters has exactly 2 keys of parameter_options. Scored 0/1 per correct selection (5 points).',
+    syntax: [
+      'A stand-alone Next Generation NCLEX item: the client scenario gives the cues; the candidate fills the centre (condition most likely experiencing), the left (2 actions to take) and the right (2 parameters to monitor).',
+      'Exactly one condition is supported by the cues; the other conditions are plausible alternatives the same presentation could suggest.',
+      'The 2 correct actions and 2 correct parameters follow from the correct condition; each distractor is plausible for a neighbouring condition or is a reasonable but lower-priority choice.',
+    ],
+  },
   matrix_grid: {
     slug: 'matrix_grid',
     label: 'Matrix / Grid Classification',
@@ -262,6 +273,7 @@ const FORMAT_ALIASES: Array<[RegExp, string]> = [
   [/extended[_\s-]?matching|\bemq\b/, 'emq'],
   [/ordered[_\s-]?response|drag[_\s-]?(and[_\s-]?)?drop|sequenc|ordering|reorder/, 'ordered_response'],
   [/hot[_\s-]?spot|image[_\s-]?region|point[_\s-]?and[_\s-]?click|click[_\s-]?to/, 'hot_spot'],
+  [/bow[_\s-]?tie/, 'bow_tie'],
   [/\bmatrix\b|\bgrid\b/, 'matrix_grid'],
   [/cloze|dropdown/, 'cloze_dropdown'],
   [/fill[_\s-]?in|fill[_\s-]?blank|numeric[_\s-]?entry/, 'fill_blank'],
@@ -545,6 +557,19 @@ export function buildContentSchema(format: string, p: SchemaParams = {}): JsonSc
           { required: ['correct_ids'], properties: { correct_ids: { type: 'array', minItems: 1, items: NON_EMPTY_STR } } },
           { required: ['region'] } ] },
         explanation: STR } };
+    case 'bow_tie': {
+      const opt = { type: 'object', required: ['key', 'text'], properties: { key: NON_EMPTY_STR, text: NON_EMPTY_STR } };
+      return { ...base, required: ['stem', 'condition_options', 'action_options', 'parameter_options', 'answer'], properties: {
+        stem: NON_EMPTY_STR,
+        condition_options: { type: 'array', minItems: 3, items: opt },
+        action_options: { type: 'array', minItems: 4, items: opt },
+        parameter_options: { type: 'array', minItems: 4, items: opt },
+        answer: { type: 'object', required: ['condition', 'actions', 'parameters'], properties: {
+          condition: NON_EMPTY_STR,
+          actions: { type: 'array', minItems: 2, maxItems: 2, items: NON_EMPTY_STR },
+          parameters: { type: 'array', minItems: 2, maxItems: 2, items: NON_EMPTY_STR } } },
+        explanation: STR } };
+    }
     case 'matrix_grid':
       return { ...base, required: ['stem', 'row_headers', 'column_headers'], properties: {
         stem: NON_EMPTY_STR,

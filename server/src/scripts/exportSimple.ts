@@ -32,6 +32,11 @@ for (const jobId of jobIds) {
 }
 const chosen = rows.filter((q) => (ALL || q.status === 'approved') && (!ONLY || ONLY.has(q.id)));
 
+// Course names for tags on items that are not imported USMLE items.
+const courseIds = [...new Set(rows.map((q) => q.course_id).filter(Boolean))];
+const { data: courseRows } = courseIds.length ? await supabase.from('qb_courses').select('id, name').in('id', courseIds) : { data: [] };
+const courseName = new Map((courseRows || []).map((c: Row) => [c.id, String(c.name)]));
+
 const out: Row[] = [];
 let missingImages = 0;
 for (const q of chosen) {
@@ -39,19 +44,26 @@ for (const q of chosen) {
   const step = STEP_OF_EXAM[String(tags.belongs_to_exam ?? '')] ?? tags.step;
   const image = q.image_url ? await fetchImageAsDataUrl(q.image_url) : null;
   if (q.image_url && !image) missingImages++;
+  // A bow-tie item keeps its three option groups and its key in content; exported with the same
+  // field names, as groups ({condition, actions, parameters}) in place of a letter map.
+  const c = (q.content || {}) as Row;
+  const bowTie = Array.isArray(c.condition_options);
+  const opts = (v: unknown) => Object.fromEntries(((v as Row[]) || []).map((o) => [o.key, o.text]));
   out.push({
-    question: q.question,
-    options: q.options,
-    correct_option: q.correct_option,
+    question: q.question || c.stem,
+    ...(bowTie ? { format: 'bow_tie' } : {}),
+    options: bowTie ? { condition: opts(c.condition_options), actions: opts(c.action_options), parameters: opts(c.parameter_options) } : q.options,
+    correct_option: bowTie ? { condition: c.answer?.condition, actions: c.answer?.actions, parameters: c.answer?.parameters } : q.correct_option,
+    ...(bowTie ? { scoring: c.scoring || '0/1' } : {}),
     type: q.image_url ? 'image' : 'text',
     image_base64: image,
-    explanation: q.explanation,
+    explanation: q.explanation || c.explanation,
     subject: q.subject,
     topic: q.topic,
     original_question_id: tags.source_question_id ?? null,
     difficulty: q.difficulty ?? tags.difficulty ?? null,
     blooms_level: q.blooms_level ?? tags.blooms ?? null,
-    tags: ['USMLE', STEP_TAG[step] ?? 'USMLE'],
+    tags: step ? ['USMLE', STEP_TAG[step] ?? 'USMLE'] : [courseName.get(q.course_id) ?? 'Unknown', ...(bowTie ? ['Bow-Tie'] : [])],
   });
 }
 

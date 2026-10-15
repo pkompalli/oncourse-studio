@@ -381,6 +381,8 @@ function buildSchemaForType(qt: QuestionTypeInfo): Record<string, unknown> {
       return { ...base, answer: { type: 'object', properties: { value: 'string', unit: 'string' }, required: true } };
     case 'hot_spot':
       return { ...base, image_url: { type: 'string', required: true }, answer: { type: 'object', properties: { region: 'string', description: 'string' }, required: true } };
+    case 'bow_tie':
+      return { ...base, condition_options: { type: 'array', items: { key: 'string', text: 'string' }, required: true }, action_options: { type: 'array', items: { key: 'string', text: 'string' }, required: true }, parameter_options: { type: 'array', items: { key: 'string', text: 'string' }, required: true }, answer: { type: 'object', properties: { condition: 'string', actions: 'string[]', parameters: 'string[]' }, required: true } };
     case 'matrix_grid':
       return { ...base, rows: { type: 'array', items: 'string', required: true }, columns: { type: 'array', items: 'string', required: true }, correct_cells: { type: 'array', items: { row: 'number', col: 'number' }, required: true } };
     case 'emq':
@@ -417,6 +419,7 @@ function buildDisplayForType(qt: QuestionTypeInfo): Record<string, unknown> {
     drag_drop: 'stem_then_sortable',
     hot_spot: 'stem_then_image_click',
     matrix_grid: 'stem_then_grid',
+    bow_tie: 'bow_tie_diagram',
     cloze_dropdown: 'inline_dropdowns',
     case_study: 'case_with_sub_questions',
     task_based_simulation: 'case_with_sub_questions',

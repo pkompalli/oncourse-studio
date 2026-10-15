@@ -159,6 +159,21 @@ function standaloneIssues(ft: string, c: Record<string, unknown>, q: Record<stri
       if (!_has(c.items) && !_has(c.answer)) out.push('missing answer');
       break;
     }
+    case 'bow_tie': {
+      const keysOf = (v: unknown) => (Array.isArray(v) ? (v as Array<Record<string, unknown>>).map((o) => String(o?.key ?? '')) : []);
+      const conds = keysOf(c.condition_options), acts = keysOf(c.action_options), pars = keysOf(c.parameter_options);
+      const ans = (c.answer as Record<string, unknown>) || {};
+      if (!_has(c.stem) && !_has(q.question)) out.push('missing stem');
+      if (conds.length < 3) out.push('needs at least 3 condition options (4 on the exam)');
+      if (acts.length < 4) out.push('needs at least 4 action options (5 on the exam)');
+      if (pars.length < 4) out.push('needs at least 4 parameter options (5 on the exam)');
+      if (!conds.includes(String(ans.condition ?? ''))) out.push('answer.condition is not one of the condition options');
+      const ak = Array.isArray(ans.actions) ? (ans.actions as unknown[]).map(String) : [];
+      const pk = Array.isArray(ans.parameters) ? (ans.parameters as unknown[]).map(String) : [];
+      if (ak.length !== 2 || !ak.every((k) => acts.includes(k)) || new Set(ak).size !== 2) out.push('answer.actions must be exactly 2 distinct action option keys');
+      if (pk.length !== 2 || !pk.every((k) => pars.includes(k)) || new Set(pk).size !== 2) out.push('answer.parameters must be exactly 2 distinct parameter option keys');
+      break;
+    }
     case 'matrix_grid':
       if (!_has(c.row_headers) && !_has(c.rows)) out.push('missing row_headers');
       if (!_has(c.column_headers) && !_has(c.columns)) out.push('missing column_headers');
@@ -455,6 +470,13 @@ function formatOneQuestion(q: Record<string, unknown>, i: number, blind = false)
         // Legacy fallback
         bodyStr = blind ? '(region answer)' : `Correct Region: ${JSON.stringify(answer.region || q.correct_region || '')}`;
       }
+      break;
+    }
+    case 'bow_tie': {
+      const list = (v: unknown) => ((v as Array<{ key: string; text: string }>) || []).map((o) => `  ${o.key}. ${o.text}`).join('\n');
+      const ans = (content?.answer as { condition?: string; actions?: string[]; parameters?: string[] }) || {};
+      const body = `Bow-tie diagram — select 1 condition, 2 actions to take, 2 parameters to monitor.\nConditions:\n${list(content?.condition_options)}\nActions to take:\n${list(content?.action_options)}\nParameters to monitor:\n${list(content?.parameter_options)}`;
+      bodyStr = blind ? body : `${body}\nKey: condition ${ans.condition}; actions ${(ans.actions || []).join(', ')}; parameters ${(ans.parameters || []).join(', ')} (0/1 scoring, 5 points)`;
       break;
     }
     case 'matrix_grid': {

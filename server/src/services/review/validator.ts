@@ -208,6 +208,7 @@ Output ONLY the JSON array. No preamble, no trailing text.`;
   // Adaptive per-format structural checks — for whatever structured formats are
   // present in this batch (standalone questions OR case-study sub-questions).
   const structuralChecks: string[] = [];
+  if (inBatch('bow_tie')) structuralChecks.push('bow_tie: 4 conditions, 5 actions, 5 parameters; exactly 1 keyed condition the cues uniquely support, 2 keyed actions and 2 keyed parameters that follow from that condition; every distractor plausible for a neighbouring condition or a lower priority; the stem must not name the condition, and must not list prescriptions, orders or protocols that name the keyed actions (flag it and ask for that sentence to be removed so the actions are inferred from the condition).');
   if (inBatch('matrix_grid')) structuralChecks.push('matrix_grid: needs row_headers[] + column_headers[] + a correct classification for EVERY row; columns must be mutually exclusive & collectively exhaustive.');
   if (inBatch('cloze_dropdown')) structuralChecks.push('cloze_dropdown: EVERY blank needs a plausible options list that INCLUDES the correct value, and a stated correct value; the stem must mark each blank.');
   if (inBatch('emq')) structuralChecks.push('emq: needs an option_list and, for each scenario, exactly one correct option drawn from that list.');
