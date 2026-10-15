@@ -318,6 +318,22 @@ function subjectBoundFormats(guidelines: Record<string, unknown>): Record<string
   }
   return out;
 }
+/**
+ * A floor on a format's count per generated set: format_specs[slug].min_per_set = { count, from_questions }.
+ * Proportional allocation rounds a 3% format to nothing in a short quiz; NCLEX wants at least one bow-tie
+ * in any clinical quiz of 15 or more.
+ */
+function formatMinimums(guidelines: Record<string, unknown>): Record<string, { count: number; from: number }> {
+  const specs = (guidelines?.format_specs || {}) as Record<string, Record<string, unknown>>;
+  const out: Record<string, { count: number; from: number }> = {};
+  for (const [slug, spec] of Object.entries(specs)) {
+    const m = spec?.min_per_set as Record<string, unknown> | undefined;
+    const count = Number(m?.count), from = Number(m?.from_questions) || 0;
+    if (count > 0) out[canonicalizeFormatSlug(slug)] = { count, from };
+  }
+  return out;
+}
+
 const subjectFits = (subject: string, allowed: string[]) => {
   const s = subject.toLowerCase().trim();
   return allowed.some((a) => a === s || s.includes(a) || a.includes(s));
@@ -325,6 +341,7 @@ const subjectFits = (subject: string, allowed: string[]) => {
 
 export function allocateFormatsAcrossTasks(tasks: SubjectTask[], guidelines: Record<string, unknown>): void {
   const bound = subjectBoundFormats(guidelines);
+  const minimums = formatMinimums(guidelines);
   // A course covering several exams is several PAPERS with different mixes — CPA's ISC is
   // 82 MCQ + 6 TBS where AUD is 78 + 7. Balance each exam against its OWN counts; pooling
   // them would average the mixes and leave every individual paper wrong.
@@ -333,7 +350,7 @@ export function allocateFormatsAcrossTasks(tasks: SubjectTask[], guidelines: Rec
     for (const [exam, group] of groupByExam(tasks, (t) => (t.exam && sizes[t.exam] ? t.exam : ''))) {
       const counts = exam ? sizes[exam]?.format_question_counts : undefined;
       if (!exam || !counts) continue; // no per-exam counts — leave this group as built
-      allocateFormatsForGroup(group, counts, exam, bound);
+      allocateFormatsForGroup(group, counts, exam, bound, minimums);
     }
     return;
   }
@@ -347,7 +364,7 @@ export function allocateFormatsAcrossTasks(tasks: SubjectTask[], guidelines: Rec
     if (slug && Number.isFinite(n) && n > 0) declared[slug] = n;
   }
   if (Object.keys(declared).length === 0 || tasks.length === 0) return;
-  allocateFormatsForGroup(tasks, declared, '', bound);
+  allocateFormatsForGroup(tasks, declared, '', bound, minimums);
 }
 
 /**
@@ -495,7 +512,7 @@ function layOutFormats(tasks: SubjectTask[], target: Record<string, number>, lab
 }
 
 /** Balance one pool of tasks onto one set of per-format item counts. */
-function allocateFormatsForGroup(tasks: SubjectTask[], declared: Record<string, number>, label: string, bound: Record<string, string[]> = {}): void {
+function allocateFormatsForGroup(tasks: SubjectTask[], declared: Record<string, number>, label: string, bound: Record<string, string[]> = {}, minimums: Record<string, { count: number; from: number }> = {}): void {
   if (Object.keys(declared).length === 0 || tasks.length === 0) return;
 
   // Scale the declared counts onto the budget actually being generated. They describe
@@ -503,6 +520,18 @@ function allocateFormatsForGroup(tasks: SubjectTask[], declared: Record<string, 
   const budget = tasks.reduce((n, t) => n + (t.num_questions || 0), 0);
   if (budget <= 0) return;
   const target = rescaleToTotal(declared, budget, 0);
+  // Raise a format to its per-set floor (formatMinimums), taken from the largest unconstrained
+  // standalone format. Only where the set is big enough and, for a subject-bound format, has a
+  // subject it fits — so the rebalancing below keeps it rather than moving it back.
+  for (const [slug, m] of Object.entries(minimums)) {
+    if (!(slug in target) || budget < m.from || (target[slug] || 0) >= m.count) continue;
+    if (bound[slug] && !tasks.some((t) => subjectFits(t.subject, bound[slug]))) continue;
+    const donor = Object.keys(target).filter((s) => s !== slug && !GROUPED_FORMATS.has(s) && !bound[s] && !minimums[s]).sort((a, b) => target[b] - target[a])[0];
+    const add = Math.min(m.count - (target[slug] || 0), donor ? target[donor] : 0);
+    if (add <= 0) continue;
+    target[slug] = (target[slug] || 0) + add;
+    target[donor] -= add;
+  }
 
   // BUILD the allocation rather than repair one. The incoming per-task split came from
   // allocationsFromGuidelines, which converts a grouped format's share into UNITS — one
