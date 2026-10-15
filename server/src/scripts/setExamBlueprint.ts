@@ -49,17 +49,19 @@ const BLUEPRINTS: Record<string, Blueprint> = {
     id: '5e3d672a-5539-4416-8bf5-1a66e8eaf414',
     label: 'NCLEX-RN (Next Generation)',
     rows: {
-      mcq_single: 85,        // the dominant traditional type
+      mcq_single: 81,        // the dominant traditional type
       sata: 20,              // multiple response, including extended; partial credit
       matrix_grid: 10,       // each row classified into one exclusive column
       cloze_dropdown: 8,     // clinical note with embedded closed-list blanks
       ordered_response: 5,   // steps in sequence
       fill_blank: 4,         // dosage and intake-output calculation
       case_study: 3,         // unfolding EHR cases, six items each, one per CJMM step
+      bow_tie: 4,            // stand-alone NGN item: 1 condition, 2 actions, 2 parameters (addNclexBowTie.ts)
     },
     itemsPerGroup: { case_study: 6 },
     source: 'Maximum-length NGN form delivers 150 items. Three unfolding case studies at six '
-      + 'items each (one per Clinical Judgment Measurement Model step) plus 132 standalone.',
+      + 'items each (one per Clinical Judgment Measurement Model step) plus 132 standalone, '
+      + 'of which the stand-alone NGN items include bow-tie (4 here).',
   },
   mcat: {
     id: '42c85248-7209-4bfe-9f94-ea128e3ab598',

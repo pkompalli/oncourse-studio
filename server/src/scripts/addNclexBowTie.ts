@@ -15,6 +15,8 @@ const ID = '5e3d672a-5539-4416-8bf5-1a66e8eaf414';
 const APPLY = process.argv.includes('--apply');
 
 const SPEC = {
+  // Where generation may place bow-tie slots (questionGeneration.ts subjectBoundFormats).
+  subjects: ['Medical-Surgical Nursing', 'Critical Care & Emergency Nursing', 'Pediatric Nursing', "Maternal-Newborn & Women's Health Nursing", 'Gerontological Nursing', 'Applied Pharmacology by System'],
   when_to_use: "A stand-alone item testing several clinical-judgment steps at once (recognise cues, analyse cues and prioritise hypotheses, take action, evaluate outcomes) for a client with one acute or evolving condition. Best fit: Medical-Surgical, Critical Care & Emergency, Maternal-Newborn & Women's Health, Pediatric, Gerontological and Applied Pharmacology by System. Not for recall, milestones, delegation or legal rules.",
   gradability: 'answer.condition is exactly one key of condition_options; answer.actions is exactly 2 distinct keys of action_options; answer.parameters is exactly 2 distinct keys of parameter_options. Scoring 0/1: one point per correct selection, 5 points.',
   structure_requirements: [

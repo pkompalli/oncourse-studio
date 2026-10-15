@@ -128,6 +128,8 @@ interface SubjectTask {
   exam_pattern?: Record<string, unknown>;
   subject_profile?: Record<string, unknown>;
   existing_stems_by_topic?: Map<string, string[]>;
+  /** Every topic of this subject in the course structure: the only values a question's topic may take. */
+  subject_topics?: string[];
   question_type_allocations?: QuestionTypeAllocation[];
   guidelines?: Record<string, unknown>;
   _batch?: string;
@@ -144,6 +146,45 @@ export function conceptLine(q: Record<string, unknown>): string {
   const cond = conds.find((o) => o.key === key)?.text;
   const stem = String(q.question ?? c.stem ?? '').replace(/\s+/g, ' ');
   return cond ? `Condition: ${cond} — ${stem.slice(0, 70)}` : stem.slice(0, 80);
+}
+
+/** All topic names of a subject in a course structure (matched by name, case-insensitively). */
+export function structureTopics(structure: Record<string, unknown> | null | undefined, subject: string): string[] {
+  const subs = ((structure?.subjects as Array<Record<string, unknown>>) || []);
+  const key = subject.trim().toLowerCase();
+  const hit = subs.find((s) => String(s.name || '').trim().toLowerCase() === key)
+    || subs.find((s) => { const n = String(s.name || '').trim().toLowerCase(); return n && (n.includes(key) || key.includes(n)); });
+  return ((hit?.topics as Array<Record<string, unknown>>) || []).map((t) => String(t.name || '').trim()).filter(Boolean);
+}
+
+/**
+ * The structure topic a question belongs to. The model is asked to tag each question with one of the
+ * subject's structure topics verbatim; its answer is kept when it is one, matched when it is close, and
+ * otherwise the topic whose name shares most words with the stem is used. Topics used to be handed out
+ * in rotation whatever the question was about (a malignant-hyperthermia bow-tie filed under "Sensory
+ * Disorders (Eye & Ear)").
+ */
+export function resolveTopic(given: string, stem: string, allowed: string[]): string | null {
+  if (!allowed.length) return null;
+  const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const g = norm(given || '');
+  if (g) {
+    const exact = allowed.find((t) => norm(t) === g);
+    if (exact) return exact;
+    const near = allowed.find((t) => norm(t).includes(g) || g.includes(norm(t)));
+    if (near) return near;
+  }
+  const STOP = new Set(['and', 'the', 'of', 'in', 'for', 'with', 'care', 'nursing', 'disorders', 'management', 'client', 'clients']);
+  const words = (s: string) => new Set(norm(s).split(' ').filter((w) => w.length > 2 && !STOP.has(w)));
+  const gw = words(given || ''), sw = words(stem || '');
+  let best: string | null = null, bestScore = 0;
+  for (const t of allowed) {
+    const tw = words(t);
+    let score = 0;
+    for (const w of tw) { if (gw.has(w)) score += 3; if (sw.has(w)) score += 1; }
+    if (score > bestScore) { best = t; bestScore = score; }
+  }
+  return best;
 }
 
 /** Merge lines into a task's exclusion list under the untagged group. */
@@ -263,7 +304,27 @@ function subjectAwareGroupedAllocation(subject: string, numQ: number, guidelines
  * No-op when the guidelines carry no counts, so a course without a declared size keeps
  * today's percentage behaviour.
  */
+/**
+ * Formats confined to certain subjects: format_specs[slug].subjects in the guidelines. A bow-tie needs a
+ * client with an acute condition to act on and monitor, so on NCLEX it belongs to the clinical subjects,
+ * not Anatomy & Physiology or Leadership & Law.
+ */
+function subjectBoundFormats(guidelines: Record<string, unknown>): Record<string, string[]> {
+  const specs = (guidelines?.format_specs || {}) as Record<string, Record<string, unknown>>;
+  const out: Record<string, string[]> = {};
+  for (const [slug, spec] of Object.entries(specs)) {
+    const subs = spec?.subjects;
+    if (Array.isArray(subs) && subs.length) out[canonicalizeFormatSlug(slug)] = subs.map((s) => String(s).toLowerCase().trim());
+  }
+  return out;
+}
+const subjectFits = (subject: string, allowed: string[]) => {
+  const s = subject.toLowerCase().trim();
+  return allowed.some((a) => a === s || s.includes(a) || a.includes(s));
+};
+
 export function allocateFormatsAcrossTasks(tasks: SubjectTask[], guidelines: Record<string, unknown>): void {
+  const bound = subjectBoundFormats(guidelines);
   // A course covering several exams is several PAPERS with different mixes — CPA's ISC is
   // 82 MCQ + 6 TBS where AUD is 78 + 7. Balance each exam against its OWN counts; pooling
   // them would average the mixes and leave every individual paper wrong.
@@ -272,7 +333,7 @@ export function allocateFormatsAcrossTasks(tasks: SubjectTask[], guidelines: Rec
     for (const [exam, group] of groupByExam(tasks, (t) => (t.exam && sizes[t.exam] ? t.exam : ''))) {
       const counts = exam ? sizes[exam]?.format_question_counts : undefined;
       if (!exam || !counts) continue; // no per-exam counts — leave this group as built
-      allocateFormatsForGroup(group, counts, exam);
+      allocateFormatsForGroup(group, counts, exam, bound);
     }
     return;
   }
@@ -286,7 +347,7 @@ export function allocateFormatsAcrossTasks(tasks: SubjectTask[], guidelines: Rec
     if (slug && Number.isFinite(n) && n > 0) declared[slug] = n;
   }
   if (Object.keys(declared).length === 0 || tasks.length === 0) return;
-  allocateFormatsForGroup(tasks, declared, '');
+  allocateFormatsForGroup(tasks, declared, '', bound);
 }
 
 /**
@@ -332,7 +393,7 @@ export function scoreAgainstAllocation(
  * keeps each subject's simulation count meaningful instead of rounding to zero everywhere —
  * which is what made the per-batch splitter drop them entirely.
  */
-function layOutFormats(tasks: SubjectTask[], target: Record<string, number>, label: string): void {
+function layOutFormats(tasks: SubjectTask[], target: Record<string, number>, label: string, bound: Record<string, string[]> = {}): void {
   const bySize = [...tasks].sort((a, b) => (b.num_questions || 0) - (a.num_questions || 0));
   const capacity = new Map<SubjectTask, number>(bySize.map((t) => [t, t.num_questions || 0]));
   const out = new Map<SubjectTask, QuestionTypeAllocation[]>(bySize.map((t) => [t, []]));
@@ -375,9 +436,35 @@ function layOutFormats(tasks: SubjectTask[], target: Record<string, number>, lab
     }
   }
 
+  // Phase 1b — standalone formats confined to certain subjects, spread over those subjects by size.
+  // What cannot be placed (no fitting subject in this job, or no room) goes back to the general
+  // standalone mix, so the totals still land.
+  for (const slug of slugs.filter((s) => !GROUPED_FORMATS.has(s) && bound[s])) {
+    const fit = bySize.filter((t) => subjectFits(t.subject, bound[slug]));
+    let want = remaining[slug];
+    const fitSize = fit.reduce((n, t) => n + (t.num_questions || 0), 0);
+    if (want > 0 && fitSize > 0) {
+      const exact = fit.map((t) => ({ t, v: (want * (t.num_questions || 0)) / fitSize }));
+      const base = exact.map((e) => ({ ...e, n: Math.min(Math.floor(e.v), capacity.get(e.t) || 0) }));
+      for (const e of base) { give(e.t, slug, e.n); want -= e.n; }
+      for (const e of [...base].sort((a, b) => (b.v - Math.floor(b.v)) - (a.v - Math.floor(a.v)))) {
+        if (want <= 0) break;
+        if ((capacity.get(e.t) || 0) <= 0) continue;
+        give(e.t, slug, 1); want -= 1;
+      }
+    }
+    if (remaining[slug] > 0) {
+      const spare = remaining[slug];
+      remaining[slug] = 0;
+      const host = slugs.filter((s) => !GROUPED_FORMATS.has(s) && !bound[s]).sort((a, b) => remaining[b] - remaining[a])[0];
+      if (host) remaining[host] += spare;
+      console.log(`  [Alloc] ${label || 'exam'}: ${spare} ${slug} slot(s) had no fitting subject — given to ${host ?? 'nothing'}`);
+    }
+  }
+
   // Phase 2 — fill every task's remaining room from the standalone formats, always taking
   // from the one that still owes the most. Σtargets equals Σcapacities, so this lands exactly.
-  const standalone = slugs.filter((s) => !GROUPED_FORMATS.has(s));
+  const standalone = slugs.filter((s) => !GROUPED_FORMATS.has(s) && !bound[s]);
   for (const t of bySize) {
     while ((capacity.get(t) || 0) > 0) {
       const next = standalone.filter((s) => remaining[s] > 0).sort((a, b) => remaining[b] - remaining[a])[0];
@@ -408,7 +495,7 @@ function layOutFormats(tasks: SubjectTask[], target: Record<string, number>, lab
 }
 
 /** Balance one pool of tasks onto one set of per-format item counts. */
-function allocateFormatsForGroup(tasks: SubjectTask[], declared: Record<string, number>, label: string): void {
+function allocateFormatsForGroup(tasks: SubjectTask[], declared: Record<string, number>, label: string, bound: Record<string, string[]> = {}): void {
   if (Object.keys(declared).length === 0 || tasks.length === 0) return;
 
   // Scale the declared counts onto the budget actually being generated. They describe
@@ -427,7 +514,7 @@ function allocateFormatsForGroup(tasks: SubjectTask[], declared: Record<string, 
   // Declared ITEM counts are a complete specification of the paper, so lay them out directly:
   // each format's count spread across the group's tasks in proportion to subject size, by
   // largest remainder. Allocations then sum to the budget and hit the targets by construction.
-  layOutFormats(tasks, target, label);
+  layOutFormats(tasks, target, label, bound);
 
   const current: Record<string, number> = {};
   const template = new Map<string, QuestionTypeAllocation>();
@@ -461,7 +548,8 @@ function allocateFormatsForGroup(tasks: SubjectTask[], declared: Record<string, 
         // subjects subjectAwareGroupedAllocation chose — then the largest donor.
         // Preferring hosts must not RESTRICT to them: doing so stranded the transfer in
         // a single task and left 4 simulations where 7 were asked for.
-        const donors = tasks.filter((t) => (allocOf(t, from)?.count || 0) > 0);
+        // A subject-bound format (bow-tie) only grows in a subject it fits.
+        const donors = tasks.filter((t) => (allocOf(t, from)?.count || 0) > 0 && (!bound[to] || subjectFits(t.subject, bound[to])));
         if (donors.length === 0) continue;
         donors.sort((a, b) => {
           const ah = (allocOf(a, to)?.count || 0) > 0 ? 1 : 0;
@@ -673,6 +761,7 @@ export async function buildSubjectTasks(
       num_image_qs: numImageQ,
       bloom_counts: bloomCounts,
       hyt_topics: findHyt(subjName),
+      subject_topics: structureTopics(courseStructure, subjName),
       exam_params: examParams,
       exam_pattern: examPattern,
       question_type_allocations: allocateQuestionTypes(numQ, examFormat),
@@ -1303,6 +1392,10 @@ function buildProfessorPrompt(subjectTask: SubjectTask, courseName: string): str
   const examPattern = subjectTask.exam_pattern || {};
 
   const hytStr = hyt.length > 0 ? hyt.slice(0, 25).map((t) => `  • ${t}`).join('\n') : '  (Full subject syllabus)';
+  const tagList = subjectTask.subject_topics || [];
+  const topicTagStr = tagList.length > 0
+    ? `\nTOPIC TAGS — set each question's "topic" to the ONE topic below that it tests, copied exactly:\n${tagList.slice(0, 80).map((t) => `  • ${t}`).join('\n')}\n`
+    : '';
   const bloomStr = Object.entries(bloom).sort().map(([k, v]) => `  ${k}: ${v} question${v !== 1 ? 's' : ''}`).join('\n');
 
   // Dynamic examiner role from exam pattern (fallback to generic)
@@ -1433,6 +1526,7 @@ ${bloomStr}
 HIGH-YIELD TOPICS FROM THIS YEAR'S SYLLABUS
 ────────────────────────────────────────────
 ${hytStr}
+${topicTagStr}
 ${profileSection}${exclusionSection}
 YOUR RESPONSIBILITIES AS EXAMINER
 ──────────────────────────────────
@@ -1488,15 +1582,20 @@ function enrichQuestions(
   subject: string,
   courseName: string,
   hytTopics: string[],
-  topicCounter: { value: number }
+  topicCounter: { value: number },
+  structureTopicList: string[] = []
 ): Record<string, unknown>[] {
   const diffMap: Record<string, number> = { easy: 1, medium: 2, hard: 3, 'very hard': 3, very_hard: 3, low: 1, moderate: 2, high: 3 };
 
   for (const q of questions) {
     q.subject = subject;
-    // Round-robin topic assignment from HYT list
-    delete q.topic;
-    if (hytTopics.length > 0) {
+    // The structure topic the question is about (resolveTopic); rotation only when the course
+    // structure gives this subject no topics.
+    const given = String(q.topic ?? '');
+    const resolved = resolveTopic(given, String(q.question ?? q.case_narrative ?? ''), structureTopicList);
+    if (resolved) {
+      q.topic = resolved;
+    } else if (hytTopics.length > 0) {
       q.topic = hytTopics[topicCounter.value % hytTopics.length];
       topicCounter.value++;
     } else {
@@ -1808,7 +1907,7 @@ export async function professorGenerateQuestions(
         }
       }
 
-      enrichQuestions(qs, subject, courseName, hyt, topicCounter);
+      enrichQuestions(qs, subject, courseName, hyt, topicCounter, subjectTask.subject_topics || hyt);
       allQuestions.push(...qs);
 
       // Subtract what this batch ACTUALLY produced from each format's debt, so a format the
@@ -2676,6 +2775,7 @@ async function buildTopicWiseTasks(
       num_image_qs: numImageQ,
       bloom_counts: bloomCounts,
       hyt_topics: topicNames,
+      subject_topics: structureTopics(courseStructure, name),
       exam_params: examParams,
       exam_pattern: examPattern,
       question_type_allocations: allocateQuestionTypes(numQ, examFormat),
@@ -2819,6 +2919,7 @@ export async function replaceBatchForJob(
         num_image_qs: olds.filter((q) => q.is_image_question).length,
         bloom_counts: bloomCounts,
         hyt_topics: [...new Set(olds.map((q) => (q.topic as string) || '').filter(Boolean))],
+        subject_topics: structureTopics(course?.structure as Record<string, unknown>, subject),
         exam_params: {
           style: (qf.style as string) || 'standard',
           num_options: (qf.num_options as number) || 4,
