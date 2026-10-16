@@ -380,7 +380,8 @@ IMAGE — the item's attached image is shown after this prompt. It cannot be rep
   const profile = checklistJob && question.job_id ? await profileForJob(String(question.job_id), FIXER_PROFILE_CHARS) : null;
   const checklistRules = checklistJob && !opts?.restructure ? `
 • ${CHECKLIST_FOR_FIXER.replace(/\n/g, '\n  ')}
-• Keep the item's number of options${profile?.optionCount ? ` (${profile.optionCount} for a single-best-answer item in this exam)` : ''} unless a change asks for a different number. There is no human review after you: never write that anything needs expert or further review.` : '';
+• Keep the item's number of options${profile?.optionCount ? ` (${profile.optionCount} for a single-best-answer item in this exam)` : ''} unless a change asks for a different number.
+• Add nothing a candidate does not need to reach the answer. Make each change by rewording or trimming before adding: no new exhibits, records, consequences, scoring notes, instructions or explanatory scaffolding unless the change names a fact the answer needs and the item lacks. A distractor stays plausible: never make it wrong on its face with a delay, restriction or qualifier, and never add to the stem guidance that points to the key. There is no human review after you: never write that anything needs expert or further review.` : '';
 
   const prompt = `You are an expert ${courseName || 'exam'} question editor. Apply EXACTLY the required changes below to this question — nothing more, nothing less.
 

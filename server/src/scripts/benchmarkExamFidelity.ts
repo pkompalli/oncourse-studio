@@ -4,9 +4,10 @@
  *
  *   gen    npx tsx src/scripts/benchmarkExamFidelity.ts gen
  *          Generates one set per course below and copies it into a twin job, both left at 'reviewing'.
- *          Writes backups/fidelity_bench/manifest.json: [{ course, a, b }] — run job a with the old code
- *          and job b with the new (runGeneratedJob.ts --job <id>).
- *   judge  npx tsx src/scripts/benchmarkExamFidelity.ts judge
+ *          Writes <dir>/manifest.json: [{ course, a, b, c }] — run job a with the old code, b with the new,
+ *          and c with the old code again (runGeneratedJob.ts --job <id>): a against c is the run-to-run
+ *          variation any difference between a and b has to exceed.
+ *   judge  npx tsx src/scripts/benchmarkExamFidelity.ts judge [x y]   (default a b; "a c" for the control)
  *          For every item: status in each job, an absolute fidelity score (1–5) for each final version
  *          from a judge that sees the exam profile but not which pipeline wrote it, and a pairwise
  *          comparison in both orders. Writes backups/fidelity_bench/report.json and prints the summary.
@@ -23,7 +24,7 @@ import { optionTexts, keyLengthCue, isSingleBest } from '../services/review/revi
 import { orCall, MODELS } from '../services/llm/openrouter.js';
 
 type Row = Record<string, any>;
-const DIR = path.resolve('backups/fidelity_bench');
+const DIR = path.resolve(process.env.BENCH_DIR || 'backups/fidelity_bench');
 const MANIFEST = path.join(DIR, 'manifest.json');
 
 const SETS: Array<{ course: string; counts: Record<string, number> }> = [
@@ -74,8 +75,9 @@ async function gen() {
       await sleep(15000);
     }
     const b = await cloneJob(a);
-    console.log(`job ${a} generated; twin ${b}`);
-    return { course: s.course, a, b };
+    const c = await cloneJob(a);
+    console.log(`job ${a} generated; twins ${b} ${c}`);
+    return { course: s.course, a, b, c };
   }));
   fs.writeFileSync(MANIFEST, JSON.stringify(out, null, 2));
   console.log(`manifest: ${MANIFEST}`);
@@ -106,8 +108,8 @@ Reply with JSON only: {"closer_to_exam": "X" | "Y" | "tie", "better_item": "X" |
 const pick = (t: string): Row => { try { return JSON.parse(t.match(/\{[\s\S]*\}/)?.[0] ?? '{}'); } catch { return {}; } };
 const render = (q: Row) => formatQuestionsForReview([q]);
 
-async function judge() {
-  const manifest = JSON.parse(fs.readFileSync(MANIFEST, 'utf8')) as Array<{ course: string; a: string; b: string }>;
+async function judge(x: string, y: string) {
+  const manifest = (JSON.parse(fs.readFileSync(MANIFEST, 'utf8')) as Array<Record<string, string>>).map((m) => ({ course: m.course, a: m[x], b: m[y] }));
   const report: Row[] = [];
   for (const m of manifest) {
     const { data: c } = await supabase.from('qb_courses').select('name, exam_format, generation_guidelines').eq('id', m.course).single();
@@ -133,7 +135,8 @@ async function judge() {
     }));
     report.push(...items.filter(Boolean) as Row[]);
   }
-  fs.writeFileSync(path.join(DIR, 'report.json'), JSON.stringify(report, null, 2));
+  fs.writeFileSync(path.join(DIR, `report_${x}${y}.json`), JSON.stringify(report, null, 2));
+  console.log(`old = job ${x}, new = job ${y}`);
 
   const by = (rows: Row[], label: string) => {
     const mean = (xs: Array<number | null>) => { const v = xs.filter((x): x is number => typeof x === 'number'); return v.length ? (v.reduce((s, x) => s + x, 0) / v.length).toFixed(2) : '–'; };
@@ -152,6 +155,6 @@ async function judge() {
 
 const cmd = process.argv[2];
 if (cmd === 'gen') await gen();
-else if (cmd === 'judge') await judge();
+else if (cmd === 'judge') await judge(process.argv[3] || 'a', process.argv[4] || 'b');
 else console.log('usage: benchmarkExamFidelity.ts gen | judge');
 process.exit(0);

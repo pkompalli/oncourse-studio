@@ -144,7 +144,7 @@ export function cueIssues(q: Record<string, unknown>, expected: number | null = 
   }
   const len = keyLengthCue(q);
   if (len) {
-    out.push(`FORMAT: The keyed option is the longest choice (${describeLengthCue(len)}), which cues the answer. The keyed option must not be the longest: shorten it without changing its meaning, or lengthen distractors with plausible, specific detail, so at least one distractor is as long or longer in both characters and words.`);
+    out.push(`FORMAT: The keyed option is the longest choice (${describeLengthCue(len)}), which cues the answer. The keyed option must not be the longest: first shorten it without changing its meaning; lengthen a distractor only where the key cannot be shortened, and then only with neutral detail of the same kind as the key's — never a delay, condition, restriction or qualifier that makes the distractor wrong on its face. At least one distractor must end as long or longer in both characters and words.`);
   }
   const odd = oddOneOut(q);
   if (odd.length) {
