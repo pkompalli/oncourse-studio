@@ -12,7 +12,7 @@
  *   npx tsx src/scripts/exportReviewed.ts <jobId> [<jobId> …] --out backups/usmle_export/reviewed
  */
 import 'dotenv/config';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { supabase } from '../db/supabase.js';
 import { fetchAllRows } from '../db/pagination.js';
 import { optionIdentity, OPTION_IDENTITY_MIN } from '../services/review/fixer.js';
@@ -20,13 +20,19 @@ import { optionIdentity, OPTION_IDENTITY_MIN } from '../services/review/fixer.js
 const jobIds = process.argv.slice(2).filter((a) => /^[0-9a-f-]{36}$/.test(a));
 const oi = process.argv.indexOf('--out');
 const OUT = oi >= 0 ? process.argv[oi + 1] : 'backups/usmle_export/reviewed';
-// --source <file>: the live-bank export the jobs were imported from (default: the post-2025 export).
+// --source <file>: the live-bank export the jobs were imported from. Default: every live-bank export on
+// disk (post-2025, pre-2025 and the pre-2025 sample), so a run's part files find their originals whichever
+// export the jobs came from — runImportedJobs passes no --source.
 const si = process.argv.indexOf('--source');
-const SOURCE = si >= 0 ? process.argv[si + 1] : 'backups/usmle_export/usmle_questions_post_2025-01-31.json';
+const SOURCES = si >= 0 ? [process.argv[si + 1]] : [
+  'backups/usmle_export/usmle_questions_post_2025-01-31.json',
+  'backups/usmle_export/usmle_questions_pre_2025-01-31.json',
+  'backups/usmle_export/usmle_pre2025_sample100.json',
+].filter((f) => existsSync(f));
 if (!jobIds.length) { console.log('usage: exportReviewed.ts <jobId> [<jobId> …] --out <path-without-extension>'); process.exit(1); }
 
 type Row = Record<string, any>;
-const src = new Map((JSON.parse(readFileSync(SOURCE, 'utf8')).questions as Row[]).map((q) => [q.id, q]));
+const src = new Map(SOURCES.flatMap((f) => JSON.parse(readFileSync(f, 'utf8')).questions as Row[]).map((q) => [q.id, q]));
 const words = (s: string) => new Set((s || '').toLowerCase().match(/[a-z0-9]+/g) || []);
 const overlap = (a: string, b: string) => { const A = words(a), B = words(b); const i = [...A].filter((w) => B.has(w)).length; return A.size + B.size - i ? +(i / (A.size + B.size - i)).toFixed(2) : 1; };
 
