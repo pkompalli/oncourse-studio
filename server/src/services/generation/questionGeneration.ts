@@ -823,6 +823,33 @@ const SUB_ANSWER_KEY_RULES = `PER-SUB-QUESTION ANSWER KEY (MANDATORY — a sub-a
   - constructed_response: prompt only (human-scored; no answer key)
 Every sub-question MUST include the COMPLETE scaffolding its format needs (options/rows/columns/choices/items) AND its structured answer key.`;
 
+/**
+ * How many sub-questions one unit of a grouped format carries, from its schema_params. This never reached
+ * the prompt: the generator saw only prose rules and a template, and in the fidelity benchmark every MCAT
+ * passage set came back with one to three questions where the guidelines require four to six (one per
+ * call, with Bloom counts that summed to two or three).
+ */
+export function groupSize(spec: Record<string, unknown> | undefined): { min: number; max: number } | null {
+  const p = (spec?.schema_params || {}) as Record<string, unknown>;
+  const min = Number(p.sub_question_min ?? p.parts_min) || 0;
+  const max = Number(p.sub_question_max ?? p.parts_max) || 0;
+  return min > 1 ? { min, max: max >= min ? max : 0 } : null;
+}
+const sizeLine = (slug: string, g: { min: number; max: number }) =>
+  `SIZE (mandatory): each ${slug} carries ${g.max ? `${g.min}–${g.max}` : `at least ${g.min}`} sub_questions — never fewer than ${g.min}. The Bloom counts above are spread across its sub-questions; they do not set its size.`;
+
+function shortGroups(qs: Record<string, unknown>[], guidelines: Record<string, unknown> | undefined): Array<{ slug: string; n: number; min: number }> {
+  const specs = ((guidelines || {}).format_specs || {}) as Record<string, Record<string, unknown>>;
+  const out: Array<{ slug: string; n: number; min: number }> = [];
+  for (const q of qs) {
+    const slug = canonicalizeFormatSlug(String(q.format_type || ''));
+    const g = GROUPED_FORMATS.has(slug) ? groupSize(specs[slug]) : null;
+    const subs = ((q.content as Record<string, unknown> | undefined)?.sub_questions ?? q.sub_questions) as unknown[] | undefined;
+    if (g && Array.isArray(subs) && subs.length < g.min) out.push({ slug, n: subs.length, min: g.min });
+  }
+  return out;
+}
+
 function renderGuidelinesFormatBlock(alloc: QuestionTypeAllocation, spec: Record<string, unknown>): string {
   const list = (v: unknown) => (Array.isArray(v) ? (v as unknown[]).map(String) : v ? [String(v)] : []);
   const rules = [
@@ -836,8 +863,9 @@ function renderGuidelinesFormatBlock(alloc: QuestionTypeAllocation, spec: Record
   // sub-answer contract is appended so grouped formats stay machine-gradable.
   const tmplHasSubs = /"sub_questions"/.test(template) || GROUPED_FORMATS.has(alloc.slug);
   const subRules = tmplHasSubs ? `\n${SUB_ANSWER_KEY_RULES}` : '';
+  const size = tmplHasSubs ? groupSize(spec) : null;
   return `FORMAT: ${alloc.slug} (${alloc.name}) — ${alloc.count} question(s)
-${rules.length ? 'RULES:\n' + rules.join('\n') + '\n' : ''}${grad ? grad + '\n' : ''}Output EACH question as a JSON object with EXACTLY this shape (fill with real content; keep all fields):
+${size ? sizeLine(alloc.slug, size) + '\n' : ''}${rules.length ? 'RULES:\n' + rules.join('\n') + '\n' : ''}${grad ? grad + '\n' : ''}Output EACH question as a JSON object with EXACTLY this shape (fill with real content; keep all fields):
 ${template}${subRules}`;
 }
 
@@ -1589,11 +1617,22 @@ ANSWER INTEGRITY — MANDATORY RULES
 3. No "All of the above" or "None of the above"
 4. NO ANSWER CLUES IN STEM WORDING
 
+WRITE IT LIKE A REAL ITEM
+─────────────────────────
+A blind comparison of generated items with this exam's real ones found the same gaps in every exam. Avoid each:
+1. COMPETING DISTRACTORS. Every wrong option is an answer that would be right in a closely related situation, or the one a candidate holding a specific, common misconception would choose. In priority, action or next-step items the distractors are reasonable actions that are lower priority or premature — not unsafe, absurd, needlessly delayed or obviously negligent ones. No distractor contradicts a fact stated in the stem, and none is wrong merely because it is extreme or absolute.
+2. NO SCAFFOLDING. The stem never states the rule, formula, threshold, standard, classification or treatment the item tests — the candidate must know it. Give only the facts a practitioner would actually have in front of them; exhibits and passages supply data and source material, never the answer or the method.
+3. NO STACKED EXCLUSIONS. Do not add facts whose only job is to rule out a distractor ("no edema", "the former spouse is living", "the tax is correctly computed"). The facts are what a real case presents; the candidate's knowledge does the discriminating.
+4. THE LEAD-IN ASKS, IT DOES NOT HINT. It never names, paraphrases or lists what the keyed answers are about (e.g. a monitoring question that names the deficits to monitor).
+5. FUNCTIONAL CONTEXT. A scenario, experiment or record is there because the answer depends on it. Do not wrap a definition-recall question in decorative context; write recall the way this exam writes recall.
+6. NO ONE-TO-ONE MATCHING. In grids, simulations and multi-row tasks, each response must be reasoned from the data, not matched to the one row that names the same thing.
+
 DIFFICULTY — MANDATORY
 ──────────────────────
 Every question MUST include "difficulty": "easy", "medium", or "hard".
 Distribute across all three levels — do NOT make all questions the same difficulty.
 Rough target: ~20% easy, ~50% medium, ~30% hard (adjust per exam pattern).
+The label must be true of the item. "hard" means the candidate must integrate several findings or steps, the data are mixed or subtle rather than stark, and every distractor stays attractive to a well-prepared candidate; an item whose findings all point one way, or whose distractors fall away on sight, is "easy" whatever its topic.
 
 Return EXACTLY ${numQ} questions as a JSON array.
 ${isMultiFormat ? `You MUST produce the exact format mix: ${allocations.map((a) => `${a.count}x ${a.slug}`).join(', ')}` : ''}
@@ -1933,6 +1972,21 @@ export async function professorGenerateQuestions(
           }
         } catch {
           // keep original qs
+        }
+      }
+
+      // A grouped unit below its format's sub-question floor (groupSize) is asked for once more, with
+      // the count it came back with; the retry is kept only if it is not shorter.
+      const short = shortGroups(qs, subjectTask.guidelines);
+      if (short.length) {
+        console.log(`  [Gen] ${subject} batch ${b + 1}: ${short.map((x) => `${x.slug} with ${x.n} sub-questions (needs ${x.min})`).join('; ')}, retrying...`);
+        try {
+          const note = `\n\nYOUR PREVIOUS ATTEMPT WAS REJECTED: ${short.map((x) => `a ${x.slug} carried ${x.n} sub_questions; it must carry at least ${x.min}`).join('; ')}. Return the complete set again at full size.`;
+          const r3 = await orCall(MODELS.GENERATOR, '', prompt + note, { maxTokens: 20000, temperature: 0.5 });
+          const qs3 = parseQuestions(r3.content);
+          if (shortGroups(qs3, subjectTask.guidelines).length < short.length && scoreAgainstAllocation(qs3, batchAllocations) >= scoreAgainstAllocation(qs, batchAllocations)) qs = qs3;
+        } catch {
+          // keep the first attempt
         }
       }
 
@@ -2627,7 +2681,7 @@ async function runAllProfessors(
   try {
     const { data: jobQs } = await supabase
       .from('qb_questions')
-      .select('id, question, subject')
+      .select('id, question, subject, content')
       .eq('job_id', jobId)
       .is('replaced_by_id', null);
 
@@ -2636,11 +2690,24 @@ async function runAllProfessors(
       const seen = new Map<string, string>(); // normalized stem → first question id
       const dupeIds: string[] = [];
 
+      // A grouped item is keyed on what it actually contains — its passage and sub-question stems — not on
+      // its stem, which is often a generic header: in the fidelity benchmark four distinct MCAT passage
+      // sets were deleted as duplicates of one another because each began "Questions 1–5 are based on
+      // the following passage".
+      const textOf = (q: Record<string, any>): { text: string; len: number } => {
+        const c = (q.content || {}) as Record<string, any>;
+        const subs = Array.isArray(c.sub_questions) ? c.sub_questions : null;
+        if (!subs) return { text: q.question, len: 120 };
+        const body = [c.passage, c.stimulus, c.case_narrative, c.scenario, c.exhibits, ...subs.map((x: Record<string, any>) => x?.stem ?? x?.question)]
+          .map((v) => (typeof v === 'string' ? v : v ? JSON.stringify(v) : '')).join(' ');
+        return { text: body, len: 600 };
+      };
       for (const q of jobQs) {
-        const norm = normalize(q.question);
+        const { text, len } = textOf(q);
+        const norm = normalize(text);
         if (!norm) continue;
-        // Check for exact or near-exact matches (first 120 chars of normalized stem)
-        const key = norm.slice(0, 120);
+        // Check for exact or near-exact matches (the start of the normalized stem, or of a set's content)
+        const key = norm.slice(0, len);
         if (seen.has(key)) {
           dupeIds.push(q.id);
           console.log(`  [Dedup] Removing duplicate: "${q.question?.slice(0, 60)}..." (matches existing in ${q.subject})`);

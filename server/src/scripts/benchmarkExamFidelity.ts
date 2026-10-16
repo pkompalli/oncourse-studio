@@ -11,6 +11,10 @@
  *          For every item: status in each job, an absolute fidelity score (1–5) for each final version
  *          from a judge that sees the exam profile but not which pipeline wrote it, and a pairwise
  *          comparison in both orders. Writes backups/fidelity_bench/report.json and prints the summary.
+ *   score  BENCH_DIR=<dir> npx tsx src/scripts/benchmarkExamFidelity.ts score
+ *          Generation on its own: <dir>/jobs.json is [{ course, label, job }] (genOnly.ts jobs). Every raw
+ *          generated item gets an absolute fidelity score and the gap flags below; prints means and flag
+ *          rates per label, so "old1" against "old2" is the run-to-run variation.
  */
 import 'dotenv/config';
 import fs from 'node:fs';
@@ -153,8 +157,61 @@ async function judge(x: string, y: string) {
   by(report, 'ALL');
 }
 
+const FLAGS = ['weak_distractors', 'scaffolding', 'stacked_exclusions', 'leadin_cue', 'decorative_context', 'one_to_one_matching', 'easier_than_label', 'set_too_small'] as const;
+
+const SCORE_PROMPT = (profile: string, item: string) => `${profile}
+
+You are an item writer who has written for this exam for many years. Judge how closely the item below resembles a REAL item from this exam, as the profile describes it — how it tests, the shape and register of the stem, the lead-in, the options and distractors. Not whether it is correct.
+
+ITEM:
+${item}
+
+Reply with JSON only: {"fidelity": 1-5, "flags": [...], "gap": "<the main way it differs from a real item, or empty>"}
+fidelity: 5 indistinguishable from a real item; 4 close with small differences; 3 recognisably this exam with clear differences; 2 generic exam-prep style; 1 does not read like this exam.
+flags — list each that clearly applies, else []:
+  "weak_distractors": a wrong option is conspicuously unsafe, absurd, obviously negligent, absolute, or contradicts the stem — it falls away on sight
+  "scaffolding": the stem, passage or exhibit states the rule, formula, threshold, standard or treatment the item tests
+  "stacked_exclusions": facts added only to rule out distractors
+  "leadin_cue": the lead-in names or paraphrases what the keyed answer is about
+  "decorative_context": the scenario or experiment plays no part in the answer
+  "one_to_one_matching": rows or responses match one-to-one to the thing each row names
+  "easier_than_label": clearly easier than its difficulty label
+  "set_too_small": a grouped set with fewer sub-questions than this exam's sets carry`;
+
+async function score() {
+  const jobs = JSON.parse(fs.readFileSync(path.join(DIR, 'jobs.json'), 'utf8')) as Array<{ course: string; label: string; job: string }>;
+  const rows: Row[] = [];
+  for (const j of jobs) {
+    const { data: c } = await supabase.from('qb_courses').select('name, exam_format, generation_guidelines').eq('id', j.course).single();
+    const profile = examProfile(String(c!.name), c!.exam_format as Row, c!.generation_guidelines as Row).text;
+    const qs = await fetchAllRows<Row>((from, to) => supabase.from('qb_questions').select('*').eq('job_id', j.job).is('replaced_by_id', null).order('question_number').range(from, to));
+    const scored = await Promise.all(qs.map(async (q) => {
+      const v = await orCall(MODELS.AUDITOR, '', SCORE_PROMPT(profile, render(q)), { maxTokens: 700, temperature: 0 }).then((r) => pick(r.content)).catch(() => ({} as Row));
+      const subs = (q.content?.sub_questions as unknown[] | undefined)?.length ?? null;
+      return { course: c!.name, label: j.label, n: q.question_number, format: q.tags?.format_type, subs, difficulty: q.difficulty, fidelity: Number(v.fidelity) || null, flags: (Array.isArray(v.flags) ? v.flags : []).filter((f: string) => (FLAGS as readonly string[]).includes(f)), gap: v.gap ?? '' };
+    }));
+    rows.push(...scored);
+  }
+  fs.writeFileSync(path.join(DIR, 'scores.json'), JSON.stringify(rows, null, 2));
+  const labels = [...new Set(rows.map((r) => r.label))];
+  const groups: Array<[string, Row[]]> = [...[...new Set(rows.map((r) => r.course))].map((c) => [c, rows.filter((r) => r.course === c)] as [string, Row[]]), ['ALL', rows]];
+  for (const [name, rs] of groups) {
+    console.log(`\n${name}`);
+    for (const l of labels) {
+      const x = rs.filter((r) => r.label === l);
+      const f = x.map((r) => r.fidelity).filter((v): v is number => typeof v === 'number');
+      const mean = f.length ? f.reduce((a, b) => a + b, 0) / f.length : 0;
+      const sd = f.length > 1 ? Math.sqrt(f.reduce((a, b) => a + (b - mean) ** 2, 0) / (f.length - 1)) : 0;
+      const flagRate = FLAGS.map((fl) => `${fl} ${x.filter((r) => r.flags.includes(fl)).length}`).filter((t) => !t.endsWith(' 0')).join(', ');
+      const sets = x.filter((r) => r.subs !== null).map((r) => r.subs).join('/');
+      console.log(`  ${l.padEnd(6)} n=${String(x.length).padEnd(3)} fidelity ${mean.toFixed(2)} (sd ${sd.toFixed(2)})  ${flagRate}${sets ? `  | set sizes ${sets}` : ''}`);
+    }
+  }
+}
+
 const cmd = process.argv[2];
 if (cmd === 'gen') await gen();
+else if (cmd === 'score') await score();
 else if (cmd === 'judge') await judge(process.argv[3] || 'a', process.argv[4] || 'b');
 else console.log('usage: benchmarkExamFidelity.ts gen | judge');
 process.exit(0);
