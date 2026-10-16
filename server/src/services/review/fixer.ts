@@ -8,6 +8,7 @@ import { fetchImageAsDataUrl } from './shared.js';
 import { keyLengthCue, describeLengthCue, STEM_REFS_IMAGE } from './reviewMode.js';
 import { CHECKLIST_FOR_FIXER } from './reviewChecklist.js';
 import { sameConcept, conceptMayHaveMoved } from './conceptGuard.js';
+import { profileForJob } from './examProfile.js';
 
 export interface FixResult {
   fixed: boolean;
@@ -301,6 +302,9 @@ export async function fixQuestion(
   return best;
 }
 
+/** The exam profile the fixer sees: shorter than the reviewers', since it is sent once per item. */
+const FIXER_PROFILE_CHARS = 6000;
+
 // IMAGE REMOVE: an image that stayed inconsistent through a repair already; removed, not re-aligned.
 const IMAGE_ASK = /^IMAGE (CONFLICT|NOT LOADING|MISSING|REMOVE)/;
 const IMAGE_GONE = /^IMAGE (NOT LOADING|MISSING|REMOVE)/;
@@ -369,6 +373,14 @@ IMAGE — the item's attached image is shown after this prompt. It cannot be rep
 
   const contentJson = JSON.stringify(question, null, 2);
   const changesText = changesRequired.map((c) => `  ${c}`).join('\n');
+  // Checklist jobs (generated, and restructured imports): the change requests name checks, including
+  // EXAM_FIDELITY and VIGNETTE_PATTERN, which are judged against the exam's profile — so the fixer is
+  // shown that profile and the checklist, not only the request.
+  const checklistJob = Boolean(opts?.restructure) || !opts?.existingBank;
+  const profile = checklistJob && question.job_id ? await profileForJob(String(question.job_id), FIXER_PROFILE_CHARS) : null;
+  const checklistRules = checklistJob && !opts?.restructure ? `
+• ${CHECKLIST_FOR_FIXER.replace(/\n/g, '\n  ')}
+• Keep the item's number of options${profile?.optionCount ? ` (${profile.optionCount} for a single-best-answer item in this exam)` : ''} unless a change asks for a different number. There is no human review after you: never write that anything needs expert or further review.` : '';
 
   const prompt = `You are an expert ${courseName || 'exam'} question editor. Apply EXACTLY the required changes below to this question — nothing more, nothing less.
 
@@ -394,9 +406,9 @@ ${opts?.restructure
   ? '• A vignette follows the exam pattern: age and sex, setting, chief complaint with duration, relevant history and medications, vital signs where the decision depends on the patient\'s clinical state, examination, then the laboratory or imaging results the decision needs, ending in ONE closed lead-in such as "Which of the following is the most likely diagnosis?" that fits every option and never repeats, paraphrases or narrows toward the keyed option. Add nothing that plays no part in the decision: calculation, biostatistics, ethics and pure mechanism items get no vital signs or examination padding. Keep the concept and question type the item tests — never turn it into a question about a different fact; nothing in the stem may name the answer. Options keep their standard, recognised terms. Keep every finding the explanation relies on, and keep plausible distractors rather than replacing them.'
   : '• Turning a short stem into a clinical vignette keeps the SAME question being asked and the SAME options: a "most likely diagnosis" item stays a diagnosis item with the same diagnoses to choose from. If a change can only be met by asking something different, mark it "❌".'}
 • Write only what a candidate should read. Never put notes about the item itself into the stem, options or explanation ("the image adds no information", "this was revised to…").
-• Reply with the JSON object only — no sentence before or after it.
+• Reply with the JSON object only — no sentence before or after it.${checklistRules}
 ${imageRules}
-COURSE: ${courseName}
+COURSE: ${courseName}${profile?.text ? `\n\n${profile.text}` : ''}
 
 ─── ORIGINAL QUESTION (JSON) ───
 ${contentJson}

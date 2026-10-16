@@ -28,6 +28,7 @@ import type { ReviewOptions } from './validator.js';
 import { EXISTING_ITEM_RULES } from './changeRouting.js';
 import { RESTRUCTURE_RULES } from './reviewMode.js';
 import { CHECKLIST_PROMPT, parseChecks, checkChanges } from './reviewChecklist.js';
+import { examProfile } from './examProfile.js';
 
 // ── Adversarial Prompt (V1 lines 5915-5966) ──
 
@@ -83,22 +84,9 @@ Return a JSON ARRAY — one object per section:
 Output ONLY the JSON array. No preamble, no trailing text.`;
   }
 
-  // Build exam format context for adversarial
-  let examFormatContext = '';
-  if (examFormat && Object.keys(examFormat).length > 0) {
-    const parts: string[] = [];
-    const philosophy = examFormat.testing_philosophy as string;
-    const antiPatterns = (examFormat.what_NOT_to_do as string[]) || [];
-    const recallRatio = examFormat.recall_vs_reasoning_ratio as Record<string, unknown> | undefined;
-
-    if (philosophy) parts.push(`Testing philosophy: ${philosophy}`);
-    if (recallRatio?.description) parts.push(`Recall vs reasoning: ${recallRatio.description}`);
-    if (antiPatterns.length > 0) parts.push(`What this exam does NOT do:\n${antiPatterns.slice(0, 3).map(p => `  • ${p}`).join('\n')}`);
-
-    if (parts.length > 0) {
-      examFormatContext = `\nEXAM FORMAT CONTEXT (use to judge educational alignment):\n${parts.join('\n')}\n`;
-    }
-  }
+  // The exam's qualitative profile (examProfile.ts); this block used to read keys no course has.
+  const profile = examProfile(domain, examFormat, opts?.guidelines);
+  const examFormatContext = profile.text ? `\n${profile.text}\n` : '';
 
   // The course sets its own key-balance rule (generation_guidelines.answer_key_balance), as the
   // validator already reads it; this stage used to apply a generic "roughly equal" instead.
@@ -154,7 +142,7 @@ ${keyRule
    b. A well-designed exam has roughly equal distribution across answer keys`}`}
 
 Do NOT flag:
-• Omissions that don't affect clinical reasoning for this question
+• Omissions that don't affect the reasoning this question asks for
 • Style, phrasing, or formatting preferences
 • Content a student could reasonably infer
 • Wanting the question to cover more ground than it needs to
@@ -180,7 +168,7 @@ Return a JSON ARRAY — one object per question:
     "distractor_defenses": [<only if a distractor is actually defensible as correct — empty if none>],
     "explanation_contradictions": [<if explanation only defends the correct answer without discussing distractors, or logically fails to justify — empty if none>],
     "case_study_issues": [<if case_study: missing sub-question rationales, a sub-question count or format mix that contradicts THIS exam's own rules (never assume six), missing reasoning_step, prose hot_spot answers — empty if none or not case_study>],
-    "triviality_clues": [<only if answer is obvious without clinical reasoning — empty if none>],
+    "triviality_clues": [<only if answer is obvious without the reasoning the question asks for — empty if none>],
     "concept_overlap": "<if this question tests the same concept as another Q in the batch, state which Q and suggest differentiation — null if unique>",
     "answer_key_issue": "<if this question contributes to skewed answer distribution, suggest changing to a different key — null if fine>",
     "asset_issues": [<clear mismatch only — empty if image is appropriate even if imperfect>],

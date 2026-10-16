@@ -16,6 +16,7 @@ import { sameConcept, conceptMayHaveMoved } from '../review/conceptGuard.js';
 import { flagDuplicateConcepts } from '../review/setChecks.js';
 import { probeCues, keySpotted, implausibleDistractors, type ProbeResult } from '../review/cueProbe.js';
 import { CHECKLIST_PROMPT, parseChecks, failedMust, failedStandard } from '../review/reviewChecklist.js';
+import { examProfile } from '../review/examProfile.js';
 import { coherenceIssues, partitionIssues } from '../generation/coherence.js';
 import { orCall, MODELS } from '../llm/openrouter.js';
 import type { ContentPart } from '../llm/openrouter.js';
@@ -232,7 +233,7 @@ Output ONLY the JSON array. No preamble, no trailing text.`;
 
 // ── Run audit on a batch ──
 
-export async function runAuditBatch(questions: Record<string, unknown>[], opts: { existingBank?: boolean; restructure?: boolean; checklist?: boolean } = {}): Promise<Record<string, unknown>[]> {
+export async function runAuditBatch(questions: Record<string, unknown>[], opts: { existingBank?: boolean; restructure?: boolean; checklist?: boolean; profile?: string } = {}): Promise<Record<string, unknown>[]> {
   const checklist = opts.checklist ?? (Boolean(opts.restructure) || !opts.existingBank);
   // What earlier stages asked for, and what the fixer did about it. This was always on the row
   // — reviewPipeline writes it for every repair — and audit never read it, so it re-scored each
@@ -248,8 +249,13 @@ export async function runAuditBatch(questions: Record<string, unknown>[], opts: 
     ? `\nREPAIR HISTORY — what earlier stages asked for and what the fixer did:\n${histories.join('\n')}\n`
     : '';
 
+  // The exam's profile (examProfile.ts): audit judged VIGNETTE_PATTERN and LEAD_IN against "the exam's
+  // pattern" without ever being shown it. exam_fidelity is recorded, not gated: it measures how close
+  // approved items are to the real exam.
   const prompt = getAuditPrompt(histories.length > 0, Boolean(opts.existingBank), Boolean(opts.restructure))
-    + (checklist ? `\n\n${CHECKLIST_PROMPT}\nJudge each check on the item EXACTLY as shown — the final version. "changes_required" is not needed here; give each failing check its "fix".` : '');
+    + (opts.profile ? `\n\n${opts.profile}` : '')
+    + (checklist ? `\n\n${CHECKLIST_PROMPT}\nJudge each check on the item EXACTLY as shown — the final version. "changes_required" is not needed here; give each failing check its "fix".
+Also give each item "exam_fidelity": 1–5, how closely it resembles a real item of this exam as the profile describes it — 5 indistinguishable from a real item, 4 close with small differences, 3 recognisably this exam with clear differences, 2 generic exam-prep style, 1 does not read like this exam.` : '');
   const content = await formatQuestionsForReviewWithImages(questions);
 
   let userMessage: string | ContentPart[];
@@ -300,8 +306,10 @@ async function runAuditPipeline(jobId: string): Promise<void> {
     startTracking(jobId, 'audit');
     setStep(jobId, 'Fetching reviewed questions...');
     // Imported items are audited on candidate-facing content only (getAuditPrompt).
-    const { data: jobRow } = await supabase.from('qb_jobs').select('config').eq('id', jobId).single();
+    const { data: jobRow } = await supabase.from('qb_jobs').select('config, course_id').eq('id', jobId).single();
     const { existingBank, restructure, checklist } = reviewModeOf(jobRow?.config as Record<string, unknown>);
+    const { data: course } = await supabase.from('qb_courses').select('name, exam_format, generation_guidelines').eq('id', jobRow?.course_id).single();
+    const profile = examProfile(String(course?.name ?? 'exam'), course?.exam_format as Record<string, unknown>, course?.generation_guidelines as Record<string, unknown>).text;
 
     // Paginate — audit must see every reviewed question, not just the first 1000.
     const questions = await fetchAllRows<Record<string, unknown>>((from, to) =>
@@ -350,7 +358,7 @@ async function runAuditPipeline(jobId: string): Promise<void> {
       // Restructure mode re-runs the options-only probe on the repaired items, so the gate below judges
       // the version that ships, not the one the validator saw.
       const [results, probes] = await Promise.all([
-        runAuditBatch(batch, { existingBank, restructure, checklist }),
+        runAuditBatch(batch, { existingBank, restructure, checklist, profile }),
         restructure ? probeCues(batch) : Promise.resolve(batch.map((): ProbeResult | null => null)),
       ]);
 
@@ -541,6 +549,7 @@ async function runAuditPipeline(jobId: string): Promise<void> {
           phase: 'audit',
           score: auditScore,
           ...(checks ? { checks } : {}),
+          ...(Number(result?.exam_fidelity) >= 1 ? { exam_fidelity: Number(result.exam_fidelity) } : {}),
           reason: (result.reason as string) || '',
           issues: (result.issues as string[]) || [],
           timestamp: new Date().toISOString(),

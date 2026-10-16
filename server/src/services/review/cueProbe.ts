@@ -10,7 +10,8 @@
  *
  * The deterministic checks in reviewMode.ts catch what can be counted. This catches what cannot:
  * a key that is more qualified or more precise than the rest, a distractor of a different kind, an
- * option no clinician would consider. Restructure mode only.
+ * option no clinician would consider. Restructure mode, and generated single-best-answer items of any
+ * exam, where `domain` (the course) swaps the clinical wording for the exam's own.
  */
 import { orCall, MODELS } from '../llm/openrouter.js';
 import { extractJsonArray } from './shared.js';
@@ -66,20 +67,39 @@ Return a JSON array, one object per item in order:
 [{"item": 1, "guess": "C", "confidence": "low", "cues": [], "eliminable": [{"letter": "E", "reason": "non_clinical"}]}]
 Return ONLY the JSON array.`;
 
+/**
+ * The same probe for another exam. The USMLE wording above was benchmarked as it stands and is kept
+ * for restructure mode; elsewhere the clinical terms would have the probe treat, say, an accounting
+ * procedure as "non-clinical" and rule it out.
+ */
+function promptFor(domain?: string): string {
+  if (!domain) return PROMPT;
+  return PROMPT
+    .replace('USMLE-style items', `${domain} items`)
+    .replace('not the clinical case', 'not the scenario, passage or data the stem gives')
+    .replace('knowing which option is medically correct', 'knowing which option is correct')
+    .replace('who knows no medicine', 'who knows nothing of the subject')
+    .replace('without any medical knowledge', 'without any knowledge of the subject')
+    .replace('"absurd": no clinician would ever consider it', '"absurd": no one who knows the subject would ever consider it')
+    .replace('"non_clinical": an administrative or legal action where a clinical decision is asked for (e.g. reporting to a licensing board)', '"non_clinical": an administrative or procedural step where the question asks for a substantive decision')
+    .replace('medically incorrect, outdated or less appropriate', 'incorrect, outdated or less appropriate')
+    .replace('In ethics, law and communication items (consent, capacity, surrogates, advance directives, confidentiality, disclosure), ethics consultation, court orders and legal or administrative steps ARE the same kind as the other options', 'Where the question itself is about ethics, law, professional conduct or procedure, legal, administrative and procedural steps ARE the same kind as the other options');
+}
+
 function formatItem(q: Record<string, unknown>, i: number): string {
   const { texts } = optionTexts(q);
   return `ITEM ${i + 1}\nQuestion: ${leadIn(String(q.question ?? ''))}\n${texts.map((t, j) => `${LETTERS[j]}. ${t}`).join('\n')}`;
 }
 
 /** One call per batch; a failed call returns nulls, never throws. */
-export async function probeCues(questions: Record<string, unknown>[]): Promise<Array<ProbeResult | null>> {
+export async function probeCues(questions: Record<string, unknown>[], domain?: string): Promise<Array<ProbeResult | null>> {
   const items = questions.filter((q) => optionTexts(q).texts.length >= 3);
   if (!items.length) return questions.map(() => null);
   const body = items.map(formatItem).join('\n\n');
   let parsed: Record<string, unknown>[] = [];
   for (let attempt = 1; attempt <= 2 && parsed.length < items.length; attempt++) {
     try {
-      const r = await orCall(MODELS.ADVERSARIAL, '', `${PROMPT}\n\n${body}`, { maxTokens: 6000, temperature: attempt === 1 ? 0.2 : 0 });
+      const r = await orCall(MODELS.ADVERSARIAL, '', `${promptFor(domain)}\n\n${body}`, { maxTokens: 6000, temperature: attempt === 1 ? 0.2 : 0 });
       const got = extractJsonArray(r.content, items.length);
       if (got.length > parsed.length) parsed = got;
     } catch (e) {
@@ -136,18 +156,18 @@ const CUE_WORDS: Record<string, string> = {
 const ELIM_WORDS: Record<string, string> = {
   different_kind: 'it is a different kind of answer from the others',
   not_an_answer_to_question: 'it does not answer the question asked',
-  absurd: 'no clinician would consider it',
-  non_clinical: 'it is an administrative or legal action, not a clinical decision',
+  absurd: 'no one who knows the subject would consider it',
+  non_clinical: 'it is an administrative or procedural step where a substantive decision is asked for',
 };
 
 /** The probe's findings as change requests for the fixer. */
 export function probeIssues(q: Record<string, unknown>, r: ProbeResult | null): string[] {
   const out: string[] = [];
   if (keySpotted(q, r)) {
-    out.push(`CUE: A test-wise reader shown only the question and the options picked the keyed option by its form (${r!.cues.map((c) => CUE_WORDS[c] ?? c).join('; ')}). Rework the options so the key cannot be picked out without the case: give the distractors the same precision, structure and length as the key, and remove what makes the key stand out.`);
+    out.push(`CUE: A test-wise reader shown only the question and the options picked the keyed option by its form (${r!.cues.map((c) => CUE_WORDS[c] ?? c).join('; ')}). Rework the options so the key cannot be picked out without the stem: give the distractors the same precision, structure and length as the key, and remove what makes the key stand out.`);
   }
   for (const d of implausibleDistractors(q, r)) {
-    out.push(`DISTRACTOR: "${d.text.slice(0, 120)}" can be ruled out without reading the case (${ELIM_WORDS[d.reason] ?? d.reason}). Replace it with a plausible option of the same kind as the others that a candidate with a specific misconception would choose.`);
+    out.push(`DISTRACTOR: "${d.text.slice(0, 120)}" can be ruled out without reading the stem (${ELIM_WORDS[d.reason] ?? d.reason}). Replace it with a plausible option of the same kind as the others that a candidate with a specific misconception would choose.`);
   }
   return out;
 }

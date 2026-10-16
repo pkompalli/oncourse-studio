@@ -10,9 +10,10 @@ import { schemaErrorsFor } from '../generation/schemaValidate.js';
 import { coherenceIssues } from '../generation/coherence.js';
 import { consistencyIssues, isBlockingConsistency } from '../generation/consistency.js';
 import { EXISTING_ITEM_RULES } from './changeRouting.js';
-import { RESTRUCTURE_RULES, cueIssues, imageIssues, bowTieStemCue } from './reviewMode.js';
+import { RESTRUCTURE_RULES, cueIssues, imageIssues, bowTieStemCue, isSingleBest } from './reviewMode.js';
 import { probeCues, probeIssues } from './cueProbe.js';
 import { CHECKLIST_PROMPT, parseChecks, checkChanges } from './reviewChecklist.js';
+import { examProfile } from './examProfile.js';
 
 /**
  * Per-format rules to include. High enough that no course's real spec is truncated — the
@@ -81,48 +82,17 @@ Return a JSON ARRAY — one object per section:
 Output ONLY the JSON array. No preamble, no trailing text.`;
   }
 
-  // Build exam format context if available
-  let examFormatContext = '';
-  if (examFormat && Object.keys(examFormat).length > 0) {
-    const parts: string[] = [];
-    const stemStyle = examFormat.stem_style as Record<string, unknown> | undefined;
-    const optionCount = examFormat.option_count || (stemStyle?.option_count);
-    const philosophy = examFormat.testing_philosophy as string;
-    const distinctive = (examFormat.distinctive_patterns as string[]) || [];
-    const antiPatterns = (examFormat.what_NOT_to_do as string[]) || [];
-    const recallRatio = examFormat.recall_vs_reasoning_ratio as Record<string, unknown> | undefined;
-
-    if (philosophy) parts.push(`Testing philosophy: ${philosophy}`);
-    if (stemStyle?.typical_format) parts.push(`Expected stem format: ${stemStyle.typical_format}`);
-    if (optionCount) parts.push(`Expected option count: ${optionCount}`);
-    if (recallRatio?.description) parts.push(`Recall vs reasoning: ${recallRatio.description}`);
-    if (distinctive.length > 0) parts.push(`Distinctive patterns:\n${distinctive.slice(0, GUIDELINE_RULE_CAP).map(p => `  • ${p}`).join('\n')}`);
-    if (antiPatterns.length > 0) parts.push(`What this exam does NOT do:\n${antiPatterns.slice(0, GUIDELINE_RULE_CAP).map(p => `  • ${p}`).join('\n')}`);
-
-    if (parts.length > 0) {
-      examFormatContext = `\nEXAM FORMAT REQUIREMENTS (use these to judge format compliance):\n${parts.join('\n')}\n`;
-    }
-  }
+  // The exam's qualitative profile (examProfile.ts). This block used to read testing_philosophy,
+  // distinctive_patterns and what_NOT_to_do from the top level of exam_format, where no course keeps
+  // them, so it was empty for every course.
+  const profile = examProfile(domain, examFormat, guidelines);
+  const examFormatContext = profile.text ? `\n${profile.text}\n` : '';
 
   // Build guidelines context if available
   let guidelinesContext = '';
   if (guidelines && Object.keys(guidelines).length > 0) {
     const gParts: string[] = [];
-    const stem = guidelines.stem_guidelines as Record<string, unknown> | undefined;
-    if (stem) {
-      const rules: string[] = [];
-      if (stem.style) rules.push(`Style: ${stem.style}`);
-      if (stem.vignette_required) rules.push('Vignettes REQUIRED');
-      if (stem.min_words || stem.max_words) rules.push(`Stem length: ${stem.min_words || '?'}–${stem.max_words || '?'} words`);
-      const scenarioDepth = stem.scenario_depth ?? stem.clinical_scenario_depth;
-      if (scenarioDepth) rules.push(`Scenario depth: ${scenarioDepth}`);
-      if (rules.length > 0) gParts.push(`Stem: ${rules.join(', ')}`);
-    }
-    const dist = guidelines.distractor_guidelines as Record<string, unknown> | undefined;
-    if (dist) {
-      const rules = (dist.quality_rules as string[]) || [];
-      if (rules.length > 0) gParts.push(`Distractor rules:\n${rules.slice(0, GUIDELINE_RULE_CAP).map(r => `  • ${r}`).join('\n')}`);
-    }
+    // Stem, distractor and anti-pattern rules are in the exam profile above.
     const expl = guidelines.explanation_guidelines as Record<string, unknown> | undefined;
     if (expl) {
       const rules: string[] = [];
@@ -150,8 +120,6 @@ Output ONLY the JSON array. No preamble, no trailing text.`;
     const keyBalance = String(guidelines.answer_key_balance ?? '').trim();
     if (keyBalance) gParts.push(`Answer-key balance (THIS course's rule — apply it, not a generic one):\n  ${keyBalance}`);
 
-    const anti = (guidelines.anti_patterns as string[]) || [];
-    if (anti.length > 0) gParts.push(`Anti-patterns to flag:\n${anti.slice(0, GUIDELINE_RULE_CAP).map(a => `  • ${a}`).join('\n')}`);
     const coverage = (guidelines.coverage_rules as string[]) || [];
     if (coverage.length > 0) gParts.push(`Coverage rules:\n${coverage.slice(0, GUIDELINE_RULE_CAP).map(c => `  • ${c}`).join('\n')}`);
 
@@ -308,7 +276,7 @@ For EACH question ask:
     ? 'Stored fields (format_type, is_image_question, image_type, image_search_terms, subject, topic, chapter, tags) are kept by the platform, not written in the item: do NOT request that any be supplied or changed, and do NOT lower the score for their absence. Review what a candidate reads — stem, options, key, explanation, image.\n   ' + (opts?.restructure
       ? 'b. Exactly five options are required. Flag any other count and ask for options to be added or merged to five.'
       : 'b. Do NOT flag the option count. These items are already in use and every option carries recorded answers: never request that an option be added, removed, merged or reordered — edit an option\'s wording in place if it is wrong.')
-    : 'b. Does the option count match (e.g., 4 options vs. 5)?'}
+    : `b. Does the option count match this exam's${profile.optionCount ? ` (${profile.optionCount} for a single-best-answer item)` : ' (e.g., 4 options vs. 5)'}?`}
    c. Are the distractors structured as the exam expects (homogeneous length, parallel construction)?
    d. Is the Bloom's level a valid normalized value (2_understand, 3_apply, 4_analyze, 5_evaluate)? Flag non-standard labels like NCJMM_*, raw text labels, etc.
 7. DIFFICULTY AND BLOOM — is each question labelled with a level it actually sits at?
@@ -404,6 +372,7 @@ export async function runValidatorBatch(
   }
 
   const prompt = getBatchValidatorPrompt(contentType, domain, examFormat, guidelines, formatsInBatch, opts);
+  const profile = examProfile(domain, examFormat, guidelines);
   const content = await formatQuestionsForReviewWithImages(questions);
 
   // Build user message: multimodal if images present, plain text otherwise
@@ -481,21 +450,26 @@ export async function runValidatorBatch(
     r.summary = `Structural/gradability issue(s): ${issues.slice(0, 3).join('; ')}${issues.length > 3 ? '…' : ''}`;
   }
 
-  // Restructure mode only, where options may change. Three sources, each turned into change requests
-  // that hold the score at 6 so the fixer runs; none of them blocks on its own here (audit gates):
+  // Wherever options may change. Three sources, each turned into change requests that hold the score
+  // at 6 so the fixer runs; none of them blocks on its own here (audit gates restructure mode):
   //   - what a model is unreliable at counting: option count, the key longest, the key the odd one
   //     out in form, all/none-of-the-above (reviewMode.cueIssues);
   //   - the options-only probe: the key picked out by form, distractors ruled out on sight (cueProbe.ts);
-  //   - an image that is missing or does not load (reviewMode.imageIssues).
-  // Every job but a locked imported bank reviews against the checklist (reviewMode.checklist); the
-  // option-count, cue and probe checks stay restructure-only (they assume the five-option USMLE form).
+  //   - an image that is missing or does not load (reviewMode.imageIssues) — restructure only.
+  // Every job but a locked imported bank reviews against the checklist (reviewMode.checklist). Restructure
+  // items are held to five options; a generated single-best-answer item to the exam's own count
+  // (examProfile.optionCount), with the probe worded for its exam.
   const checklist = Boolean(opts?.restructure) || !opts?.existingBank;
   if (checklist) {
     const restructure = Boolean(opts?.restructure);
-    const [probes, loads] = await Promise.all([
-      restructure ? probeCues(questions) : Promise.resolve(questions.map(() => null)),
+    const single = questions.map((q) => restructure || isSingleBest(q));
+    const probeable = questions.filter((_, i) => single[i]);
+    const [probed, loads] = await Promise.all([
+      probeable.length ? probeCues(probeable, restructure ? undefined : domain) : Promise.resolve([]),
       Promise.all(questions.map((q) => (restructure && q.image_url ? imageLoads(q.image_url as string) : Promise.resolve(null)))),
     ]);
+    let pi = 0;
+    const probes = questions.map((_, i) => (single[i] ? probed[pi++] ?? null : null));
     for (let i = 0; i < questions.length; i++) {
       const r = results.find((x) => (x.question_number as number) === i + 1) || results[i];
       if (!r) continue;
@@ -512,7 +486,8 @@ export async function runValidatorBatch(
       }
       const bt = bowTieStemCue(questions[i]);
       const cues = [
-        ...(restructure ? [...imageIssues(questions[i], loads[i]), ...cueIssues(questions[i]), ...probeIssues(questions[i], probes[i])] : []),
+        ...(restructure ? imageIssues(questions[i], loads[i]) : []),
+        ...(single[i] ? [...cueIssues(questions[i], restructure ? 5 : profile.optionCount), ...probeIssues(questions[i], probes[i])] : []),
         ...(bt ? [bt] : []),
       ];
       const have = new Set((r.changes_required as string[]) || []);

@@ -6,7 +6,8 @@
  * items "needs clinician review" — in the third pilot one of them (placenta previa) had flipped
  * between crossmatch and immediate cesarean across runs, because the stem had been rewritten to fit
  * whichever answer a reviewer preferred. Here a judge decides the correct answer for the stem as it
- * stands, under current US practice, names its basis, and lists the edits that leave exactly one
+ * stands, under the authority the course names for deciding answers (examProfile.ts — current US practice
+ * for USMLE, NICE for UKMLA, the Codification for CPA, …), names its basis, and lists the edits that leave exactly one
  * defensible answer; the fixer applies them (with its drift, five-option and length checks); audit
  * then scores the result like any other repair.
  *
@@ -15,14 +16,15 @@
  *     identity threshold AND sameAnswer() says different — rewordings are not adjudicated), or
  *   - an independent blind solve in adversarial review chose a different answer from the key.
  *
- * Restructure jobs only, run by runImportedJobs between review and audit.
+ * Run by runImportedJobs between review and audit, and by reworkFlagged for any checklist job.
  */
 import { supabase } from '../../db/supabase.js';
 import { fetchAllRows } from '../../db/pagination.js';
 import { orCall, MODELS } from '../llm/openrouter.js';
 import { fixQuestion, sameAnswer, optionIdentity, OPTION_IDENTITY_MIN } from './fixer.js';
-import { optionTexts, keyLengthCue, cueIssues, reviewModeOf, bowTieStemCue } from './reviewMode.js';
+import { optionTexts, keyLengthCue, cueIssues, reviewModeOf, bowTieStemCue, isSingleBest } from './reviewMode.js';
 import { preferOriginal } from './conceptGuard.js';
+import { profileForJob, type ExamProfile } from './examProfile.js';
 import { auditBatchForJob } from '../audit/auditPipeline.js';
 import { changedFields } from '../audit/fixHistory.js';
 import { parseChecks, checkChanges } from './reviewChecklist.js';
@@ -67,10 +69,12 @@ interface Verdict { correct_answer: string; verdict: string; rationale: string; 
 
 const LETTERS = 'ABCDEFGHIJ';
 
-function judgePrompt(q: Row, original: Row | null, blind: string[], courseName: string): string {
+function judgePrompt(q: Row, original: Row | null, blind: string[], courseName: string, profile: ExamProfile | null, restructure: boolean): string {
   const { texts, key } = optionTexts(q);
   const origKey = original ? keyOf(original) : null;
-  return `You are the final medical authority for a ${courseName} question bank. No clinician will review this item after you: decide the correct answer yourself, from current US practice and the major US guidelines (ACOG, ACC/AHA, IDSA, ADA, USPSTF, AAP, ATS, CDC and the like), and make the item support exactly one best answer.
+  const authority = profile?.authority ?? 'the current, authoritative standards this exam is written to';
+  const n = restructure ? 5 : profile?.optionCount ?? texts.length;
+  return `You are the final authority on ${profile?.domain ?? 'the subject'} for a ${courseName} question bank. No expert will review this item after you: decide the correct answer yourself, from ${authority}, and make the item support exactly one best answer.
 
 CURRENT ITEM
 Stem: ${String(q.question ?? '')}
@@ -87,19 +91,20 @@ AN INDEPENDENT BLIND SOLVE DISAGREED WITH THE KEY:
 ${blind.map((b) => `- ${b.slice(0, 500)}`).join('\n')}
 ` : ''}
 Decide:
-1. For the CURRENT stem, which option is the single best answer under current US practice? If none is correct, give the correct answer as a new option text.
-2. Does the stem support exactly one best answer? Find every fact or omission that would let a well-prepared candidate defend a different option (a missing finding, an unstated diagnosis, a sentence that invites another step, vital signs that point both ways).
+1. For the CURRENT stem, which option is the single best answer under that authority? If none is correct, give the correct answer as a new option text.
+2. Does the stem support exactly one best answer? Find every fact or omission that would let a well-prepared candidate defend a different option (a missing finding or figure, an unstated condition or assumption, a sentence that invites another answer, data that point both ways).
 3. If review rewrote the stem to fit a new answer, was that justified? Prefer the version that tests the item's original concept soundly; where the original scenario and key were right, the edits may restore them.
-4. List the specific edits (to stem, options or explanation) that leave exactly one defensible answer and an explanation that states the reason, naming the guideline basis. Keep five options; the keyed option must not be the longest. Empty list if the item is already sound.
+4. List the specific edits (to stem, options or explanation) that leave exactly one defensible answer and an explanation that states the reason, naming its basis (the guideline, standard, rule or source). Keep ${n} options; the keyed option must not be the longest. Empty list if the item is already sound.
 
 Return ONLY a JSON object:
-{"correct_answer": "<exact option text, or new option text>", "verdict": "current_key_correct" | "change_key", "rationale": "<2-4 sentences: why this is the best answer and why the main alternative is not>", "basis": ["<guideline or source: the specific recommendation>"], "edits": ["<specific edit>"]}`;
+{"correct_answer": "<exact option text, or new option text>", "verdict": "current_key_correct" | "change_key", "rationale": "<2-4 sentences: why this is the best answer and why the main alternative is not>", "basis": ["<guideline, standard, rule or source: the specific provision>"], "edits": ["<specific edit>"]}`;
 }
 
-async function judge(q: Row, original: Row | null, blind: string[], courseName: string): Promise<Verdict | null> {
+async function judge(q: Row, original: Row | null, blind: string[], courseName: string, restructure: boolean): Promise<Verdict | null> {
+  const profile = q.job_id ? await profileForJob(String(q.job_id)) : null;
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
-      const r = await orCall(MODELS.AUDITOR, '', judgePrompt(q, original, blind, courseName), { maxTokens: 4000, temperature: attempt === 1 ? 0.1 : 0 });
+      const r = await orCall(MODELS.AUDITOR, '', judgePrompt(q, original, blind, courseName, profile, restructure), { maxTokens: 4000, temperature: attempt === 1 ? 0.1 : 0 });
       const m = r.content.match(/\{[\s\S]*\}/);
       if (!m) continue;
       const v = JSON.parse(m[0]);
@@ -136,6 +141,8 @@ export async function adjudicateJobKeys(jobId: string, courseName: string, log: 
     return qb.order('question_number').range(from, to);
   })).filter((q) => !only || only.has(q.id));
   const report: AdjudicationReport = { candidates: 0, adjudicated: 0, keyChanged: 0, edited: 0, failed: 0 };
+  const { data: jobRow } = await supabase.from('qb_jobs').select('config').eq('id', jobId).single();
+  const mode = reviewModeOf(jobRow?.config as Row);
 
   for (const q of rows) {
     if ((q.tags as Row | null)?.belongs_to_exam) continue;
@@ -148,7 +155,7 @@ export async function adjudicateJobKeys(jobId: string, courseName: string, log: 
     if (!only && !changed && !blind.length) continue;
     report.candidates++;
 
-    const v = await judge(q, original, blind, courseName);
+    const v = await judge(q, original, blind, courseName, mode.restructure);
     if (!v) { report.failed++; log(`  [Adjudicate] Q${q.question_number}: no verdict`); continue; }
     report.adjudicated++;
     const keyStays = await same(String(q.question ?? ''), cur, v.correct_answer);
@@ -157,7 +164,7 @@ export async function adjudicateJobKeys(jobId: string, courseName: string, log: 
     let error: string | undefined;
     if (!keyStays || v.edits.length) {
       const ask = `ANSWER KEY ADJUDICATION: The correct answer is "${v.correct_answer}"${keyStays ? ' (the current key)' : ' — make it the keyed option'}. ${v.rationale} Basis: ${v.basis.join('; ')}. Make these edits so it is the only defensible answer, and state the reason and basis in the explanation: ${v.edits.join(' ') || 'none beyond the key.'}`;
-      const fix = await fixQuestion(q, [ask], courseName, { existingBank: true, restructure: true });
+      const fix = await fixQuestion(q, [ask], courseName, { existingBank: mode.existingBank, restructure: mode.restructure });
       if (fix.fixed && fix.question && keyOf(fix.question) && (await same(String(fix.question.question ?? ''), keyOf(fix.question)!, v.correct_answer))) {
         after = { ...q, ...fix.question, image_url: fix.imageRemoved ? null : q.image_url, is_image_question: fix.imageRemoved ? false : q.is_image_question };
       } else {
@@ -235,9 +242,11 @@ export async function repairAfterAudit(jobId: string, courseName: string, log: (
     .eq('job_id', jobId).in('status', ['flagged', 'approved']).is('replaced_by_id', null).order('question_number').range(from, to)))
     .filter((q) => !only || only.has(q.id));
   const out = { flagged: 0, polished: 0, repaired: 0, failed: 0 };
-  // Generated jobs get the same pass, without the restructure-only five-option, cue and probe asks.
+  // Generated jobs get the same pass; their single-best-answer items get the cue and probe asks at the
+  // exam's own option count, with the probe worded for the exam.
   const { data: jobRow } = await supabase.from('qb_jobs').select('config').eq('id', jobId).single();
   const mode = reviewModeOf(jobRow?.config as Row);
+  const profile = mode.restructure ? null : await profileForJob(jobId);
   // In parallel, under the same LLM_CONCURRENCY as review and audit: one at a time, the fix pass
   // took about 35 minutes for 19 of 50 Step 1 items in the 150-question batch.
   const work = async (q: Row): Promise<void> => {
@@ -248,13 +257,14 @@ export async function repairAfterAudit(jobId: string, courseName: string, log: (
     const wasApproved = q.status === 'approved';
     if (wasApproved && !(checks || []).some((c) => c.result === 'fail')) return;
     if (wasApproved) out.polished++; else out.flagged++;
-    const [probe] = mode.restructure ? await probeCues([q]) : [null];
+    const single = mode.restructure || isSingleBest(q);
+    const [probe] = single ? await probeCues([q], mode.restructure ? undefined : courseName) : [null];
     // An answer adjudication after this audit has settled KEY_CORRECT and ONE_BEST_ANSWER.
     const auditAt = trail.lastIndexOf(audit as Row);
     const adjudicated = trail.slice(auditAt + 1).some((e: Row) => e?.phase === 'key_adjudication');
     let asks = [
       ...(checks ? checkChanges(checks.filter((c) => !(adjudicated && (c.id === 'KEY_CORRECT' || c.id === 'ONE_BEST_ANSWER'))), Boolean(q.image_url)) : ((audit?.issues || []) as string[])),
-      ...(mode.restructure ? [...cueIssues(q), ...probeIssues(q, probe)] : []),
+      ...(single ? [...cueIssues(q, mode.restructure ? 5 : profile?.optionCount ?? null), ...probeIssues(q, probe)] : []),
       // Audit's own gates that the checklist does not carry: a changed concept, a bow-tie stem naming the keyed actions.
       ...((audit?.issues || []) as string[]).filter((x) => /^NOT COMPLIANT — SAME_CONCEPT/.test(x)).map((x) => `[SAME_CONCEPT] ${x.replace(/^NOT COMPLIANT — SAME_CONCEPT: /, '')}`),
       ...(bowTieStemCue(q) ? [bowTieStemCue(q)!] : []),

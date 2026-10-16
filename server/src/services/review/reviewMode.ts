@@ -46,8 +46,10 @@ export const RESTRUCTURE_RULES = `RULES FOR BRINGING THESE ITEMS TO EXAM STANDAR
 
 // ── Deterministic cue checks ──
 //
-// The things a model is unreliable at counting. Run on every restructure-mode item by the validator,
-// which turns each finding into a change request for the fixer.
+// The things a model is unreliable at counting. Run by the validator on every restructure-mode item and
+// every generated single-best-answer item, turning each finding into a change request for the fixer.
+// Only restructure mode blocks on them at audit; for generated items they are repaired, not gated,
+// until a benchmark shows the gate holds back only real cues.
 
 const words = (s: string) => (String(s || '').match(/[A-Za-z0-9]+/g) || []).length;
 const NOTA = /\b(all|none) of the (above|following)\b/i;
@@ -59,6 +61,13 @@ export function optionTexts(q: Record<string, unknown>): { texts: string[]; key:
     return { texts: letters.map((L) => String(o[L] ?? '')), key: letters.indexOf(String(q.correct_option ?? '')) };
   }
   return { texts: [], key: -1 };
+}
+
+/** A single-best-answer item with a letter map of options: the form the cue checks apply to. */
+export function isSingleBest(q: Record<string, unknown>): boolean {
+  const fmt = String(q.format_type ?? (q.tags as Record<string, unknown> | null)?.format_type ?? 'mcq_single');
+  const { texts, key } = optionTexts(q);
+  return (fmt === 'mcq_single' || fmt === 'single_best_answer') && texts.length >= 3 && key >= 0;
 }
 
 export interface LengthCue { keyChars: number; maxChars: number; keyWords: number; maxWords: number }
@@ -123,11 +132,15 @@ function lengthSpread(texts: string[]): { min: number; max: number } | null {
   return min < 0.6 * max ? { min, max } : null;
 }
 
-export function cueIssues(q: Record<string, unknown>): string[] {
+/**
+ * `expected`: the exam's option count (five for USMLE; examProfile.optionCount elsewhere), or null to
+ * leave the count alone.
+ */
+export function cueIssues(q: Record<string, unknown>, expected: number | null = 5): string[] {
   const { texts } = optionTexts(q);
   const out: string[] = [];
-  if (texts.length && texts.length !== 5) {
-    out.push(`FORMAT: The item has ${texts.length} options; exam items have exactly five. ${texts.length < 5 ? 'Add' : 'Merge or remove'} options so there are five homogeneous, plausible choices.`);
+  if (expected && texts.length && texts.length !== expected) {
+    out.push(`FORMAT: The item has ${texts.length} options; exam items have exactly ${expected}. ${texts.length < expected ? 'Add' : 'Merge or remove'} options so there are ${expected} homogeneous, plausible choices.`);
   }
   const len = keyLengthCue(q);
   if (len) {
@@ -135,7 +148,7 @@ export function cueIssues(q: Record<string, unknown>): string[] {
   }
   const odd = oddOneOut(q);
   if (odd.length) {
-    out.push(`FORMAT: The keyed option stands out from the distractors: ${odd.join('; ')}. Make the five options alike in form so the key cannot be picked out by its shape.`);
+    out.push(`FORMAT: The keyed option stands out from the distractors: ${odd.join('; ')}. Make the options alike in form so the key cannot be picked out by its shape.`);
   }
   const spread = lengthSpread(texts);
   if (spread && !len) {
