@@ -12,7 +12,10 @@ import { supabase } from '../db/supabase.js';
 const jobIds = process.argv.slice(2).filter((a) => /^[0-9a-f-]{36}$/.test(a));
 const oi = process.argv.indexOf('--out');
 const OUT = oi >= 0 ? process.argv[oi + 1] : 'backups/usmle_export/pilot_report.json';
-const src = new Map((JSON.parse(readFileSync('backups/usmle_export/usmle_questions_post_2025-01-31.json', 'utf8')).questions as Array<Record<string, any>>).map((q) => [q.id, q]));
+// --source <file>: the live-bank export the jobs were imported from (default: the post-2025 export).
+const SOURCE_ARG = process.argv.indexOf('--source');
+const SOURCE_FILE = SOURCE_ARG >= 0 ? process.argv[SOURCE_ARG + 1] : 'backups/usmle_export/usmle_questions_post_2025-01-31.json';
+const src = new Map((JSON.parse(readFileSync(SOURCE_FILE, 'utf8')).questions as Array<Record<string, any>>).map((q) => [q.id, q]));
 
 const words = (s: string) => new Set((s || '').toLowerCase().match(/[a-z0-9]+/g) || []);
 const sim = (a: string, b: string) => { const A = words(a), B = words(b); const i = [...A].filter((w) => B.has(w)).length; return A.size + B.size - i ? +(i / (A.size + B.size - i)).toFixed(2) : 1; };

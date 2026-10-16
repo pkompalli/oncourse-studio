@@ -20,7 +20,9 @@ import { optionIdentity, OPTION_IDENTITY_MIN } from '../services/review/fixer.js
 const jobIds = process.argv.slice(2).filter((a) => /^[0-9a-f-]{36}$/.test(a));
 const oi = process.argv.indexOf('--out');
 const OUT = oi >= 0 ? process.argv[oi + 1] : 'backups/usmle_export/reviewed';
-const SOURCE = 'backups/usmle_export/usmle_questions_post_2025-01-31.json';
+// --source <file>: the live-bank export the jobs were imported from (default: the post-2025 export).
+const si = process.argv.indexOf('--source');
+const SOURCE = si >= 0 ? process.argv[si + 1] : 'backups/usmle_export/usmle_questions_post_2025-01-31.json';
 if (!jobIds.length) { console.log('usage: exportReviewed.ts <jobId> [<jobId> …] --out <path-without-extension>'); process.exit(1); }
 
 type Row = Record<string, any>;
