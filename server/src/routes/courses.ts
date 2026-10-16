@@ -61,12 +61,17 @@ coursesRouter.post('/', async (req, res, next) => {
 });
 
 // List courses
-coursesRouter.get('/', async (_req, res, next) => {
+coursesRouter.get('/', async (req, res, next) => {
   try {
-    const { data, error } = await supabase
-      .from('qb_courses')
-      .select('*')
-      .order('created_at', { ascending: false });
+    // Archived courses (old and duplicate ones, migration 006) are left out unless asked for. Until the
+    // migration has run there is no archived_at column, and the unfiltered list is returned.
+    const all = req.query.include_archived === '1';
+    const list = (filter: boolean) => {
+      const q = supabase.from('qb_courses').select('*').order('created_at', { ascending: false });
+      return filter ? q.is('archived_at', null) : q;
+    };
+    let { data, error } = await list(!all);
+    if (error && /archived_at/.test(error.message)) ({ data, error } = await list(false));
 
     if (error) throw new Error(error.message);
     res.json({ courses: data });
