@@ -302,9 +302,6 @@ export async function fixQuestion(
   return best;
 }
 
-/** The exam profile the fixer sees: shorter than the reviewers', since it is sent once per item. */
-const FIXER_PROFILE_CHARS = 6000;
-
 // IMAGE REMOVE: an image that stayed inconsistent through a repair already; removed, not re-aligned.
 const IMAGE_ASK = /^IMAGE (CONFLICT|NOT LOADING|MISSING|REMOVE)/;
 const IMAGE_GONE = /^IMAGE (NOT LOADING|MISSING|REMOVE)/;
@@ -373,11 +370,12 @@ IMAGE — the item's attached image is shown after this prompt. It cannot be rep
 
   const contentJson = JSON.stringify(question, null, 2);
   const changesText = changesRequired.map((c) => `  ${c}`).join('\n');
-  // Checklist jobs (generated, and restructured imports): the change requests name checks, including
-  // EXAM_FIDELITY and VIGNETTE_PATTERN, which are judged against the exam's profile — so the fixer is
-  // shown that profile and the checklist, not only the request.
+  // Checklist jobs (generated, and restructured imports): the change requests name checks, so the fixer
+  // is shown the checklist, and the exam's option count. Not the exam profile itself: in the fidelity
+  // benchmark (benchmarkExamFidelity.ts) fixes written with it in view added material and lost a blind
+  // comparison with the old pipeline 5 to 15, for no gain in closeness to the exam.
   const checklistJob = Boolean(opts?.restructure) || !opts?.existingBank;
-  const profile = checklistJob && question.job_id ? await profileForJob(String(question.job_id), FIXER_PROFILE_CHARS) : null;
+  const profile = checklistJob && question.job_id ? await profileForJob(String(question.job_id)) : null;
   const checklistRules = checklistJob && !opts?.restructure ? `
 • ${CHECKLIST_FOR_FIXER.replace(/\n/g, '\n  ')}
 • Keep the item's number of options${profile?.optionCount ? ` (${profile.optionCount} for a single-best-answer item in this exam)` : ''} unless a change asks for a different number.
@@ -409,7 +407,7 @@ ${opts?.restructure
 • Write only what a candidate should read. Never put notes about the item itself into the stem, options or explanation ("the image adds no information", "this was revised to…").
 • Reply with the JSON object only — no sentence before or after it.${checklistRules}
 ${imageRules}
-COURSE: ${courseName}${profile?.text ? `\n\n${profile.text}` : ''}
+COURSE: ${courseName}
 
 ─── ORIGINAL QUESTION (JSON) ───
 ${contentJson}

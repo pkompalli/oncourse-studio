@@ -250,8 +250,9 @@ export async function runAuditBatch(questions: Record<string, unknown>[], opts: 
     : '';
 
   // The exam's profile (examProfile.ts): audit judged VIGNETTE_PATTERN and LEAD_IN against "the exam's
-  // pattern" without ever being shown it. exam_fidelity is recorded, not gated: it measures how close
-  // approved items are to the real exam.
+  // pattern" without ever being shown it. exam_fidelity is recorded, not gated, and not repaired. It is
+  // the auditor grading the pipeline's own output: in the fidelity benchmark it averaged 4.62 where an
+  // independent judge gave the same items 4.13, so read it as a trend, not a measurement.
   const prompt = getAuditPrompt(histories.length > 0, Boolean(opts.existingBank), Boolean(opts.restructure))
     + (opts.profile ? `\n\n${opts.profile}` : '')
     + (checklist ? `\n\n${CHECKLIST_PROMPT}\nJudge each check on the item EXACTLY as shown — the final version. "changes_required" is not needed here; give each failing check its "fix".
