@@ -144,6 +144,8 @@ ${CHECKLIST_PROMPT}
 Your blind attempt above is your evidence for KEY_CORRECT and ONE_BEST_ANSWER.` : EXISTING_ITEM_RULES}` : `8. CONCEPT DIVERSITY — look across the entire batch:
    a. Flag questions that test the EXACT same concept/fact as another question in the batch (conceptual duplicate even if worded differently)
    b. Flag questions that are too similar in scenario/presentation (e.g., 3 questions built on the same fact pattern → suggest varying it)
+${CHECKLIST_PROMPT}
+Your blind attempt above is your evidence for KEY_CORRECT and ONE_BEST_ANSWER. Report concept overlap in concept_overlap as before.
 9. ANSWER KEY BALANCE — check correct answer distribution across the batch:
 ${keyRule
   ? `   a. Apply THIS course's rule, not a generic one: ${keyRule}
@@ -415,9 +417,9 @@ export async function runAdversarialBatch(
     }
   }
 
-  // Restructure mode: the request list is the failed checks only (reviewChecklist.ts); the blind
-  // attempt's findings are added below as before, and answer adjudication settles them.
-  if (opts?.restructure) {
+  // Checklist jobs (all but a locked imported bank): the request list is the failed checks only
+  // (reviewChecklist.ts); the blind attempt's findings are added below as before.
+  if (opts?.restructure || !opts?.existingBank) {
     questions.forEach((q, i) => {
       const r = results.find((x) => (x.question_number as number) === i + 1) || results[i];
       const checks = r ? parseChecks(r) : null;

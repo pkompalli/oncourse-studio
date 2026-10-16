@@ -288,7 +288,9 @@ async function runValidatorPhase(
       const answerKeyIssue = (result.answer_key_issue as string) || '';
       // Restructure mode reviews against the checklist, so its request list is already complete; the
       // free-form issue arrays are not added on top (reviewChecklist.ts).
-      const changes = restructure && result.checks ? ((result.changes_required as string[]) || []) : [
+      // Checklist jobs send the failed checks; a generated job also keeps its answer-letter balance
+      // request (it has no bank-wide balancing step).
+      const changes = (restructure || !existingBank) && result.checks ? [...((result.changes_required as string[]) || []), ...(!existingBank && answerKeyIssue ? [`ANSWER KEY: ${answerKeyIssue}`] : [])] : [
         ...((result.changes_required as string[]) || []),
         ...formatIssues.map((fi: string) => `FORMAT: ${fi}`),
         ...caseStudyIssues.map((ci: string) => `CASE_STUDY: ${ci}`),
@@ -563,7 +565,9 @@ async function runAdversarialPhase(
       const answerKeyIssue = (result.answer_key_issue as string) || '';
       const caseStudyIssues = (result.case_study_issues as string[]) || [];
       const explanationIssues = (result.explanation_contradictions as string[]) || [];
-      const changes = restructure && result.checks ? ((result.changes_required as string[]) || []) : [
+      // Checklist jobs send the failed checks; a generated job also keeps concept-overlap and
+      // answer-balance requests, which the checklist does not cover.
+      const changes = (restructure || !existingBank) && result.checks ? [...((result.changes_required as string[]) || []), ...(!existingBank && conceptOverlap ? [`CONCEPT OVERLAP: ${conceptOverlap}`] : []), ...(!existingBank && answerKeyIssue ? [`ANSWER KEY: ${answerKeyIssue}`] : [])] : [
         ...((result.changes_required as string[]) || []),
         ...(conceptOverlap ? [`CONCEPT OVERLAP: ${conceptOverlap}`] : []),
         ...(answerKeyIssue ? [`ANSWER KEY: ${answerKeyIssue}`] : []),

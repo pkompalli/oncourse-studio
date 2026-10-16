@@ -19,6 +19,7 @@ import { supabase } from '../../db/supabase.js';
 import { generateBatchForJob } from '../generation/questionGeneration.js';
 import { reviewBatchForJob } from '../review/reviewPipeline.js';
 import { auditBatchForJob } from '../audit/auditPipeline.js';
+import { postAuditPasses } from '../review/keyAdjudication.js';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -129,6 +130,11 @@ async function runPipeline(jobId: string): Promise<void> {
     await auditBatchForJob(jobId);
     await waitWhileStatus(jobId, 'auditing', PHASE_TIMEOUT_MS);
     job = await getJob(jobId);
+    // Checklist jobs: one fix pass on what audit found and a final audit (keyAdjudication.ts).
+    if (job?.status === 'complete') {
+      await postAuditPasses(jobId).catch((e) => console.error(`[orchestrator] post-audit passes failed for ${jobId}:`, e));
+      job = await getJob(jobId);
+    }
   }
 
   console.log(`[orchestrator] Job ${jobId} finished orchestration at status=${job?.status}`);

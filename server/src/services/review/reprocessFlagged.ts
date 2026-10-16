@@ -15,10 +15,8 @@ import { fixQuestion } from './fixer.js';
 import { runValidatorBatch } from './validator.js';
 import { runAdversarialBatch } from './adversarial.js';
 import { processAllImageQuestions, regenerateQuestionImage, isImageGenerationAvailable, imageContradictionIssues } from '../images/imageGeneration.js';
-import { orCall, MODELS } from '../llm/openrouter.js';
-import type { ContentPart } from '../llm/openrouter.js';
-import { formatQuestionsForReviewWithImages, extractJsonArray } from './shared.js';
 import { routeChanges } from './changeRouting.js';
+import { auditBatchForJob } from '../audit/auditPipeline.js';
 import { reviewModeOf } from './reviewMode.js';
 
 const BATCH_SIZE = 10;
@@ -180,87 +178,6 @@ function getAuditIssues(question: Record<string, unknown>): string[] {
 
   // Deduplicate
   return [...new Set(issues)];
-}
-
-// ── Audit prompt (same as audit pipeline but for re-audit) ──
-
-function getAuditPrompt(): string {
-  return `You are a final quality gate auditor for exam questions.
-
-You will receive questions that have been fixed based on prior review feedback.
-Questions may be in ANY format: MCQ, Select All That Apply (SATA), ordered response, fill-in-the-blank, hot spot, matrix grid, extended matching, case study, etc.
-Your job is a FINAL holistic quality check — one combined score per question.
-
-Score each question 1-10 based on:
-1. Factual accuracy of the correct answer and explanation
-2. For choice-based formats: quality and plausibility of distractors/options
-3. For non-choice formats: appropriateness and accuracy of the expected answer
-4. Educational relevance and value
-5. Clarity and unambiguity of the question stem
-6. Image completeness — if marked as IMAGE: MISSING, the question is UNUSABLE and must score <= 4
-7. Overall exam-readiness
-
-Scoring guide:
-- 9-10: Exam-ready, no changes needed
-- 8: Minor polish possible but acceptable
-- 7: Borderline — could pass but has notable weakness
-- 5-6: Needs improvement before use
-- 1-4: Unacceptable — factual errors, ambiguity, or poor construction
-
-For each question, provide:
-- quality_score (1-10)
-- status: "approved" if score >= 7, "flagged" if score < 7
-- reason: 1 sentence explaining the score
-- issues: array of specific problems (empty if approved)
-
-Return a JSON ARRAY — one object per question:
-[
-  {
-    "question_number": 1,
-    "quality_score": 9,
-    "status": "approved",
-    "reason": "Well-constructed question with accurate answer and good distractors",
-    "issues": []
-  },
-  ...
-]
-
-Output ONLY the JSON array. No preamble, no trailing text.`;
-}
-
-async function runAuditBatch(questions: Record<string, unknown>[]): Promise<Record<string, unknown>[]> {
-  const prompt = getAuditPrompt();
-  const content = await formatQuestionsForReviewWithImages(questions);
-
-  let userMessage: string | ContentPart[];
-  if (typeof content === 'string') {
-    userMessage = `${prompt}\n\nQuestions to audit:\n${content}`;
-  } else {
-    userMessage = [
-      { type: 'text', text: `${prompt}\n\nQuestions to audit:\n` },
-      ...content,
-    ];
-  }
-
-  // 12000 (matching the main audit pipeline). 4000 truncated the response for
-  // large case-study batches, yielding no parseable score → questions stuck in
-  // needs_review/flagged limbo forever ("reprocess_audit_failed").
-  const response = await orCall(MODELS.AUDITOR, '', userMessage, {
-    maxTokens: 12000,
-    temperature: 0.2,
-  });
-
-  let results = extractJsonArray(response.content, questions.length);
-  if (results.length < questions.length) {
-    const response2 = await orCall(MODELS.AUDITOR, '', userMessage, {
-      maxTokens: 12000,
-      temperature: 0.1,
-    });
-    const results2 = extractJsonArray(response2.content, questions.length);
-    if (results2.length > results.length) results = results2;
-  }
-
-  return results;
 }
 
 // ── Main reprocess pipeline ──
@@ -648,73 +565,33 @@ async function runReprocessPipeline(jobId: string): Promise<void> {
       .in('id', flaggedIds)
       .order('question_number', { ascending: true });
 
+    // The main audit, not a local copy: the reprocess audit used to approve anything scoring 7 or more
+    // with none of the main audit's gates (checklist MUST checks, answer cues, key length, options-only
+    // probe, coherence, concept change), so it could pass an item the main audit had flagged for them.
     const toAudit = (preAuditQs || questionsToFix) as Record<string, unknown>[];
-    const auditBatches = chunk(toAudit, BATCH_SIZE);
-    let reApproved = 0;
-    let stillFlagged = 0;
-    let needsReview = 0;
-    let auditDone = 0;
-
-    const auditTasks = auditBatches.map((batch, bi) => async () => {
-      setStep(jobId, `[Audit] Batch ${bi + 1}/${auditBatches.length}: scoring ${batch.length} questions...`);
-
-      const results = await runAuditBatch(batch);
-
-      for (let i = 0; i < batch.length; i++) {
-        const q = batch[i];
-        const result = results[i];
-        const rawScore = result?.quality_score;
-
-        // Audit returned no usable score — empty/truncated review, not a real
-        // quality problem. Don't fabricate a score-5 flag (the false-flag loop
-        // that could never clear). Mark 'needs_review' so it's excluded from the
-        // flagged count but retried on the next reprocess pass.
-        if (rawScore == null) {
-          const nrTrail = Array.isArray(q.audit_trail) ? [...(q.audit_trail as unknown[])] : [];
-          nrTrail.push({
-            phase: 'reprocess_audit_failed',
-            reason: 'No score returned (empty or truncated review response)',
-            timestamp: new Date().toISOString(),
-          });
-          await supabase.from('qb_questions').update({
-            status: 'needs_review',
-            audit_trail: nrTrail,
-          }).eq('id', q.id);
-          needsReview++;
-          continue;
-        }
-
-        const auditScore = rawScore as number;
-        const newStatus = auditScore >= 7 ? 'approved' : 'flagged';
-
-        // No combined score — see auditPipeline.ts. Averaging the three stages mixed scores of
-        // three different versions of the question, and nothing ever gated on the result.
-        const trail = Array.isArray(q.audit_trail) ? [...(q.audit_trail as unknown[])] : [];
-        trail.push({
-          phase: 'reprocess_audit',
-          score: auditScore,
-          reason: (result.reason as string) || '',
-          issues: (result.issues as string[]) || [],
-          timestamp: new Date().toISOString(),
-        });
-
-        await supabase.from('qb_questions').update({
-          quality_score: auditScore,
-          status: newStatus,
-          audit_trail: trail,
-        }).eq('id', q.id);
-
-        if (newStatus === 'approved') reApproved++;
+    const auditIds = toAudit.map((q) => q.id as string);
+    for (let i = 0; i < auditIds.length; i += 200) {
+      await supabase.from('qb_questions').update({ status: 'reviewed' }).in('id', auditIds.slice(i, i + 200));
+    }
+    await supabase.from('qb_jobs').update({ status: 'auditing' }).eq('id', jobId);
+    setStep(jobId, `[Audit] running the main audit on ${auditIds.length} questions...`);
+    await pushProgress(jobId);
+    await auditBatchForJob(jobId);
+    for (;;) {
+      const { data: j } = await supabase.from('qb_jobs').select('status').eq('id', jobId).single();
+      if (j?.status !== 'auditing') break;
+      await new Promise((r) => setTimeout(r, 10000));
+    }
+    let reApproved = 0, stillFlagged = 0, needsReview = 0;
+    for (let i = 0; i < auditIds.length; i += 200) {
+      const { data: after } = await supabase.from('qb_questions').select('status').in('id', auditIds.slice(i, i + 200));
+      for (const q of after || []) {
+        if (q.status === 'approved') reApproved++;
+        else if (q.status === 'needs_review') needsReview++;
         else stillFlagged++;
       }
-
-      auditDone++;
-      setState(jobId, { reApproved, stillFlagged, needsReview });
-      setStep(jobId, `Audit: ${auditDone}/${auditBatches.length} batches — ${reApproved} approved, ${stillFlagged} still flagged${needsReview ? `, ${needsReview} need re-review` : ''}`);
-      await pushProgress(jobId);
-    });
-
-    await runWithConcurrency(auditTasks, MAX_CONCURRENT);
+    }
+    setState(jobId, { reApproved, stillFlagged, needsReview });
 
     // ── Finalize ──
     const nrSuffix = needsReview ? `, ${needsReview} need re-review (review call failed)` : '';

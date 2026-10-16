@@ -11,7 +11,9 @@ import { supabase } from '../../db/supabase.js';
 import { fetchAllRows } from '../../db/pagination.js';
 import { bankMixForJob } from '../generation/bankMix.js';
 import { fixHistoryBlock, unappliedChanges } from './fixHistory.js';
-import { reviewModeOf, optionTexts, keyLengthCue, describeLengthCue } from '../review/reviewMode.js';
+import { reviewModeOf, optionTexts, keyLengthCue, describeLengthCue, bowTieStemCue } from '../review/reviewMode.js';
+import { sameConcept, conceptMayHaveMoved } from '../review/conceptGuard.js';
+import { flagDuplicateConcepts } from '../review/setChecks.js';
 import { probeCues, keySpotted, implausibleDistractors, type ProbeResult } from '../review/cueProbe.js';
 import { CHECKLIST_PROMPT, parseChecks, failedMust, failedStandard } from '../review/reviewChecklist.js';
 import { coherenceIssues, partitionIssues } from '../generation/coherence.js';
@@ -230,7 +232,8 @@ Output ONLY the JSON array. No preamble, no trailing text.`;
 
 // ── Run audit on a batch ──
 
-export async function runAuditBatch(questions: Record<string, unknown>[], opts: { existingBank?: boolean; restructure?: boolean } = {}): Promise<Record<string, unknown>[]> {
+export async function runAuditBatch(questions: Record<string, unknown>[], opts: { existingBank?: boolean; restructure?: boolean; checklist?: boolean } = {}): Promise<Record<string, unknown>[]> {
+  const checklist = opts.checklist ?? (Boolean(opts.restructure) || !opts.existingBank);
   // What earlier stages asked for, and what the fixer did about it. This was always on the row
   // — reviewPipeline writes it for every repair — and audit never read it, so it re-scored each
   // question from scratch and a change that was requested and silently not applied left a
@@ -238,7 +241,7 @@ export async function runAuditBatch(questions: Record<string, unknown>[], opts: 
   // Restructure mode audits the item as it now stands against the review checklist
   // (reviewChecklist.ts) instead of verifying each earlier request: open-ended requests verified
   // literally were most of the run-to-run variation in the fifth pilot.
-  const histories = opts.restructure ? [] : questions
+  const histories = checklist ? [] : questions
     .map((q, i) => fixHistoryBlock(q, `Q${i + 1}`))
     .filter((h): h is string => Boolean(h));
   const historyBlock = histories.length
@@ -246,7 +249,7 @@ export async function runAuditBatch(questions: Record<string, unknown>[], opts: 
     : '';
 
   const prompt = getAuditPrompt(histories.length > 0, Boolean(opts.existingBank), Boolean(opts.restructure))
-    + (opts.restructure ? `\n\n${CHECKLIST_PROMPT}\nJudge each check on the item EXACTLY as shown — the final version. "changes_required" is not needed here; give each failing check its "fix".` : '');
+    + (checklist ? `\n\n${CHECKLIST_PROMPT}\nJudge each check on the item EXACTLY as shown — the final version. "changes_required" is not needed here; give each failing check its "fix".` : '');
   const content = await formatQuestionsForReviewWithImages(questions);
 
   let userMessage: string | ContentPart[];
@@ -298,7 +301,7 @@ async function runAuditPipeline(jobId: string): Promise<void> {
     setStep(jobId, 'Fetching reviewed questions...');
     // Imported items are audited on candidate-facing content only (getAuditPrompt).
     const { data: jobRow } = await supabase.from('qb_jobs').select('config').eq('id', jobId).single();
-    const { existingBank, restructure } = reviewModeOf(jobRow?.config as Record<string, unknown>);
+    const { existingBank, restructure, checklist } = reviewModeOf(jobRow?.config as Record<string, unknown>);
 
     // Paginate — audit must see every reviewed question, not just the first 1000.
     const questions = await fetchAllRows<Record<string, unknown>>((from, to) =>
@@ -347,7 +350,7 @@ async function runAuditPipeline(jobId: string): Promise<void> {
       // Restructure mode re-runs the options-only probe on the repaired items, so the gate below judges
       // the version that ships, not the one the validator saw.
       const [results, probes] = await Promise.all([
-        runAuditBatch(batch, { existingBank, restructure }),
+        runAuditBatch(batch, { existingBank, restructure, checklist }),
         restructure ? probeCues(batch) : Promise.resolve(batch.map((): ProbeResult | null => null)),
       ]);
 
@@ -409,7 +412,7 @@ async function runAuditPipeline(jobId: string): Promise<void> {
         // The auditor's per-change verdicts are the second source, covering the case the record
         // cannot see: a change that WAS applied and applied wrongly.
         // Restructure mode decides by the checklist below, not by verifying earlier requests.
-        const checks = restructure ? parseChecks(result) : null;
+        const checks = checklist ? parseChecks(result) : null;
         const unapplied = checks ? [] : unappliedChanges(q);
         const verdicts = (result?.repair_verification as Array<Record<string, unknown>>) || [];
         const badVerdicts = verdicts.filter((v) =>
@@ -496,6 +499,24 @@ async function runAuditPipeline(jobId: string): Promise<void> {
             result.reason = `Not exam standard: ${formatBlock.slice(0, 200)}`;
           }
         }
+        // Every job: a bow-tie stem may not list orders that name the keyed actions. Restructure jobs:
+        // the item must still test what the imported original tested (conceptGuard.ts).
+        const btCue = bowTieStemCue(q);
+        if (btCue) {
+          formatBlock = [formatBlock, 'the stem lists orders naming the keyed actions'].filter(Boolean).join('; ');
+          result.issues = [...((result.issues as string[]) || []), `NOT COMPLIANT — ${btCue.replace(/^FORMAT: /, '')}`];
+        }
+        if (restructure && !otherExam) {
+          const original = ((q.audit_trail as Array<Record<string, any>>) || []).find((e) => /_fix$/.test(String(e?.phase)) && e.before)?.before;
+          if (original && conceptMayHaveMoved(original, q)) {
+            const v = await sameConcept(original, q);
+            if (!v.same) {
+              formatBlock = [formatBlock, `the item no longer tests what the original tested`].filter(Boolean).join('; ');
+              result.issues = [...((result.issues as string[]) || []), `NOT COMPLIANT — SAME_CONCEPT: the item no longer tests what the original tested. Original tested: ${v.original}. Revised tests: ${v.revised}. Restore the original testing objective.`];
+              result.reason = `Concept changed: ${v.original} → ${v.revised}`.slice(0, 300);
+            }
+          }
+        }
         // Restructure mode: the MUST checks and the mechanical gates decide; a STANDARD check is listed
         // but does not hold the item back, and the holistic score is kept for information only.
         let mustBlock = false;
@@ -573,6 +594,13 @@ async function runAuditPipeline(jobId: string): Promise<void> {
     // Save post-audit snapshot
     setStep(jobId, 'Saving post-audit snapshots...');
     await saveJobSnapshots(jobId, 'post_audit').catch((e) => console.error('Snapshot error:', e));
+
+    // A generated set may not test one concept twice (setChecks.ts); the later item is flagged for the
+    // replace step. Imported banks are left alone.
+    if (!existingBank) {
+      const dups = await flagDuplicateConcepts(jobId).catch((e) => { console.error('Set check error:', e); return 0; });
+      if (dups) { totalFlagged += dups; totalApproved = Math.max(0, totalApproved - dups); }
+    }
 
     // Determine next status
     const nextStatus = 'complete';

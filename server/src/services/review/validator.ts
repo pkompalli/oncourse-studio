@@ -10,7 +10,7 @@ import { schemaErrorsFor } from '../generation/schemaValidate.js';
 import { coherenceIssues } from '../generation/coherence.js';
 import { consistencyIssues, isBlockingConsistency } from '../generation/consistency.js';
 import { EXISTING_ITEM_RULES } from './changeRouting.js';
-import { RESTRUCTURE_RULES, cueIssues, imageIssues } from './reviewMode.js';
+import { RESTRUCTURE_RULES, cueIssues, imageIssues, bowTieStemCue } from './reviewMode.js';
 import { probeCues, probeIssues } from './cueProbe.js';
 import { CHECKLIST_PROMPT, parseChecks, checkChanges } from './reviewChecklist.js';
 
@@ -325,7 +325,9 @@ ${CHECKLIST_PROMPT}` : EXISTING_ITEM_RULES}` : `9. ANSWER KEY DIVERSITY — chec
    a. Note the correct answer letter (A/B/C/D/E) for each question.
    b. Apply the course's own answer-key rule where one is given above. Where none is, flag if more than 40% of questions in this batch share the same key. Flag the over-represented ones and request the key be changed, with the content adjustment that makes the new key correct — never relabel an option without moving the content.
    c. Flag any run of consecutive questions in this batch sharing one key that exceeds the course's stated run limit.
-   d. A batch is a tenth of the bank, so do NOT infer a whole-set imbalance from it. Report what this batch shows and nothing more.`}
+   d. A batch is a tenth of the bank, so do NOT infer a whole-set imbalance from it. Report what this batch shows and nothing more.
+
+${CHECKLIST_PROMPT}`}
 10. IMAGE — relevance, and whether it shows what the question needs:
    a. Image absent but the stem explicitly references it (e.g. "shown below", "image 1", "radiograph shown") → score ≤ 4 and set needs_revision true. The question is UNUSABLE without its image regardless of how good the text is.
    b. Image present but wrong modality or clearly irrelevant → flag and suggest replacement.
@@ -485,10 +487,14 @@ export async function runValidatorBatch(
   //     out in form, all/none-of-the-above (reviewMode.cueIssues);
   //   - the options-only probe: the key picked out by form, distractors ruled out on sight (cueProbe.ts);
   //   - an image that is missing or does not load (reviewMode.imageIssues).
-  if (opts?.restructure) {
+  // Every job but a locked imported bank reviews against the checklist (reviewMode.checklist); the
+  // option-count, cue and probe checks stay restructure-only (they assume the five-option USMLE form).
+  const checklist = Boolean(opts?.restructure) || !opts?.existingBank;
+  if (checklist) {
+    const restructure = Boolean(opts?.restructure);
     const [probes, loads] = await Promise.all([
-      probeCues(questions),
-      Promise.all(questions.map((q) => (q.image_url ? imageLoads(q.image_url as string) : Promise.resolve(null)))),
+      restructure ? probeCues(questions) : Promise.resolve(questions.map(() => null)),
+      Promise.all(questions.map((q) => (restructure && q.image_url ? imageLoads(q.image_url as string) : Promise.resolve(null)))),
     ]);
     for (let i = 0; i < questions.length; i++) {
       const r = results.find((x) => (x.question_number as number) === i + 1) || results[i];
@@ -504,7 +510,11 @@ export async function runValidatorBatch(
       } else {
         console.warn(`  [Validator] Q${i + 1}: no checklist in the reply; keeping its free-form requests`);
       }
-      const cues = [...imageIssues(questions[i], loads[i]), ...cueIssues(questions[i]), ...probeIssues(questions[i], probes[i])];
+      const bt = bowTieStemCue(questions[i]);
+      const cues = [
+        ...(restructure ? [...imageIssues(questions[i], loads[i]), ...cueIssues(questions[i]), ...probeIssues(questions[i], probes[i])] : []),
+        ...(bt ? [bt] : []),
+      ];
       const have = new Set((r.changes_required as string[]) || []);
       r.changes_required = [...have, ...cues.filter((c) => !have.has(c))];
       if ((r.changes_required as string[]).length) {

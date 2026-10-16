@@ -7,6 +7,7 @@ import { orCall, MODELS, type ContentPart } from '../llm/openrouter.js';
 import { fetchImageAsDataUrl } from './shared.js';
 import { keyLengthCue, describeLengthCue, STEM_REFS_IMAGE } from './reviewMode.js';
 import { CHECKLIST_FOR_FIXER } from './reviewChecklist.js';
+import { sameConcept, conceptMayHaveMoved } from './conceptGuard.js';
 
 export interface FixResult {
   fixed: boolean;
@@ -261,7 +262,16 @@ export async function fixQuestion(
   // in the fifth pilot). Unless a change asks for a different key, sameAnswer() must agree it is the
   // same answer.
   const first = await fixOnce(question, changesRequired, courseName, opts?.restructure ? { ...opts, allowKeyReword: true } : opts);
-  if (!opts?.restructure || !first.fixed || !first.question) return first;
+  if (!first.fixed || !first.question) return first;
+  // In every mode: a fix may improve how the item asks, never change what it asks (conceptGuard.ts).
+  if (conceptMayHaveMoved(question, first.question)) {
+    const v = await sameConcept(question, first.question);
+    if (!v.same) {
+      console.error(`  [Fixer] REFUSED the fix — it changed what the item tests ("${v.original}" -> "${v.revised}")`);
+      return { fixed: false, error: `the fix changed what the item tests ("${v.original}" -> "${v.revised}")` };
+    }
+  }
+  if (!opts?.restructure) return first;
   const keyAsked = /\b(answer key|correct answer|keyed answer|key\b|correct option|image conflict|KEY_CORRECT|ONE_BEST_ANSWER)/i.test(changesRequired.join(' '));
   const k0 = keyText(question), k1 = keyText(first.question);
   if (!keyAsked && k0 !== null && k1 !== null && optionIdentity(k0, k1) < OPTION_IDENTITY_MIN && !(await sameAnswer(String(question.question ?? ''), k0, k1))) {
@@ -381,7 +391,7 @@ ${opts?.restructure
   : '• You cannot change an image. If a change can only be met by a different image, mark it "❌" — never describe in the stem or explanation what the image should show; that hands the candidate the answer.'}
 • Never shorten a clinical vignette into a recall question or strip clinical detail from it, and never write a "fix" that refers to other questions in a batch (overlap, answer-letter balance) — mark such a change "❌".
 ${opts?.restructure
-  ? '• A vignette follows the exam pattern: age and sex, setting, chief complaint with duration, relevant history and medications, vital signs (stated even when normal), examination, then the laboratory or imaging results the decision needs, ending in ONE closed lead-in such as "Which of the following is the most likely diagnosis?" that fits every option and does not echo the keyed option\'s wording. Keep the concept and question type the item tests; nothing in the stem may name the answer. Keep every finding the explanation relies on, and keep plausible distractors rather than replacing them.'
+  ? '• A vignette follows the exam pattern: age and sex, setting, chief complaint with duration, relevant history and medications, vital signs where the decision depends on the patient\'s clinical state, examination, then the laboratory or imaging results the decision needs, ending in ONE closed lead-in such as "Which of the following is the most likely diagnosis?" that fits every option and never repeats, paraphrases or narrows toward the keyed option. Add nothing that plays no part in the decision: calculation, biostatistics, ethics and pure mechanism items get no vital signs or examination padding. Keep the concept and question type the item tests — never turn it into a question about a different fact; nothing in the stem may name the answer. Options keep their standard, recognised terms. Keep every finding the explanation relies on, and keep plausible distractors rather than replacing them.'
   : '• Turning a short stem into a clinical vignette keeps the SAME question being asked and the SAME options: a "most likely diagnosis" item stays a diagnosis item with the same diagnoses to choose from. If a change can only be met by asking something different, mark it "❌".'}
 • Write only what a candidate should read. Never put notes about the item itself into the stem, options or explanation ("the image adds no information", "this was revised to…").
 • Reply with the JSON object only — no sentence before or after it.

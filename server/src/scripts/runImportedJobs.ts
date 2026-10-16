@@ -16,7 +16,7 @@
  * process-wide limiter (llm/limiter.ts) caps the calls in flight. --quiet drops the per-job progress lines.
  */
 import 'dotenv/config';
-import { readFileSync, existsSync, mkdirSync } from 'node:fs';
+import { readFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { supabase } from '../db/supabase.js';
@@ -24,7 +24,7 @@ import { reviewBatchForJob } from '../services/review/reviewPipeline.js';
 import { auditBatchForJob } from '../services/audit/auditPipeline.js';
 import { reviewModeOf } from '../services/review/reviewMode.js';
 import { balanceJobKeys } from '../services/review/keyBalance.js';
-import { adjudicateJobKeys, sweepLengthCues, repairAfterAudit, revertRegressions } from '../services/review/keyAdjudication.js';
+import { adjudicateJobKeys, sweepLengthCues, postAuditPasses } from '../services/review/keyAdjudication.js';
 
 const arg = (name: string) => { const i = process.argv.indexOf(`--${name}`); return i >= 0 ? process.argv[i + 1] : undefined; };
 const MANIFEST = arg('manifest');
@@ -116,19 +116,8 @@ async function drive(id: string) {
   // so a run stopped part-way through the fix pass resumes it: the items already repaired sit at
   // 'reviewed' and go straight to the final audit, and the fix pass picks up the rest.
   if (job.status === 'complete' && reviewModeOf(job.config).restructure && !(await balanced(id))) {
-    const { data: j } = await supabase.from('qb_jobs').select('course_id').eq('id', id).single();
-    const { data: c } = await supabase.from('qb_courses').select('name').eq('id', j?.course_id).single();
-    const r = await repairAfterAudit(id, String(c?.name ?? 'USMLE'), (s) => console.log(`${tag}${s}`));
-    console.log(`${tag} post-audit repair: ${JSON.stringify(r)}`);
-    const { count } = await supabase.from('qb_questions').select('*', { count: 'exact', head: true }).eq('job_id', id).eq('status', 'reviewed').is('replaced_by_id', null);
-    if (count) {
-      const { error } = await supabase.from('qb_jobs').update({ status: 'auditing' }).eq('id', id);
-      if (error) throw new Error(error.message);
-      await auditBatchForJob(id);
-      job = { ...job, status: await waitWhile(id, 'auditing', tag) };
-      const reverted = await revertRegressions(id, (s) => console.log(`${tag}${s}`));
-      console.log(`${tag} style repairs reverted: ${reverted}`);
-    }
+    await postAuditPasses(id, (s) => console.log(`${tag}${s}`));
+    job = { ...job, status: (await jobOf(id)).status };
     const b = await balanceJobKeys(id, true);
     await supabase.from('qb_jobs').update({ config: { ...(job.config || {}), key_balanced_at: new Date().toISOString() } }).eq('id', id);
     console.log(`${tag} key balance: moved ${b.moved}/${b.items} | before ${JSON.stringify(b.before)} → after ${JSON.stringify(b.after)} | longest run ${b.maxRunAfter} | numeric kept ${b.numericKept}, not five ${b.skippedNotFive}, letter refs in explanation ${b.letterRefs.length}`);
@@ -136,6 +125,35 @@ async function drive(id: string) {
   const { data: qs } = await supabase.from('qb_questions').select('status').eq('job_id', id).is('replaced_by_id', null);
   const tally = (qs || []).reduce<Record<string, number>>((m, q) => { m[q.status] = (m[q.status] || 0) + 1; return m; }, {});
   console.log(`${tag} finished at status=${job.status} | questions: ${JSON.stringify(tally)}`);
+  if (job.status === 'complete' && reviewModeOf(job.config).restructure) await rehome(id, tag);
+}
+
+/**
+ * Items a review retagged to a different USMLE Step are imported into that Step's course and run there
+ * (reviewMode RESTRUCTURE_RULES: retag, don't rewrite). The eight Step 1 management items retagged in
+ * the full run were approved 7 of 8 when rerun by hand as Step 2 CK. Once per job (config.rehomed_at).
+ */
+const STEP_OF: Record<string, string> = { 'USMLE Step 1': 'step1', 'USMLE Step 2 CK': 'step2', 'USMLE Step 3': 'step3' };
+async function rehome(id: string, tag: string) {
+  const job = await jobOf(id);
+  if (job.config?.rehomed_at) return;
+  const { data: rows } = await supabase.from('qb_questions').select('tags').eq('job_id', id).is('replaced_by_id', null);
+  const byStep = new Map<string, string[]>();
+  for (const q of rows || []) {
+    const step = STEP_OF[String(q.tags?.belongs_to_exam ?? '')];
+    if (step && step !== job.config?.step && q.tags?.source_question_id) byStep.set(step, [...(byStep.get(step) || []), q.tags.source_question_id]);
+  }
+  await supabase.from('qb_jobs').update({ config: { ...(job.config || {}), rehomed_at: new Date().toISOString() } }).eq('id', id);
+  const src = `backups/usmle_export/${String(job.config?.source_file ?? '')}`;
+  if (!byStep.size || !existsSync(src)) return;
+  for (const [step, ids] of byStep) {
+    const idsFile = `/tmp/rehome_${id.slice(0, 8)}_${step}.json`, manifest = `/tmp/rehome_${id.slice(0, 8)}_${step}_manifest.json`;
+    writeFileSync(idsFile, JSON.stringify(ids));
+    await run('npx', ['tsx', 'src/scripts/importUsmleExport.ts', '--in', src, '--ids', idsFile, '--as', step, '--restructure', '--manifest', manifest, '--apply'], { maxBuffer: 1 << 26 });
+    const created: string[] = JSON.parse(readFileSync(manifest, 'utf8')).jobs.map((j: { job: string }) => j.job);
+    console.log(`${tag} re-homed ${ids.length} item(s) retagged to ${step} → job ${created.join(', ')}`);
+    for (const nj of created) await drive(nj);
+  }
 }
 
 // ── Parts: consecutive manifest jobs grouped into blocks of about 1,000 questions ──

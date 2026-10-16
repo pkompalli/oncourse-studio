@@ -20,6 +20,17 @@ const LETTERS = 'ABCDE';
 const NUMERIC = /^\s*[~≈<>≤≥]?\s*(approximately |about )?[-+]?\d/i;
 const LETTER_REF = /\b(option|choice|answer)\s+[A-E]\b|\(\s*[A-E]\s*\)/i;
 
+/**
+ * Letters in an explanation stop being true once options move. "Option C" becomes the option's text in
+ * quotes and a bare "(C)" after a name is dropped, so the explanation names options by text whatever
+ * order they end in.
+ */
+export function unletterExplanation(text: string, options: Record<string, string>): string {
+  return String(text || '')
+    .replace(/\b(option|choice|answer)\s+([A-E])\b/gi, (m, _w, L) => (options[L] ? `"${options[L]}"` : m))
+    .replace(/\s*\(\s*[A-E]\s*\)/g, '');
+}
+
 /** A small seeded PRNG, so a re-run on the same job gives the same plan. */
 function prng(seed: string) {
   let h = 2166136261;
@@ -67,7 +78,8 @@ export async function balanceJobKeys(jobId: string, apply: boolean): Promise<Bal
 
     const from = LETTERS.indexOf(key), to = plan[i];
     if (from === to) { finalKeys.push(key); continue; }
-    if (LETTER_REF.test(String(q.explanation || ''))) rep.letterRefs.push(q.id);
+    const hadRefs = LETTER_REF.test(String(q.explanation || '')) || LETTER_REF.test(String((q.content || {}).explanation || ''));
+    if (hadRefs) rep.letterRefs.push(q.id);
 
     const next = [...texts];
     [next[from], next[to]] = [next[to], next[from]];
@@ -79,12 +91,15 @@ export async function balanceJobKeys(jobId: string, apply: boolean): Promise<Bal
 
     const content = { ...(q.content || {}) };
     if (Array.isArray(content.options)) content.options = next.map((t, j) => ({ key: LETTERS[j], text: t }));
+    // Rewritten against the letters BEFORE the move, which is what they referred to.
+    const explanation = hadRefs ? unletterExplanation(String(q.explanation || ''), opts) : q.explanation;
+    if (hadRefs && typeof content.explanation === 'string') content.explanation = unletterExplanation(content.explanation, opts);
     if (content.answer && typeof content.answer === 'object') content.answer = { ...content.answer, key: newKey };
     const trail = [...(Array.isArray(q.audit_trail) ? q.audit_trail : []), {
       phase: 'key_balance', from: key, to: newKey, reason: 'answer positions balanced across the bank; option content unchanged',
       timestamp: new Date().toISOString(),
     }];
-    const { error } = await supabase.from('qb_questions').update({ options: newOptions, correct_option: newKey, content, audit_trail: trail }).eq('id', q.id);
+    const { error } = await supabase.from('qb_questions').update({ options: newOptions, correct_option: newKey, content, explanation, audit_trail: trail }).eq('id', q.id);
     if (error) throw new Error(`key balance ${q.id}: ${error.message}`);
   }
   for (const k of finalKeys) rep.after[k] = (rep.after[k] || 0) + 1;

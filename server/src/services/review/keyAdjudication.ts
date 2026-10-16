@@ -21,7 +21,9 @@ import { supabase } from '../../db/supabase.js';
 import { fetchAllRows } from '../../db/pagination.js';
 import { orCall, MODELS } from '../llm/openrouter.js';
 import { fixQuestion, sameAnswer, optionIdentity, OPTION_IDENTITY_MIN } from './fixer.js';
-import { optionTexts, keyLengthCue, cueIssues } from './reviewMode.js';
+import { optionTexts, keyLengthCue, cueIssues, reviewModeOf, bowTieStemCue } from './reviewMode.js';
+import { preferOriginal } from './conceptGuard.js';
+import { auditBatchForJob } from '../audit/auditPipeline.js';
 import { changedFields } from '../audit/fixHistory.js';
 import { parseChecks, checkChanges } from './reviewChecklist.js';
 import { probeCues, probeIssues } from './cueProbe.js';
@@ -233,6 +235,9 @@ export async function repairAfterAudit(jobId: string, courseName: string, log: (
     .eq('job_id', jobId).in('status', ['flagged', 'approved']).is('replaced_by_id', null).order('question_number').range(from, to)))
     .filter((q) => !only || only.has(q.id));
   const out = { flagged: 0, polished: 0, repaired: 0, failed: 0 };
+  // Generated jobs get the same pass, without the restructure-only five-option, cue and probe asks.
+  const { data: jobRow } = await supabase.from('qb_jobs').select('config').eq('id', jobId).single();
+  const mode = reviewModeOf(jobRow?.config as Row);
   // In parallel, under the same LLM_CONCURRENCY as review and audit: one at a time, the fix pass
   // took about 35 minutes for 19 of 50 Step 1 items in the 150-question batch.
   const work = async (q: Row): Promise<void> => {
@@ -243,18 +248,20 @@ export async function repairAfterAudit(jobId: string, courseName: string, log: (
     const wasApproved = q.status === 'approved';
     if (wasApproved && !(checks || []).some((c) => c.result === 'fail')) return;
     if (wasApproved) out.polished++; else out.flagged++;
-    const [probe] = await probeCues([q]);
+    const [probe] = mode.restructure ? await probeCues([q]) : [null];
     // An answer adjudication after this audit has settled KEY_CORRECT and ONE_BEST_ANSWER.
     const auditAt = trail.lastIndexOf(audit as Row);
     const adjudicated = trail.slice(auditAt + 1).some((e: Row) => e?.phase === 'key_adjudication');
     let asks = [
       ...(checks ? checkChanges(checks.filter((c) => !(adjudicated && (c.id === 'KEY_CORRECT' || c.id === 'ONE_BEST_ANSWER'))), Boolean(q.image_url)) : ((audit?.issues || []) as string[])),
-      ...cueIssues(q),
-      ...probeIssues(q, probe),
+      ...(mode.restructure ? [...cueIssues(q), ...probeIssues(q, probe)] : []),
+      // Audit's own gates that the checklist does not carry: a changed concept, a bow-tie stem naming the keyed actions.
+      ...((audit?.issues || []) as string[]).filter((x) => /^NOT COMPLIANT — SAME_CONCEPT/.test(x)).map((x) => `[SAME_CONCEPT] ${x.replace(/^NOT COMPLIANT — SAME_CONCEPT: /, '')}`),
+      ...(bowTieStemCue(q) ? [bowTieStemCue(q)!] : []),
     ];
     if (only) asks = asks.map((a) => a.replace(/^IMAGE CONFLICT: /, 'IMAGE REMOVE: '));
     if (!asks.length) return;
-    const fix = await fixQuestion(q, asks, courseName, { existingBank: true, restructure: true });
+    const fix = await fixQuestion(q, asks, courseName, { existingBank: mode.existingBank, restructure: mode.restructure });
     const snap = (x: Row) => ({ question: x.question, options: x.options, correct_option: x.correct_option, explanation: x.explanation });
     if (!fix.fixed || !fix.question) {
       out.failed++;
@@ -303,4 +310,81 @@ export async function revertRegressions(jobId: string, log: (s: string) => void 
     log(`  [AuditFix] Q${q.question_number}: style repair reverted, approved version kept`);
   }
   return n;
+}
+
+/**
+ * Do no harm. For each approved item of a restructure job whose imported original was already sound —
+ * the first review failed none of its MUST checks — a blind pairwise comparison runs in both orders, and
+ * if both prefer the original it is restored (with its image). 12 of the 14 originals the judge preferred
+ * in the pre-2025 sample had passed every required check before the pipeline rewrote them. The original
+ * is kept only if it still meets the hard format rules (five options, key not the longest).
+ */
+export async function keepBetterOriginals(jobId: string, log: (s: string) => void = console.log): Promise<number> {
+  const MUST = new Set(['KEY_CORRECT', 'ONE_BEST_ANSWER', 'FACTS_ACCURATE', 'IMAGE_CONSISTENT', 'DISTRACTORS_PLAUSIBLE', 'NO_ANSWER_CUE']);
+  const rows = await fetchAllRows<Row>((from, to) => supabase.from('qb_questions').select('*')
+    .eq('job_id', jobId).eq('status', 'approved').is('replaced_by_id', null).range(from, to));
+  let kept = 0;
+  const queue = [...rows];
+  const lanes = Math.max(1, Number(process.env.LLM_CONCURRENCY) || 8);
+  await Promise.all(Array.from({ length: lanes }, async () => {
+    for (let q = queue.shift(); q; q = queue.shift()) {
+      const trail = Array.isArray(q.audit_trail) ? [...q.audit_trail] : [];
+      const firstReview = trail.find((e: Row) => e?.phase === 'validator');
+      const sound = Array.isArray(firstReview?.checks) && !firstReview.checks.some((c: Row) => c.result === 'fail' && MUST.has(String(c.id)));
+      const original = originalOf(q);
+      if (!sound || !original) continue;
+      const orig: Row = { ...original, content: original.content ?? q.content };
+      if (optionTexts(orig).texts.length !== 5 || keyLengthCue(orig)) continue;
+      const v = await preferOriginal(orig, q);
+      if (!v.original) continue;
+      const removed = trail.find((e: Row) => typeof e?.image_removed === 'string')?.image_removed as string | undefined;
+      trail.push({ phase: 'kept_original', reason: `the original was sound and a blind comparison preferred it in both orders: ${v.reason}`.slice(0, 400), replaced_revision: savedFields(q), timestamp: new Date().toISOString() });
+      const { error } = await supabase.from('qb_questions').update({
+        question: orig.question, options: orig.options, correct_option: orig.correct_option, explanation: orig.explanation,
+        ...(original.content ? { content: original.content } : {}),
+        ...(removed ? { image_url: removed, is_image_question: true } : {}),
+        audit_trail: trail,
+      }).eq('id', q.id);
+      if (error) { log(`  [KeepOriginal] Q${q.question_number}: write failed ${error.message}`); continue; }
+      kept++;
+      log(`  [KeepOriginal] Q${q.question_number}: original restored — ${v.reason.slice(0, 120)}`);
+    }
+  }));
+  return kept;
+}
+
+async function waitAudit(jobId: string) {
+  for (;;) {
+    const { data } = await supabase.from('qb_jobs').select('status').eq('id', jobId).single();
+    if (data?.status !== 'auditing') return data?.status as string;
+    await new Promise((r) => setTimeout(r, 15000));
+  }
+}
+
+/**
+ * Everything after the first audit, for any checklist job (reviewMode.checklist): one fix pass on what
+ * audit found, a final audit of the repaired items, reverting style repairs that broke a MUST check,
+ * and for restructure jobs keeping a sound original the revision did not improve. Used by
+ * runImportedJobs, runGeneratedJob and the app's orchestrator, so all three finish a job the same way.
+ */
+export async function postAuditPasses(jobId: string, log: (s: string) => void = console.log): Promise<void> {
+  const { data: job } = await supabase.from('qb_jobs').select('course_id, config, status').eq('id', jobId).single();
+  const mode = reviewModeOf(job?.config as Row);
+  if (!mode.checklist || job?.status !== 'complete') return;
+  const { data: c } = await supabase.from('qb_courses').select('name').eq('id', job!.course_id).single();
+  const course = String(c?.name ?? 'Course');
+  const r = await repairAfterAudit(jobId, course, log);
+  log(`  post-audit repair: ${JSON.stringify(r)}`);
+  const { count } = await supabase.from('qb_questions').select('*', { count: 'exact', head: true }).eq('job_id', jobId).eq('status', 'reviewed').is('replaced_by_id', null);
+  if (count) {
+    await supabase.from('qb_jobs').update({ status: 'auditing' }).eq('id', jobId);
+    await auditBatchForJob(jobId);
+    await waitAudit(jobId);
+    const reverted = await revertRegressions(jobId, log);
+    log(`  style repairs reverted: ${reverted}`);
+  }
+  if (mode.restructure) {
+    const kept = await keepBetterOriginals(jobId, log);
+    log(`  originals kept over their revision: ${kept}`);
+  }
 }

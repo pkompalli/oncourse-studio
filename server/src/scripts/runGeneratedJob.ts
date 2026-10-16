@@ -14,6 +14,7 @@ import { supabase } from '../db/supabase.js';
 import { generateBatchForJob } from '../services/generation/questionGeneration.js';
 import { reviewBatchForJob } from '../services/review/reviewPipeline.js';
 import { auditBatchForJob } from '../services/audit/auditPipeline.js';
+import { postAuditPasses } from '../services/review/keyAdjudication.js';
 
 const arg = (n: string) => { const i = process.argv.indexOf(`--${n}`); return i >= 0 ? process.argv[i + 1] : undefined; };
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -62,6 +63,7 @@ if (!['reviewing', 'auditing', 'complete'].includes(status)) {
 }
 if (status === 'reviewing') { await reviewBatchForJob(jobId!, 'pending'); status = await waitWhile(jobId!, 'reviewing'); }
 if (status === 'auditing') { await auditBatchForJob(jobId!); status = await waitWhile(jobId!, 'auditing'); }
+if (status === 'complete') { await postAuditPasses(jobId!); status = await statusOf(jobId!); }
 const { data: qs } = await supabase.from('qb_questions').select('status').eq('job_id', jobId).is('replaced_by_id', null);
 const tally = (qs || []).reduce<Record<string, number>>((m, q) => { m[q.status] = (m[q.status] || 0) + 1; return m; }, {});
 console.log(`job ${jobId} finished at ${status} | ${JSON.stringify(tally)}`);

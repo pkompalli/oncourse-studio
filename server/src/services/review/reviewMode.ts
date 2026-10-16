@@ -12,12 +12,17 @@
  * Set from qb_jobs.config: source 'import' (or existing_bank) for an imported job, and
  * restructure: true on top of that.
  */
-export interface ReviewMode { existingBank: boolean; restructure: boolean }
+/**
+ * checklist: review against the fixed checklist (reviewChecklist.ts) — every job except an imported
+ * bank in locked mode, whose options may not change and which keeps its legacy rules.
+ */
+export interface ReviewMode { existingBank: boolean; restructure: boolean; checklist: boolean }
 
 export function reviewModeOf(config: Record<string, unknown> | null | undefined): ReviewMode {
   const c = config || {};
   const existingBank = c.source === 'import' || c.existing_bank === true;
-  return { existingBank, restructure: existingBank && c.restructure === true };
+  const restructure = existingBank && c.restructure === true;
+  return { existingBank, restructure, checklist: restructure || !existingBank };
 }
 
 /**
@@ -30,9 +35,11 @@ export const RESTRUCTURE_RULES = `RULES FOR BRINGING THESE ITEMS TO EXAM STANDAR
 • Options are homogeneous: the same kind of thing (all diagnoses, all next steps, all mechanisms, all drugs), parallel grammar, similar length and specificity. Numeric options are listed in ascending order.
 • Nothing may cue the key: a candidate looking only at the five options must not be able to tell which is correct. The keyed option is NEVER the longest (at least one distractor is as long or longer), and all five sit in a similar length range. Ask for a fix when the keyed option is the longest, the most qualified or precise, the only one with a second clause, a parenthesis or a justification ("because…", "given…"), repeats a distinctive stem word no distractor repeats, matches the lead-in grammatically where others do not, or when absolute terms (always, never, only, permanently) appear only in distractors, or an option is "all/none of the above". Shorten the key or lengthen distractors so the choices look alike.
 • Every distractor is plausible: one a candidate holding a specific, nameable misconception would choose after reading the case. Replace any option a candidate could rule out without reading the case (an absurd, irrelevant or non-clinical action, or one of a different kind from the others). Keep every distractor that is already plausible: improve, do not churn.
-• The vignette follows the exam's pattern (see the stem guidelines above): age and sex, setting, chief complaint with its duration, the relevant history, medications, examination, and the laboratory or imaging results the decision needs. A clinical vignette states vital signs (temperature, pulse, respirations, blood pressure, and oxygen saturation where relevant) even when they are normal — that is the exam's convention. Nothing in the stem may name the answer, and nothing the explanation relies on may be removed from it.
-• The lead-in is ONE closed question in the exam's form, "Which of the following is the most likely …?" / "… most appropriate next step in management?", that fits every option and does not repeat the wording of the keyed option.
-• Keep what the item tests and its question type: a diagnosis item stays a diagnosis item. Change the keyed answer only when it is wrong under current US practice, and give the evidence; where two answers are defensible, add the fact that makes one best.
+• The vignette follows the exam's pattern (see the stem guidelines above): age and sex, setting, chief complaint with its duration, the relevant history, medications, examination, and the laboratory or imaging results the decision needs. State vital signs when the decision depends on the patient's clinical state (diagnosis, severity, management, a drug choice that turns on it), including normal ones that rule something out. Do NOT add vital signs, examination or history that play no part in the decision — calculation, biostatistics, epidemiology, ethics and communication items, and pure mechanism recall carry only what the question needs; padding them is a defect, not the exam's style. Nothing in the stem may name the answer, and nothing the explanation relies on may be removed from it.
+• The lead-in is ONE closed question in the exam's form, "Which of the following is the most likely …?" / "… most appropriate next step in management?", that fits every option. It never repeats, paraphrases, defines or narrows toward the keyed option.
+• Options use the standard, recognised term for what they name (a defense mechanism is "Displacement", not "Affect displacement"); never invent or alter a label to make options parallel.
+• Keep what the item tests and its question type: a diagnosis item stays a diagnosis item, a management decision stays that decision, a localisation stays a localisation. Never turn the item into a question about a different fact — for example a drug-choice item into a mechanism item, or "where is the narrowing" into "what is the diagnosis". Improve how the item asks; never change what it asks.
+• An item that belongs to a different USMLE Step is retagged, not rewritten: if a Step 1 item's task is clinical management (next step, workup sequence, disposition, acute treatment with no mechanism asked), or a Step 2 CK / Step 3 item is pure basic-science mechanism recall, set belongs_to_other_exam to the Step it belongs to ("USMLE Step 2 CK", "USMLE Step 1", "USMLE Step 3") and request no changes. A Step 1 item may ask for the appropriate drug when the reasoning is its mechanism or pharmacology; that stays in Step 1. Change the keyed answer only when it is wrong under current US practice, and give the evidence; where two answers are defensible, add the fact that makes one best.
 • When the stem changes, the explanation must still match it: every finding the explanation cites is in the stem.
 • An attached image may show what the stem also describes. Ask for a change only when the image contradicts the stem or options, cannot be read, or the stem names what the image tests — never ask for the item to be made to depend on its image. When it contradicts the stem, say exactly what the image shows ("IMAGE CONFLICT: the CT shows hyperdense blood in the basal cisterns; the stem says it is negative"). The image itself cannot be replaced: the editor will either align the stem with what the image shows or remove the image and make the item self-contained in text.
 • Do not consider which letter is keyed: answer positions are balanced across the bank afterwards.`;
@@ -137,6 +144,30 @@ export function cueIssues(q: Record<string, unknown>): string[] {
   const nota = texts.filter((t) => NOTA.test(t));
   if (nota.length) out.push(`FORMAT: "${nota[0].slice(0, 60)}" is an all/none-of-the-above option, which exam items do not use. Replace it with a specific, plausible choice.`);
   return out;
+}
+
+// ── Bow-tie stem ──
+
+const BT_STOP = new Set('administer prescribed promptly intravenous client nurse obtain assess monitor initiate provide place perform notify prepare apply begin continue maintain under according standing protocol infusion bolus urgently'.split(' '));
+const btWords = (t: string) => new Set((String(t).toLowerCase().match(/[a-z]{5,}/g) || []).filter((w) => !BT_STOP.has(w)));
+
+/**
+ * A bow-tie stem that lists prescriptions, orders or protocols naming the keyed actions hands the
+ * candidate the left side of the diagram (22 of 59 in the first NCLEX bow-tie run). Returns the issue,
+ * or null. Works on stored content or a fixer's output (content fields at the top level).
+ */
+export function bowTieStemCue(q: Record<string, unknown>): string | null {
+  const c = (q.content && typeof q.content === 'object' ? q.content : q) as Record<string, any>;
+  const acts = c.action_options as Array<{ key: string; text: string }> | undefined;
+  const keys = (c.answer?.actions as string[]) || [];
+  if (!Array.isArray(acts) || keys.length === 0) return null;
+  const stem = String(c.stem ?? q.question ?? '');
+  const sents = stem.split(/(?<=[.])\s+/).filter((s) => /prescri|ordered|orders|plan includes|protocol/i.test(s) && !/^Complete the diagram/.test(s));
+  if (!sents.length) return null;
+  const sw = new Set(sents.flatMap((s) => [...btWords(s)]));
+  const named = keys.map((k) => acts.find((o) => o.key === k)?.text ?? '').filter((t) => [...btWords(t)].some((w) => sw.has(w)));
+  if (!named.length) return null;
+  return `FORMAT: The stem lists prescriptions, orders or protocols that name the keyed action${named.length > 1 ? 's' : ''} (${named.map((t) => `"${t.slice(0, 60)}"`).join(', ')}), which hands the candidate the answer. Remove those sentences so the actions are inferred from the condition; keep the cues.`;
 }
 
 // ── Images ──
