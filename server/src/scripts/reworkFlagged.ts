@@ -25,8 +25,23 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const reworked: string[] = [];
 const tally = { flagged: 0, options_restored: 0, adjudicated: 0, repaired: 0, approved_after: 0, still_flagged: 0 };
 
+async function auditReviewed(job: string) {
+  const { count } = await supabase.from('qb_questions').select('*', { count: 'exact', head: true }).eq('job_id', job).eq('status', 'reviewed').is('replaced_by_id', null);
+  if (!count) return;
+  await supabase.from('qb_jobs').update({ status: 'auditing' }).eq('id', job);
+  await auditBatchForJob(job);
+  for (;;) {
+    const { data: s } = await supabase.from('qb_jobs').select('status').eq('id', job).single();
+    if (s?.status !== 'auditing') break;
+    await sleep(15000);
+  }
+}
+
 async function rework(job: string) {
   const tag = `[${job.slice(0, 8)}]`;
+  // A run stopped mid-job leaves repaired items at 'reviewed', never audited: audit them first, so the
+  // rerun reworks only what is still flagged.
+  await auditReviewed(job);
   // Ids first, then the heavy audit trails five at a time: one query for all of a job's flagged rows
   // timed out with twelve jobs starting at once.
   const { data: idRows, error: idErr } = await supabase.from('qb_questions').select('id, tags').eq('job_id', job).eq('status', 'flagged').is('replaced_by_id', null);
@@ -66,16 +81,7 @@ async function rework(job: string) {
   tally.repaired += r.repaired;
   log(` repair: ${JSON.stringify(r)}`);
 
-  const { count } = await supabase.from('qb_questions').select('*', { count: 'exact', head: true }).eq('job_id', job).eq('status', 'reviewed').is('replaced_by_id', null);
-  if (count) {
-    await supabase.from('qb_jobs').update({ status: 'auditing' }).eq('id', job);
-    await auditBatchForJob(job);
-    for (;;) {
-      const { data: s } = await supabase.from('qb_jobs').select('status').eq('id', job).single();
-      if (s?.status !== 'auditing') break;
-      await sleep(15000);
-    }
-  }
+  await auditReviewed(job);
   const { data: after } = await supabase.from('qb_questions').select('id, status').in('id', [...ids]);
   for (const q of after || []) { if (q.status === 'approved') tally.approved_after++; else tally.still_flagged++; }
   reworked.push(...ids);
