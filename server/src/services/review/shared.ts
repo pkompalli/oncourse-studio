@@ -624,8 +624,13 @@ async function fetchImageOnce(url: string, attempts: number): Promise<string | n
         if (res.status === 404 || res.status === 403) return null;
         throw new Error(`HTTP ${res.status}`);
       }
+      // A 200 that is not an image (a web page at an external link) is a broken image: sent to the model,
+      // it failed the whole batch ("file part media type text/html not supported") and left ten
+      // pre-2025 USMLE items unreviewed.
+      const type = (res.headers.get('content-type') || '').toLowerCase();
+      if (type && !type.startsWith('image/')) return null;
       const buf = Buffer.from(await res.arrayBuffer());
-      const mime = res.headers.get('content-type') || 'image/png';
+      const mime = type || 'image/png';
       return `data:${mime};base64,${buf.toString('base64')}`;
     } catch (e) {
       if (attempt === attempts) {
