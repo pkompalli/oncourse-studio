@@ -164,7 +164,9 @@ export async function adjudicateJobKeys(jobId: string, courseName: string, log: 
     let error: string | undefined;
     if (!keyStays || v.edits.length) {
       const ask = `ANSWER KEY ADJUDICATION: The correct answer is "${v.correct_answer}"${keyStays ? ' (the current key)' : ' — make it the keyed option'}. ${v.rationale} Basis: ${v.basis.join('; ')}. Make these edits so it is the only defensible answer, and state the reason and basis in the explanation: ${v.edits.join(' ') || 'none beyond the key.'}`;
-      const fix = await fixQuestion(q, [ask], courseName, { existingBank: mode.existingBank, restructure: mode.restructure });
+      // A key ruled wrong or outdated changes the answer by design: the concept guard then holds only the
+      // clinical problem and the kind of task (conceptGuard.ts 'update').
+      const fix = await fixQuestion(q, [ask], courseName, { existingBank: mode.existingBank, restructure: mode.restructure, updateAnswer: !keyStays });
       if (fix.fixed && fix.question && keyOf(fix.question) && (await same(String(fix.question.question ?? ''), keyOf(fix.question)!, v.correct_answer))) {
         after = { ...q, ...fix.question, image_url: fix.imageRemoved ? null : q.image_url, is_image_question: fix.imageRemoved ? false : q.is_image_question };
       } else {

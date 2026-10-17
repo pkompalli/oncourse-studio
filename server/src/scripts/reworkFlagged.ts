@@ -21,6 +21,8 @@ const arg = (n: string) => { const i = process.argv.indexOf(`--${n}`); return i 
 const jobs: string[] = JSON.parse(readFileSync(arg('manifest')!, 'utf8')).jobs.map((j: Row) => j.job);
 const OUT = arg('out')!;
 const POOL = Number(arg('pool')) || 10;
+// --only <ids.json>: rework just these qb_questions ids (a pilot).
+const ONLY = arg('only') ? new Set<string>(JSON.parse(readFileSync(arg('only')!, 'utf8'))) : null;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const reworked: string[] = [];
 const tally = { flagged: 0, options_restored: 0, adjudicated: 0, repaired: 0, approved_after: 0, still_flagged: 0 };
@@ -46,7 +48,7 @@ async function rework(job: string) {
   // timed out with twelve jobs starting at once.
   const { data: idRows, error: idErr } = await supabase.from('qb_questions').select('id, tags').eq('job_id', job).eq('status', 'flagged').is('replaced_by_id', null);
   if (idErr) throw new Error(idErr.message);
-  const wanted = (idRows || []).filter((q) => !q.tags?.belongs_to_exam).map((q) => q.id as string);
+  const wanted = (idRows || []).filter((q) => !q.tags?.belongs_to_exam && (!ONLY || ONLY.has(q.id))).map((q) => q.id as string);
   const mine: Row[] = [];
   for (let i = 0; i < wanted.length; i += 5) {
     const { data, error } = await supabase.from('qb_questions').select('id, options, tags, audit_trail').in('id', wanted.slice(i, i + 5));
@@ -70,7 +72,11 @@ async function rework(job: string) {
 
   const keyDoubt = new Set(mine.filter((q) => {
     const audit = [...(q.audit_trail || [])].reverse().find((e: Row) => e.phase === 'audit');
-    return (audit?.checks || []).some((x: Row) => x.result === 'fail' && (x.id === 'KEY_CORRECT' || x.id === 'ONE_BEST_ANSWER'));
+    // SAME_CONCEPT too: an item whose only repair changes what it tests usually rests on an outdated
+    // premise (triple therapy for H. pylori, ciprofloxacin for typhoid); adjudication can rule the key
+    // outdated, and the fix then updates it under the guard's 'update' mode.
+    return (audit?.checks || []).some((x: Row) => x.result === 'fail' && (x.id === 'KEY_CORRECT' || x.id === 'ONE_BEST_ANSWER'))
+      || ((audit?.issues || []) as string[]).some((x) => /SAME_CONCEPT/.test(x));
   }).map((q) => q.id as string));
   if (keyDoubt.size) {
     const a = await adjudicateJobKeys(job, course, log, keyDoubt);

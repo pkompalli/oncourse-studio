@@ -31,7 +31,25 @@ function render(q: Row): string {
 
 export interface ConceptVerdict { same: boolean; original: string; revised: string }
 
-export async function sameConcept(original: Row, revised: Row): Promise<ConceptVerdict> {
+/**
+ * `mode: 'update'` — the keyed answer was ruled wrong or outdated under current guidelines (answer
+ * adjudication), so the answer is meant to change: only the clinical problem and the kind of task must stay.
+ *
+ * The first version refused 82% of the repairs on the 1,073 items the pre-2025 run left flagged. In a
+ * sample of 300 refusals about 40% kept the same task and the same answer — reworded more narrowly or
+ * broadly, or made the candidate infer a diagnosis the original simply stated ("recall the marker of
+ * explicitly diagnosed choriocarcinoma" → "recognise choriocarcinoma from histology and give its marker"),
+ * which is the repair a giveaway stem needs. Those are now the same concept; a different decision or a
+ * different kind of answer is still not.
+ */
+export async function sameConcept(original: Row, revised: Row, mode: 'strict' | 'update' = 'strict'): Promise<ConceptVerdict> {
+  const rules = mode === 'update'
+    ? `The keyed answer of this item was ruled wrong or outdated under current guidelines, so the answer is EXPECTED to change. The revised version tests the SAME thing if it poses the same clinical problem (same condition or situation) and the same kind of task (still a treatment choice, still a diagnosis, still a next step…), with the answer brought up to current practice. It is DIFFERENT only if it now poses a different clinical problem or a different kind of task.`
+    : `The revised version tests the SAME thing if the candidate performs the same kind of task and needs the same core knowledge, and the keyed answer is the same answer. All of these keep it the SAME:
+  - added or removed clinical detail, reworded or replaced distractors, a clarified or corrected stem or explanation;
+  - asking the same thing more narrowly, more broadly or more precisely;
+  - making the candidate infer something the original stated outright (a named diagnosis or finding becomes a presentation to recognise) while still asking for the same answer — that removes a giveaway.
+It is DIFFERENT only if the decision or fact tested changed, or the answer became a different kind of thing: a drug choice became a drug mechanism, a diagnosis became a mechanism, a localisation became a diagnosis, prophylaxis became acute treatment, a different patient problem.`;
   const prompt = `Compare what two versions of an exam item TEST — the task the candidate must perform and the knowledge it requires — not how well they are written.
 
 ORIGINAL:
@@ -40,7 +58,7 @@ ${render(original)}
 REVISED:
 ${render(revised)}
 
-The revised version tests the SAME thing if a candidate needs the same knowledge to answer it and performs the same task (e.g. both ask for the next step in managing this condition; both ask for the site of narrowing). Added clinical detail, reworded options, a clarified stem or a corrected fact keep it the same. It tests something DIFFERENT if the task or the knowledge changed — a drug choice became a drug mechanism, a localisation became a diagnosis, a management decision became recognition of the condition, a calculation became an interpretation.
+${rules}
 
 Reply with JSON only: {"original_tests": "<one short phrase>", "revised_tests": "<one short phrase>", "same": true|false}`;
   try {

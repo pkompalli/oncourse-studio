@@ -517,8 +517,12 @@ async function runAuditPipeline(jobId: string): Promise<void> {
         }
         if (restructure && !otherExam) {
           const original = ((q.audit_trail as Array<Record<string, any>>) || []).find((e) => /_fix$/.test(String(e?.phase)) && e.before)?.before;
+          // An answer adjudication that changed the key (wrong or outdated) moved the answer on purpose:
+          // only the clinical problem and the kind of task are held then.
+          const trail = (q.audit_trail as Array<Record<string, any>>) || [];
+          const keyUpdated = trail.some((e) => e?.phase === 'key_adjudication' && e.verdict === 'change_key');
           if (original && conceptMayHaveMoved(original, q)) {
-            const v = await sameConcept(original, q);
+            const v = await sameConcept(original, q, keyUpdated ? 'update' : 'strict');
             if (!v.same) {
               formatBlock = [formatBlock, `the item no longer tests what the original tested`].filter(Boolean).join('; ');
               result.issues = [...((result.issues as string[]) || []), `NOT COMPLIANT — SAME_CONCEPT: the item no longer tests what the original tested. Original tested: ${v.original}. Revised tests: ${v.revised}. Restore the original testing objective.`];

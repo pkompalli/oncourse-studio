@@ -256,25 +256,40 @@ export async function fixQuestion(
   question: Record<string, unknown>,
   changesRequired: string[],
   courseName: string,
-  opts?: { existingBank?: boolean; restructure?: boolean }
+  opts?: { existingBank?: boolean; restructure?: boolean; updateAnswer?: boolean }
 ): Promise<FixResult> {
   // Restructure mode: any fix may reword the keyed option (asked to "add nintedanib to the current
   // treatment", the word-overlap guard refused "Initiate nintedanib or pirfenidone" -> "Add nintedanib…"
   // in the fifth pilot). Unless a change asks for a different key, sameAnswer() must agree it is the
   // same answer.
-  const first = await fixOnce(question, changesRequired, courseName, opts?.restructure ? { ...opts, allowKeyReword: true } : opts);
+  const fixOpts = opts?.restructure ? { ...opts, allowKeyReword: true } : opts;
+  let first = await fixOnce(question, changesRequired, courseName, fixOpts);
   if (!first.fixed || !first.question) return first;
   // In every mode: a fix may improve how the item asks, never change what it asks (conceptGuard.ts).
+  // updateAnswer: answer adjudication ruled the key wrong or outdated, so the answer may change; only
+  // the clinical problem and the kind of task are held.
+  //
+  // A refused fix gets one more attempt, told what the item must keep testing and what the refused
+  // revision tested instead. Without it the item simply stayed flagged: on the 1,073 items the pre-2025
+  // run left flagged, 82% had a repair written and refused, and nothing tried again.
+  const mode = opts?.updateAnswer ? 'update' : 'strict';
   if (conceptMayHaveMoved(question, first.question)) {
-    const v = await sameConcept(question, first.question);
+    let v = await sameConcept(question, first.question, mode);
     if (!v.same) {
-      console.error(`  [Fixer] REFUSED the fix — it changed what the item tests ("${v.original}" -> "${v.revised}")`);
-      return { fixed: false, error: `the fix changed what the item tests ("${v.original}" -> "${v.revised}")` };
+      console.warn(`  [Fixer] fix changed what the item tests ("${v.original}" -> "${v.revised}") — retrying with that constraint`);
+      const keep = `CONCEPT: Your previous revision changed what this item tests. The item must keep testing: "${v.original}". Your revision tested instead: "${v.revised}" — that was rejected. Make each required change in a way that keeps the same ${mode === 'update' ? 'clinical problem and kind of task (the answer may be brought up to current practice)' : 'task and the same keyed answer'}: fix the flagged part (a distractor, a missing fact, a giveaway, the explanation) and leave the question being asked as it is.`;
+      const again = await fixOnce(question, [...changesRequired, keep], courseName, fixOpts);
+      v = again.fixed && again.question ? (conceptMayHaveMoved(question, again.question) ? await sameConcept(question, again.question, mode) : { same: true, original: v.original, revised: '' }) : v;
+      if (!again.fixed || !again.question || !v.same) {
+        console.error(`  [Fixer] REFUSED the fix — it changed what the item tests ("${v.original}" -> "${v.revised}")`);
+        return { fixed: false, error: `the fix changed what the item tests ("${v.original}" -> "${v.revised}")` };
+      }
+      first = { ...again, changesApplied: again.changesApplied };
     }
   }
   if (!opts?.restructure) return first;
-  const keyAsked = /\b(answer key|correct answer|keyed answer|key\b|correct option|image conflict|KEY_CORRECT|ONE_BEST_ANSWER)/i.test(changesRequired.join(' '));
-  const k0 = keyText(question), k1 = keyText(first.question);
+  const keyAsked = Boolean(opts?.updateAnswer) || /\b(answer key|correct answer|keyed answer|key\b|correct option|image conflict|KEY_CORRECT|ONE_BEST_ANSWER)/i.test(changesRequired.join(' '));
+  const k0 = keyText(question), k1 = keyText(first.question!);
   if (!keyAsked && k0 !== null && k1 !== null && optionIdentity(k0, k1) < OPTION_IDENTITY_MIN && !(await sameAnswer(String(question.question ?? ''), k0, k1))) {
     console.error(`  [Fixer] REFUSED the fix — the keyed option became a different answer ("${k0.slice(0, 50)}" -> "${k1.slice(0, 50)}") without a request to change the key`);
     return { fixed: false, error: `correct answer became a different choice ("${k0.slice(0, 50)}" -> "${k1.slice(0, 50)}") without a request to change the key` };
