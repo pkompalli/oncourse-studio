@@ -22,7 +22,7 @@ import { supabase } from '../../db/supabase.js';
 import { fetchAllRows } from '../../db/pagination.js';
 import { orCall, MODELS } from '../llm/openrouter.js';
 import { fixQuestion, sameAnswer, optionIdentity, OPTION_IDENTITY_MIN } from './fixer.js';
-import { optionTexts, keyLengthCue, cueIssues, reviewModeOf, bowTieStemCue, isSingleBest, subQuestionCueIssues } from './reviewMode.js';
+import { optionTexts, keyLengthCue, cueIssues, reviewModeOf, bowTieStemCue, isSingleBest, subQuestionCueIssues, subLengthCues } from './reviewMode.js';
 import { preferOriginal } from './conceptGuard.js';
 import { profileForJob, type ExamProfile } from './examProfile.js';
 import { auditBatchForJob } from '../audit/auditPipeline.js';
@@ -314,7 +314,11 @@ export async function repairAfterAudit(jobId: string, courseName: string, log: (
     const audit = [...trail].reverse().find((e: Row) => e?.phase === 'audit');
     const checks = parseChecks(audit);
     const wasApproved = q.status === 'approved';
-    if (wasApproved && !(checks || []).some((c) => c.result === 'fail')) return;
+    // An approved generated item is also polished when a deterministic cue is still present (the key the
+    // longest option, standalone or in a sub-question): the checklist judge often passes a key that is
+    // longest by a few characters, and it went out that way.
+    const cueLeft = !mode.restructure && (keyLengthCue(q) !== null || subLengthCues(q).length > 0);
+    if (wasApproved && !(checks || []).some((c) => c.result === 'fail') && !cueLeft) return;
     if (wasApproved) out.polished++; else out.flagged++;
     const single = mode.restructure || isSingleBest(q);
     const [probe] = single ? await probeCues([q], mode.restructure ? undefined : courseName) : [null];

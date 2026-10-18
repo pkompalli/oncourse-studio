@@ -330,6 +330,8 @@ export async function fixQuestion(
 async function subQuestionLengthRounds(original: Record<string, unknown>, first: FixResult, changesRequired: string[], courseName: string, fixOpts?: Parameters<typeof fixOnce>[3]): Promise<FixResult> {
   const keysOf = (q: Record<string, unknown>) => new Map(subItems(q).map(({ n, item }) => [n, String((item.options as Record<string, string>)[String(item.correct_option)] ?? '')]));
   const k0 = keysOf(original);
+  // Each key is judged against its own sub-question, not the set's header ("Questions 1–5 are based on…").
+  const stems = new Map(subItems(original).map(({ n, item }) => [n, String(item.question ?? '')]));
   let best = first;
   for (let round = 1; round <= 2; round++) {
     const cues = subLengthCues(best.question!);
@@ -343,7 +345,7 @@ async function subQuestionLengthRounds(original: Record<string, unknown>, first:
     let moved = '';
     for (const [n, t0] of k0) {
       const t1 = k1.get(n);
-      if (t1 != null && optionIdentity(t0, t1) < OPTION_IDENTITY_MIN && !(await sameAnswer(String(original.question ?? ''), t0, t1))) { moved = `sub-question ${n}`; break; }
+      if (t1 != null && optionIdentity(t0, t1) < OPTION_IDENTITY_MIN && !(await sameAnswer(stems.get(n) || String(original.question ?? ''), t0, t1))) { moved = `sub-question ${n}`; break; }
     }
     if (moved) { console.warn(`  [Fixer] sub-question cue round ${round} refused (the key of ${moved} became a different answer)`); break; }
     best = { ...again, changesApplied: [...(best.changesApplied || []), ...(again.changesApplied || [])] };

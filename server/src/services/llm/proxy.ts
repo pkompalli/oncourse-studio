@@ -74,6 +74,9 @@ const isAuthError = (e: unknown) => statusOf(e) === 401 || statusOf(e) === 403;
  */
 function isTransientLlmError(e: unknown): boolean {
   const status = statusOf(e);
+  // Under load the proxy answers 200 with "Failed to process successful response" and no content: a
+  // transient fault, not a bad request. Thrown at once, it made the fixer give up on whole sets.
+  if (/Failed to process successful response/i.test(String((e as { message?: string })?.message ?? ''))) return true;
   if (status != null) return status === 408 || status === 429 || status >= 500;
   const err = e as { message?: string; code?: string; cause?: { message?: string; code?: string } };
   const blob = [err?.message, err?.code, err?.cause?.message, err?.cause?.code]

@@ -11,7 +11,7 @@ import { supabase } from '../../db/supabase.js';
 import { fetchAllRows } from '../../db/pagination.js';
 import { bankMixForJob } from '../generation/bankMix.js';
 import { fixHistoryBlock, unappliedChanges } from './fixHistory.js';
-import { reviewModeOf, optionTexts, keyLengthCue, describeLengthCue, bowTieStemCue } from '../review/reviewMode.js';
+import { reviewModeOf, optionTexts, keyLengthCue, describeLengthCue, bowTieStemCue, isSingleBest, subLengthCues } from '../review/reviewMode.js';
 import { sameConcept, conceptMayHaveMoved } from '../review/conceptGuard.js';
 import { flagDuplicateConcepts } from '../review/setChecks.js';
 import { probeCues, keySpotted, implausibleDistractors, type ProbeResult } from '../review/cueProbe.js';
@@ -506,6 +506,22 @@ async function runAuditPipeline(jobId: string): Promise<void> {
             formatBlock = blocks.join('; ');
             result.issues = [...((result.issues as string[]) || []), ...blocks.map((b) => `NOT COMPLIANT — ${b}`)];
             result.reason = `Not exam standard: ${formatBlock.slice(0, 200)}`;
+          }
+        }
+        // Generated jobs of every course: the key may not be the longest option, standalone or in a
+        // sub-question. Gated only once the repair could clear it: on fresh NCLEX, CPA, MCAT, CFA, LSAT and
+        // Bar sets the length rounds left 1 of 89 approved single-best-answer questions with the key the
+        // longest (16 before they reached sub-questions). The options-only probe stays advisory: it
+        // confirmed a cue twice in 2 of 129.
+        if (checklist && !restructure && !otherExam) {
+          const subs = subLengthCues(q);
+          const blocks = [
+            ...(isSingleBest(q) && keyLengthCue(q) ? [`the keyed option is the longest choice (${describeLengthCue(keyLengthCue(q)!)})`] : []),
+            ...subs.map(({ n, cue }) => `sub-question ${n}: the keyed option is the longest choice (${describeLengthCue(cue)})`),
+          ];
+          if (blocks.length) {
+            formatBlock = [formatBlock, ...blocks].filter(Boolean).join('; ');
+            result.issues = [...((result.issues as string[]) || []), ...blocks.map((x) => `NOT COMPLIANT — ${x}`)];
           }
         }
         // Every job: a bow-tie stem may not list orders that name the keyed actions. Restructure jobs:
