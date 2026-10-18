@@ -5,7 +5,7 @@
 
 import { orCall, MODELS, type ContentPart } from '../llm/openrouter.js';
 import { fetchImageAsDataUrl } from './shared.js';
-import { keyLengthCue, describeLengthCue, STEM_REFS_IMAGE, isSingleBest } from './reviewMode.js';
+import { keyLengthCue, describeLengthCue, STEM_REFS_IMAGE, isSingleBest, subItems, subLengthCues } from './reviewMode.js';
 import { CHECKLIST_FOR_FIXER } from './reviewChecklist.js';
 import { sameConcept, conceptMayHaveMoved } from './conceptGuard.js';
 import { profileForJob } from './examProfile.js';
@@ -292,7 +292,7 @@ export async function fixQuestion(
   // swaps the answer, a key left the longest option), so it gets them too. A locked imported bank,
   // whose options may not change, and other formats return here.
   const singleBest = Boolean(opts?.restructure) || (!opts?.existingBank && isSingleBest(question) && isSingleBest(first.question!));
-  if (!singleBest) return first;
+  if (!singleBest) return opts?.existingBank ? first : subQuestionLengthRounds(question, first, changesRequired, courseName, fixOpts);
   const keyAsked = Boolean(opts?.updateAnswer) || /\b(answer key|correct answer|keyed answer|key\b|correct option|image conflict|KEY_CORRECT|ONE_BEST_ANSWER)/i.test(changesRequired.join(' '));
   const k0 = keyText(question), k1 = keyText(first.question!);
   if (!keyAsked && k0 !== null && k1 !== null && optionIdentity(k0, k1) < OPTION_IDENTITY_MIN && !(await sameAnswer(String(question.question ?? ''), k0, k1))) {
@@ -318,6 +318,35 @@ export async function fixQuestion(
       break;
     }
     best = { ...again, changesApplied: [...(best.changesApplied || []), ...(again.changesApplied || [])], imageRemoved: best.imageRemoved || again.imageRemoved };
+  }
+  return best;
+}
+
+/**
+ * The length rounds for the single-best-answer questions inside a set: up to two narrow repairs naming
+ * each sub-question whose key is still the longest, refused if the set's structure moves or a keyed
+ * answer becomes a different answer.
+ */
+async function subQuestionLengthRounds(original: Record<string, unknown>, first: FixResult, changesRequired: string[], courseName: string, fixOpts?: Parameters<typeof fixOnce>[3]): Promise<FixResult> {
+  const keysOf = (q: Record<string, unknown>) => new Map(subItems(q).map(({ n, item }) => [n, String((item.options as Record<string, string>)[String(item.correct_option)] ?? '')]));
+  const k0 = keysOf(original);
+  let best = first;
+  for (let round = 1; round <= 2; round++) {
+    const cues = subLengthCues(best.question!);
+    if (!cues.length) break;
+    const ask = `FORMAT: In ${cues.map(({ n, cue }) => `sub-question ${n} (${describeLengthCue(cue)})`).join('; ')}, the keyed option is still the longest choice. In each, shorten the keyed option without changing its meaning, or lengthen a distractor with neutral detail of the same kind, so at least one distractor is as long or longer in both characters and words. Never make a distractor wrong on its face. Change nothing else, except rationale wording that quotes a reworded option.`;
+    const again = await fixOnce(best.question!, [ask], courseName, { ...fixOpts, allowKeyReword: true });
+    if (!again.fixed || !again.question) break;
+    const drift = structuralDrift(original, again.question, [...changesRequired, ask], false, false, true);
+    if (drift) { console.warn(`  [Fixer] sub-question cue round ${round} refused (${drift})`); break; }
+    const k1 = keysOf(again.question);
+    let moved = '';
+    for (const [n, t0] of k0) {
+      const t1 = k1.get(n);
+      if (t1 != null && optionIdentity(t0, t1) < OPTION_IDENTITY_MIN && !(await sameAnswer(String(original.question ?? ''), t0, t1))) { moved = `sub-question ${n}`; break; }
+    }
+    if (moved) { console.warn(`  [Fixer] sub-question cue round ${round} refused (the key of ${moved} became a different answer)`); break; }
+    best = { ...again, changesApplied: [...(best.changesApplied || []), ...(again.changesApplied || [])] };
   }
   return best;
 }

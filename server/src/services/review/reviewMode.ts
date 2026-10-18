@@ -159,6 +159,43 @@ export function cueIssues(q: Record<string, unknown>, expected: number | null = 
   return out;
 }
 
+// ── Sub-questions of grouped items ──
+//
+// CFA item sets, LSAT and MCAT passage sets, Bar shared-fact sets and NCLEX case studies are mostly
+// single-best-answer questions inside one row (content.sub_questions, options as "A. text" strings and
+// a letter in correct_answer). The cue checks above only looked at standalone items, so the key-longest
+// and odd-one-out checks never reached them.
+
+/** Each single-best-answer sub-question as a standalone item ({ question, options map, correct_option }). */
+export function subItems(q: Record<string, unknown>): Array<{ n: number; item: Record<string, unknown> }> {
+  const c = (q.content && typeof q.content === 'object' ? q.content : q) as Record<string, any>;
+  const subs = Array.isArray(c.sub_questions) ? (c.sub_questions as Array<Record<string, any>>) : [];
+  const out: Array<{ n: number; item: Record<string, unknown> }> = [];
+  subs.forEach((s, i) => {
+    const fmt = String(s?.format_type ?? 'mcq_single');
+    const key = String(s?.correct_answer ?? '').trim().toUpperCase();
+    if (!/^(mcq_single|single_best_answer)$/.test(fmt) || !/^[A-J]$/.test(key) || !Array.isArray(s?.options)) return;
+    const options: Record<string, string> = {};
+    (s.options as unknown[]).forEach((o, j) => {
+      const t = typeof o === 'string' ? o : String((o as Record<string, unknown>)?.text ?? '');
+      const m = t.match(/^\s*([A-J])[.)]\s+([\s\S]*)$/);
+      options[m ? m[1] : 'ABCDEFGHIJ'[j]] = (m ? m[2] : t).trim();
+    });
+    if (Object.keys(options).length >= 3 && options[key] != null) out.push({ n: i + 1, item: { question: String(s.question ?? s.stem ?? ''), options, correct_option: key } });
+  });
+  return out;
+}
+
+/** cueIssues for every single-best-answer sub-question, each labelled with its number. */
+export function subQuestionCueIssues(q: Record<string, unknown>, expected: number | null): string[] {
+  return subItems(q).flatMap(({ n, item }) => cueIssues(item, expected).map((x) => x.replace(/^FORMAT: /, `FORMAT: Sub-question ${n}: `)));
+}
+
+/** Sub-questions whose keyed option is the longest. */
+export function subLengthCues(q: Record<string, unknown>): Array<{ n: number; cue: LengthCue }> {
+  return subItems(q).map(({ n, item }) => ({ n, cue: keyLengthCue(item) })).filter((x): x is { n: number; cue: LengthCue } => x.cue !== null);
+}
+
 // ── Bow-tie stem ──
 
 const BT_STOP = new Set('administer prescribed promptly intravenous client nurse obtain assess monitor initiate provide place perform notify prepare apply begin continue maintain under according standing protocol infusion bolus urgently'.split(' '));

@@ -10,7 +10,7 @@ import { schemaErrorsFor } from '../generation/schemaValidate.js';
 import { coherenceIssues } from '../generation/coherence.js';
 import { consistencyIssues, isBlockingConsistency } from '../generation/consistency.js';
 import { EXISTING_ITEM_RULES } from './changeRouting.js';
-import { RESTRUCTURE_RULES, cueIssues, imageIssues, bowTieStemCue, isSingleBest } from './reviewMode.js';
+import { RESTRUCTURE_RULES, cueIssues, imageIssues, bowTieStemCue, isSingleBest, subQuestionCueIssues } from './reviewMode.js';
 import { probeCues, probeIssues } from './cueProbe.js';
 import { CHECKLIST_PROMPT, parseChecks, checkChanges } from './reviewChecklist.js';
 import { examProfile } from './examProfile.js';
@@ -488,6 +488,8 @@ export async function runValidatorBatch(
       const cues = [
         ...(restructure ? imageIssues(questions[i], loads[i]) : []),
         ...(single[i] ? [...cueIssues(questions[i], restructure ? 5 : profile.optionCount), ...probeIssues(questions[i], probes[i])] : []),
+        // The single-best-answer questions inside a set (CFA, LSAT, MCAT, Bar, NCLEX cases) get the same checks.
+        ...(!restructure ? subQuestionCueIssues(questions[i], profile.optionCount) : []),
         ...(bt ? [bt] : []),
       ];
       const have = new Set((r.changes_required as string[]) || []);

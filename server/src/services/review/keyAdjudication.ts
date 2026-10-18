@@ -22,11 +22,12 @@ import { supabase } from '../../db/supabase.js';
 import { fetchAllRows } from '../../db/pagination.js';
 import { orCall, MODELS } from '../llm/openrouter.js';
 import { fixQuestion, sameAnswer, optionIdentity, OPTION_IDENTITY_MIN } from './fixer.js';
-import { optionTexts, keyLengthCue, cueIssues, reviewModeOf, bowTieStemCue, isSingleBest } from './reviewMode.js';
+import { optionTexts, keyLengthCue, cueIssues, reviewModeOf, bowTieStemCue, isSingleBest, subQuestionCueIssues } from './reviewMode.js';
 import { preferOriginal } from './conceptGuard.js';
 import { profileForJob, type ExamProfile } from './examProfile.js';
 import { auditBatchForJob } from '../audit/auditPipeline.js';
 import { changedFields } from '../audit/fixHistory.js';
+import { formatQuestionsForReview } from './shared.js';
 import { parseChecks, checkChanges } from './reviewChecklist.js';
 import { probeCues, probeIssues } from './cueProbe.js';
 
@@ -123,6 +124,60 @@ async function judge(q: Row, original: Row | null, blind: string[], courseName: 
   return null;
 }
 
+function judgeAnyPrompt(q: Row, courseName: string, profile: ExamProfile | null): string {
+  const authority = profile?.authority ?? 'the current, authoritative standards this exam is written to';
+  return `You are the final authority on ${profile?.domain ?? 'the subject'} for a ${courseName} question bank. No expert will review this item after you: decide the correct answer yourself, from ${authority}, and make the item support exactly one correct answer.
+
+ITEM (as stored, with its keyed answer and explanation):
+${formatQuestionsForReview([q])}
+
+Decide:
+1. Is the stored answer correct under that authority? For a set, judge each sub-question; for an ordering, the sequence; for a select-all, the exact set; for a grid, each row.
+2. Does the item support exactly that answer? Find every fact or omission that would let a well-prepared candidate defend a different one.
+3. List the specific edits (to the stem, passage, options, rows or rationales) that leave exactly one defensible answer and an explanation that states the reason and its basis. Keep the item's format and size. Empty list if it is already sound.
+
+Return ONLY a JSON object:
+{"verdict": "current_key_correct" | "change_key", "correct_answer": "<the full correct answer in the item's own format: letters for a select-all, the order for an ordering, one entry per sub-question for a set (e.g. 1:B, 2:C), row → column for a grid>", "rationale": "<2-4 sentences>", "basis": ["<guideline, standard, rule or source: the specific provision>"], "edits": ["<specific edit>"]}`;
+}
+
+async function adjudicateOtherFormat(q: Row, courseName: string, mode: ReturnType<typeof reviewModeOf>, report: AdjudicationReport, log: (s: string) => void): Promise<void> {
+  report.candidates++;
+  const profile = q.job_id ? await profileForJob(String(q.job_id)) : null;
+  let v: Verdict | null = null;
+  for (let attempt = 1; attempt <= 2 && !v; attempt++) {
+    try {
+      const r = await orCall(MODELS.AUDITOR, '', judgeAnyPrompt(q, courseName, profile), { maxTokens: 4000, temperature: attempt === 1 ? 0.1 : 0 });
+      const j = JSON.parse(r.content.match(/\{[\s\S]*\}/)?.[0] ?? 'null');
+      if (j?.correct_answer) v = { correct_answer: String(j.correct_answer), verdict: String(j.verdict ?? ''), rationale: String(j.rationale ?? ''), basis: Array.isArray(j.basis) ? j.basis.map(String) : [], edits: Array.isArray(j.edits) ? j.edits.map(String) : [] };
+    } catch (e) { console.warn(`  [Adjudicate] judge attempt ${attempt} failed: ${e instanceof Error ? e.message : e}`); }
+  }
+  if (!v) { report.failed++; log(`  [Adjudicate] Q${q.question_number}: no verdict`); return; }
+  report.adjudicated++;
+  const change = v.verdict === 'change_key';
+  let after: Row = q;
+  let error: string | undefined;
+  if (change || v.edits.length) {
+    const ask = `ANSWER KEY ADJUDICATION: The correct answer is ${v.correct_answer}${change ? ' — make the stored answer key say exactly this' : ' (the current key)'}. ${v.rationale} Basis: ${v.basis.join('; ')}. Make these edits so it is the only defensible answer, and state the reason and basis in the explanation or rationales: ${v.edits.join(' ') || 'none beyond the key.'}`;
+    const fix = await fixQuestion(q, [ask], courseName, { existingBank: mode.existingBank, restructure: mode.restructure, updateAnswer: change });
+    if (fix.fixed && fix.question) after = { ...q, ...fix.question };
+    else error = fix.error || 'no usable repair';
+  }
+  const snapshot = (x: Row) => ({ question: x.question, content: x.content, explanation: x.explanation });
+  const trail = Array.isArray(q.audit_trail) ? [...q.audit_trail] : [];
+  trail.push({
+    phase: error ? 'key_adjudication_failed' : 'key_adjudication', trigger: ['audit failed the key or one-best-answer check'],
+    verdict: v.verdict, correct_answer: v.correct_answer, rationale: v.rationale, basis: v.basis, edits: v.edits,
+    ...(after !== q ? { changes_requested: [`ANSWER KEY ADJUDICATION: ${v.correct_answer}`], before: snapshot(q), after: snapshot(after), changed_fields: changedFields(snapshot(q), snapshot(after)) } : {}),
+    ...(error ? { error } : {}), timestamp: new Date().toISOString(),
+  });
+  const { error: upErr } = await supabase.from('qb_questions').update({ ...(after !== q ? savedFields(after) : {}), audit_trail: trail }).eq('id', q.id);
+  if (upErr) { report.failed++; log(`  [Adjudicate] Q${q.question_number}: write failed ${upErr.message}`); return; }
+  if (error) report.failed++;
+  if (after !== q) report.edited++;
+  if (change && !error) report.keyChanged++;
+  log(`  [Adjudicate] Q${q.question_number} (${String(q.format_type ?? q.tags?.format_type ?? '')}): ${error ? 'FAILED' : change ? 'key changed' : 'key upheld'} → ${v.correct_answer.slice(0, 70)}${v.edits.length ? ` (${v.edits.length} edits)` : ''}${error ? ` — ${error}` : ''}`);
+}
+
 /** Whether two option texts name the same answer: overlap first, the model only when overlap is low. */
 async function same(stem: string, a: string, b: string): Promise<boolean> {
   return optionIdentity(a, b) >= OPTION_IDENTITY_MIN || sameAnswer(stem, a, b);
@@ -147,7 +202,9 @@ export async function adjudicateJobKeys(jobId: string, courseName: string, log: 
   for (const q of rows) {
     if ((q.tags as Row | null)?.belongs_to_exam) continue;
     const cur = keyOf(q);
-    if (!cur) continue;
+    // Any other answer format — select-all, ordered response, grid, cloze, or a set of sub-questions —
+    // is adjudicated the same way when asked for by id (a failed key or one-best-answer check after audit).
+    if (!cur) { if (only) await adjudicateOtherFormat(q, courseName, mode, report, log); continue; }
     const original = originalOf(q);
     const origKey = original ? keyOf(original) : null;
     const blind = blindDisagreements(q);
@@ -267,6 +324,7 @@ export async function repairAfterAudit(jobId: string, courseName: string, log: (
     let asks = [
       ...(checks ? checkChanges(checks.filter((c) => !(adjudicated && (c.id === 'KEY_CORRECT' || c.id === 'ONE_BEST_ANSWER'))), Boolean(q.image_url)) : ((audit?.issues || []) as string[])),
       ...(single ? [...cueIssues(q, mode.restructure ? 5 : profile?.optionCount ?? null), ...probeIssues(q, probe)] : []),
+      ...(!mode.restructure ? subQuestionCueIssues(q, profile?.optionCount ?? null) : []),
       // Audit's own gates that the checklist does not carry: a changed concept, a bow-tie stem naming the keyed actions.
       ...((audit?.issues || []) as string[]).filter((x) => /^NOT COMPLIANT — SAME_CONCEPT/.test(x)).map((x) => `[SAME_CONCEPT] ${x.replace(/^NOT COMPLIANT — SAME_CONCEPT: /, '')}`),
       ...(bowTieStemCue(q) ? [bowTieStemCue(q)!] : []),
