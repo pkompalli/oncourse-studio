@@ -272,7 +272,16 @@ export async function repairAfterAudit(jobId: string, courseName: string, log: (
       ...(bowTieStemCue(q) ? [bowTieStemCue(q)!] : []),
     ];
     if (only) asks = asks.map((a) => a.replace(/^IMAGE CONFLICT: /, 'IMAGE REMOVE: '));
-    if (!asks.length) return;
+    if (!asks.length) {
+      // Adjudication after this audit settled everything that failed: the item goes back to audit as
+      // it now stands rather than staying flagged on a verdict about its earlier text.
+      if (adjudicated && !wasApproved) {
+        await supabase.from('qb_questions').update({ status: 'reviewed' }).eq('id', q.id);
+        out.repaired++;
+        log(`  [AuditFix] Q${q.question_number}: adjudicated, back to audit`);
+      }
+      return;
+    }
     const fix = await fixQuestion(q, asks, courseName, { existingBank: mode.existingBank, restructure: mode.restructure });
     const snap = (x: Row) => ({ question: x.question, options: x.options, correct_option: x.correct_option, explanation: x.explanation });
     if (!fix.fixed || !fix.question) {
@@ -365,6 +374,18 @@ export async function keepBetterOriginals(jobId: string, log: (s: string) => voi
   return kept;
 }
 
+/** Flagged items whose last audit failed the key or one-best-answer check, or was blocked for a changed concept. */
+export async function keyDoubtIds(jobId: string): Promise<Set<string>> {
+  const rows = await fetchAllRows<Row>((from, to) => supabase.from('qb_questions').select('id, tags, audit_trail')
+    .eq('job_id', jobId).eq('status', 'flagged').is('replaced_by_id', null).range(from, to));
+  return new Set(rows.filter((q) => {
+    if ((q.tags as Row | null)?.belongs_to_exam) return false;
+    const audit = [...((q.audit_trail || []) as Row[])].reverse().find((e) => e?.phase === 'audit');
+    return ((audit?.checks || []) as Row[]).some((x) => x.result === 'fail' && (x.id === 'KEY_CORRECT' || x.id === 'ONE_BEST_ANSWER'))
+      || ((audit?.issues || []) as string[]).some((x) => /SAME_CONCEPT/.test(x));
+  }).map((q) => q.id as string));
+}
+
 async function waitAudit(jobId: string) {
   for (;;) {
     const { data } = await supabase.from('qb_jobs').select('status').eq('id', jobId).single();
@@ -385,6 +406,16 @@ export async function postAuditPasses(jobId: string, log: (s: string) => void = 
   if (!mode.checklist || job?.status !== 'complete') return;
   const { data: c } = await supabase.from('qb_courses').select('name').eq('id', job!.course_id).single();
   const course = String(c?.name ?? 'Course');
+  // Answer adjudication for every checklist job, not only imported ones: an item the first audit failed
+  // on KEY_CORRECT or ONE_BEST_ANSWER, or blocked for a changed concept, goes to the judge, which
+  // decides the answer under the course's own authority (examProfile.ts) and may update an outdated
+  // key. A generated NCLEX or CPA item with a disputed key used to get only a free-form fix request.
+  // repairAfterAudit then repairs the remaining checks and leaves the adjudicated ones alone.
+  const doubt = await keyDoubtIds(jobId);
+  if (doubt.size) {
+    const a = await adjudicateJobKeys(jobId, course, log, doubt);
+    log(`  answer adjudication after audit: ${JSON.stringify(a)}`);
+  }
   const r = await repairAfterAudit(jobId, course, log);
   log(`  post-audit repair: ${JSON.stringify(r)}`);
   const { count } = await supabase.from('qb_questions').select('*', { count: 'exact', head: true }).eq('job_id', jobId).eq('status', 'reviewed').is('replaced_by_id', null);

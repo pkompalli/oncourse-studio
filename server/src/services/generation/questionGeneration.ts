@@ -1616,6 +1616,9 @@ ANSWER INTEGRITY — MANDATORY RULES
 2. For MCQ/SATA: OPTIONS MUST NOT BETRAY THE ANSWER — all options plausible, parallel, similar length
 3. No "All of the above" or "None of the above"
 4. NO ANSWER CLUES IN STEM WORDING
+5. THE KEYED OPTION IS NEVER THE LONGEST, the most qualified or the only one of its kind: at least one distractor is as long and as specific, and every option is the same kind of thing (all diagnoses, all next steps, all amounts…)
+6. Explanations name each option by its TEXT, never by its letter — options are reordered after generation
+7. No source or provenance tags anywhere a candidate reads ("(AIIMS 2018)", "NEET PG 2019", "[from textbook X]")
 
 WRITE IT LIKE A REAL ITEM
 ─────────────────────────

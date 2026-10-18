@@ -5,7 +5,7 @@
 
 import { orCall, MODELS, type ContentPart } from '../llm/openrouter.js';
 import { fetchImageAsDataUrl } from './shared.js';
-import { keyLengthCue, describeLengthCue, STEM_REFS_IMAGE } from './reviewMode.js';
+import { keyLengthCue, describeLengthCue, STEM_REFS_IMAGE, isSingleBest } from './reviewMode.js';
 import { CHECKLIST_FOR_FIXER } from './reviewChecklist.js';
 import { sameConcept, conceptMayHaveMoved } from './conceptGuard.js';
 import { profileForJob } from './examProfile.js';
@@ -287,7 +287,12 @@ export async function fixQuestion(
       first = { ...again, changesApplied: again.changesApplied };
     }
   }
-  if (!opts?.restructure) return first;
+  // The key-identity check and the measured length rounds below were built on the imported USMLE bank;
+  // a generated single-best-answer item of any exam has the same failure modes (a fix that quietly
+  // swaps the answer, a key left the longest option), so it gets them too. A locked imported bank,
+  // whose options may not change, and other formats return here.
+  const singleBest = Boolean(opts?.restructure) || (!opts?.existingBank && isSingleBest(question) && isSingleBest(first.question!));
+  if (!singleBest) return first;
   const keyAsked = Boolean(opts?.updateAnswer) || /\b(answer key|correct answer|keyed answer|key\b|correct option|image conflict|KEY_CORRECT|ONE_BEST_ANSWER)/i.test(changesRequired.join(' '));
   const k0 = keyText(question), k1 = keyText(first.question!);
   if (!keyAsked && k0 !== null && k1 !== null && optionIdentity(k0, k1) < OPTION_IDENTITY_MIN && !(await sameAnswer(String(question.question ?? ''), k0, k1))) {
@@ -298,14 +303,14 @@ export async function fixQuestion(
   for (let round = 1; round <= 2; round++) {
     const cue = keyLengthCue(best.question!);
     if (!cue) break;
-    const ask = `FORMAT: The keyed option is still the longest choice (${describeLengthCue(cue)}). Shorten the keyed option without changing its meaning, or lengthen one or more distractors with plausible, specific detail of the same kind, so that at least one distractor is at least as long as the keyed option in BOTH characters and words and all five look alike. Change nothing else, except explanation wording that quotes a reworded option.`;
+    const ask = `FORMAT: The keyed option is still the longest choice (${describeLengthCue(cue)}). Shorten the keyed option without changing its meaning, or lengthen one or more distractors with plausible, specific detail of the same kind, so that at least one distractor is at least as long as the keyed option in BOTH characters and words and all the options look alike. Never make a distractor wrong on its face to lengthen it. Change nothing else, except explanation wording that quotes a reworded option.`;
     const again = await fixOnce(best.question!, [ask], courseName, { ...opts, allowKeyReword: true });
     if (!again.fixed || !again.question) break;
     // Judged against the ORIGINAL as well: rounds of shortening must not drift the key into a different
     // choice. Word overlap cannot tell "Perform right lower quadrant ultrasound" from "Obtain
     // graded-compression RLQ ultrasound" (refused in the third pilot), so a key that overlaps little
     // is put to sameAnswer() instead.
-    const drift = structuralDrift(question, again.question, [...changesRequired, ask], false, true, true);
+    const drift = structuralDrift(question, again.question, [...changesRequired, ask], false, Boolean(opts?.restructure), true);
     if (drift) { console.warn(`  [Fixer] cue round ${round} refused (${drift})`); break; }
     const ka = keyText(question), kb = keyText(again.question);
     if (ka !== null && kb !== null && optionIdentity(ka, kb) < OPTION_IDENTITY_MIN && !(await sameAnswer(String(question.question ?? ''), ka, kb))) {
