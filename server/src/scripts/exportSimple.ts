@@ -20,6 +20,10 @@ const OUT = oi >= 0 ? process.argv[oi + 1] : 'backups/usmle_export/simple_export
 const ALL = process.argv.includes('--all');
 // --only <ids.json>: just these qb_questions ids (reworkFlagged.ts output).
 const ONLY = process.argv.indexOf('--only') >= 0 ? new Set<string>(JSON.parse(readFileSync(process.argv[process.argv.indexOf('--only') + 1], 'utf8'))) : null;
+// --exclude <ids.json>: leave these out (a question held back after a quality check).
+const EXCLUDE = process.argv.indexOf('--exclude') >= 0 ? new Set<string>(JSON.parse(readFileSync(process.argv[process.argv.indexOf('--exclude') + 1], 'utf8'))) : null;
+// --step step3: the live-bank Step tag for generated items, which carry no source Step of their own.
+const STEP_ARG = process.argv.indexOf('--step') >= 0 ? process.argv[process.argv.indexOf('--step') + 1] : undefined;
 if (!jobIds.length) { console.log('usage: exportSimple.ts <jobId> [<jobId> …] --out <file.json> [--all]'); process.exit(1); }
 
 const STEP_TAG: Record<string, string> = { step1: 'USMLE - Step 1', step2: 'USMLE - Step 2 CK', step3: 'USMLE - Step 3' };
@@ -30,7 +34,7 @@ for (const jobId of jobIds) {
   rows.push(...await fetchAllRows<Row>((from, to) => supabase.from('qb_questions').select('*')
     .eq('job_id', jobId).is('replaced_by_id', null).order('question_number').range(from, to)));
 }
-const chosen = rows.filter((q) => (ALL || q.status === 'approved') && (!ONLY || ONLY.has(q.id)));
+const chosen = rows.filter((q) => (ALL || q.status === 'approved') && (!ONLY || ONLY.has(q.id)) && !EXCLUDE?.has(q.id));
 
 // Course names for tags on items that are not imported USMLE items.
 const courseIds = [...new Set(rows.map((q) => q.course_id).filter(Boolean))];
@@ -41,7 +45,7 @@ const out: Row[] = [];
 let missingImages = 0;
 for (const q of chosen) {
   const tags = (q.tags || {}) as Row;
-  const step = STEP_OF_EXAM[String(tags.belongs_to_exam ?? '')] ?? tags.step;
+  const step = STEP_OF_EXAM[String(tags.belongs_to_exam ?? '')] ?? tags.step ?? STEP_ARG;
   const image = q.image_url ? await fetchImageAsDataUrl(q.image_url) : null;
   if (q.image_url && !image) missingImages++;
   // A bow-tie item keeps its three option groups and its key in content; exported with the same

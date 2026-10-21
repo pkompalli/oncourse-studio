@@ -132,6 +132,12 @@ interface SubjectTask {
   subject_topics?: string[];
   question_type_allocations?: QuestionTypeAllocation[];
   guidelines?: Record<string, unknown>;
+  /**
+   * Clinical areas to spread a broad topic over, one question per area in turn across batches. They
+   * steer the prompt only, never the topic tag. Asked for 180 items on "Ambulatory and chronic disease
+   * management", the generator came back to the same scenarios and 64 were flagged as duplicates.
+   */
+  focus_areas?: string[];
   _batch?: string;
 }
 
@@ -1453,6 +1459,9 @@ function buildProfessorPrompt(subjectTask: SubjectTask, courseName: string): str
   const topicTagStr = tagList.length > 0
     ? `\nTOPIC TAGS — set each question's "topic" to the ONE topic below that it tests, copied exactly:\n${tagList.slice(0, 80).map((t) => `  • ${t}`).join('\n')}\n`
     : '';
+  const focusStr = subjectTask.focus_areas?.length
+    ? `\nCLINICAL AREAS — write one question in each area below, in this order (an area listed twice gets two questions on different concepts). These are areas to cover, not topic tags:\n${subjectTask.focus_areas.map((a, i) => `  ${i + 1}. ${a}`).join('\n')}\n`
+    : '';
   const bloomStr = Object.entries(bloom).sort().map(([k, v]) => `  ${k}: ${v} question${v !== 1 ? 's' : ''}`).join('\n');
 
   // Dynamic examiner role from exam pattern (fallback to generic)
@@ -1583,7 +1592,7 @@ ${bloomStr}
 HIGH-YIELD TOPICS FROM THIS YEAR'S SYLLABUS
 ────────────────────────────────────────────
 ${hytStr}
-${topicTagStr}
+${topicTagStr}${focusStr}
 ${profileSection}${exclusionSection}
 YOUR RESPONSIBILITIES AS EXAMINER
 ──────────────────────────────────
@@ -1932,6 +1941,10 @@ export async function professorGenerateQuestions(
       num_image_qs: Math.max(0, batchImgQ),
       bloom_counts: batchBloom,
       question_type_allocations: batchAllocations || subjectTask.question_type_allocations,
+      // The next areas in turn, so successive batches do not all start from the top of the list.
+      focus_areas: subjectTask.focus_areas?.length
+        ? Array.from({ length: batchSize }, (_, i) => subjectTask.focus_areas![(allQuestions.length + i) % subjectTask.focus_areas!.length])
+        : undefined,
       _batch: `${b + 1}/${numBatches}`,
     };
 
@@ -3011,14 +3024,21 @@ export async function replaceBatchForJob(
       }
 
       const qf = (examFormat.question_format || {}) as Record<string, unknown>;
+      const oldTopics = [...new Set(olds.map((q) => (q.topic as string) || '').filter(Boolean))];
+      // A job scoped to some topics (config.topic_selection) keeps its replacements in them; tagged
+      // against the whole subject, a replacement in an Acute Care job could come back as "Sepsis".
+      const scoped = (job.config?.topic_selection as Record<string, string[]> | undefined)?.[subject];
+      // config.replace_focus: { topic: [areas] } spreads a broad topic's replacements (focus_areas).
+      const focus = oldTopics.flatMap((t) => ((job.config?.replace_focus as Record<string, string[]> | undefined)?.[t]) || []);
       const task: SubjectTask = {
         subject,
         exam: examOfSubject[subject],
         num_questions: olds.length,
         num_image_qs: olds.filter((q) => q.is_image_question).length,
         bloom_counts: bloomCounts,
-        hyt_topics: [...new Set(olds.map((q) => (q.topic as string) || '').filter(Boolean))],
-        subject_topics: structureTopics(course?.structure as Record<string, unknown>, subject),
+        hyt_topics: oldTopics,
+        subject_topics: scoped?.length ? scoped : structureTopics(course?.structure as Record<string, unknown>, subject),
+        ...(focus.length ? { focus_areas: focus } : {}),
         exam_params: {
           style: (qf.style as string) || 'standard',
           num_options: (qf.num_options as number) || 4,
