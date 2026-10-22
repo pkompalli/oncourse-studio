@@ -1541,7 +1541,10 @@ function buildProfessorPrompt(subjectTask: SubjectTask, courseName: string): str
     const topicBlocks: string[] = [];
     for (const [topic, stems] of existingByTopic) {
       const label = topic === '_general' ? '(General / untagged)' : topic;
-      const capped = stems.slice(0, 50);
+      // EXCLUSION_CAP (default 50) per topic. Fifty of a Step 3 topic's several hundred existing items
+      // let image replacements re-key bullous pemphigoid and CMV esophagitis, which the course-wide
+      // set check then flagged again.
+      const capped = stems.slice(0, Number(process.env.EXCLUSION_CAP) || 50);
       totalExisting += capped.length;
       const stemList = capped.map((s, i) => `    ${i + 1}. ${s.slice(0, 80)}`).join('\n');
       topicBlocks.push(`  ${label}:\n${stemList}`);
@@ -1582,6 +1585,7 @@ Image-based Qs:   ${numImgQ} of your ${numQ} questions must be marked is_image_q
 STIMULUS MEDIUM — choose correctly per question, respecting how ${courseName} ACTUALLY presents information:
 - GENUINE VISUAL (x-ray, ECG/rhythm strip, histology/pathology slide, photograph, anatomy, gel/blot, a diagram/chart/graph that must be drawn): set is_image_question: true with an image_type. These count toward the image allocation above.
   You MUST also write "image_description": a COMPLETE, SELF-CONTAINED figure specification — everything the illustrator needs and NOTHING else, because they never see your vignette. State the figure title, each axis with its units and range, every series by name, and EVERY DATA POINT AS AN EXPLICIT NUMBER exactly as it appears in your scenario (e.g. "Portfolio Q: volatility 12.0%, return 8.0%; Portfolio R: volatility 14.0%, return 8.0%"). If a sub-question is answered by reading a value off the figure, that value MUST be plotted and labeled. Do NOT write a vague summary ("a scatter plot of portfolios") — a figure drawn from a description that omits the numbers will contradict your own answer key.
+  A CLINICAL STUDY OR PHOTOGRAPH (radiograph, CT, MRI, ultrasound, ECG/rhythm strip, fundus, skin or wound photo, histology) is different: the candidate must READ it, as on the real exam. Describe exactly what the image must SHOW (the findings, their side, size and appearance; for an ECG the leads, rate and every waveform timing), but no title or caption naming the diagnosis, and state that the image carries no arrows, labels, callouts or text naming findings or measurements, only what a real study shows (R/L marker, lead names, ECG grid and calibration). For an ECG, give the layout (12-lead with rhythm strip, or a single strip), rate, rhythm, and for EACH lead group the P, PR, QRS width/shape, ST and T findings, naming the decisive abnormality in the leads that carry it (e.g. "short PR 0.10 s and slurred delta upstroke with QRS 0.13 s in I, aVL, V4–V6") and stating that the other leads are normal. For an echo or ultrasound, name each view and where in it the decisive finding and any Doppler jet appear. Choose findings that are textbook-clear rather than subtle.
 - SEPARATE DOCUMENT / DATA EXHIBIT (financial statement, workpaper, schedule, Schedule K-1, trial balance, ledger, contract, medication administration record, serial/trended lab table): set is_image_question: false and include an "exhibits" array — each exhibit { "label": "Exhibit 1", "title": "...", "type": "document|table|financials|schedule|correspondence", "content": "<MARKDOWN; use markdown tables for tabular/numeric data>" } — and reference exhibits by label. Every datum a task needs MUST appear in an exhibit. Use this ONLY when the exam genuinely shows a SEPARATE document/table.
 - PURE TEXT (default): if the exam conventionally weaves the data INTO the vignette prose — e.g. a single set of vitals or a lab panel written in the stem ("Hgb 9.1 g/dL, WBC 14,200, Cr 2.1 mg/dL") — keep it INLINE as text. Do NOT manufacture an exhibit for data that belongs in the vignette. Most USMLE/NCLEX questions are pure text this way.
 ${examPatternSection}
@@ -3003,6 +3007,13 @@ export async function replaceBatchForJob(
     const keepers = await fetchAllRows<Record<string, any>>((from, to) => supabase.from('qb_questions')
       .select('id, question, content').eq('job_id', jobId).is('replaced_by_id', null).range(from, to))
       .then((rows) => rows.filter((q) => !retiring.has(q.id as string)));
+    // config.dedup_course: replacements also avoid the course's approved items from other jobs, which
+    // the course-wide set check (setChecks.ts) compares them against.
+    if (job.config?.dedup_course) {
+      keepers.push(...await fetchAllRows<Record<string, any>>((from, to) => supabase.from('qb_questions')
+        .select('id, question, content, options, correct_option').eq('course_id', job.course_id).neq('job_id', jobId)
+        .in('topic', [...new Set(batch.map((q) => String(q.topic || '')))]).eq('status', 'approved').is('replaced_by_id', null).range(from, to)));
+    }
 
     for (const [subject, olds] of bySubject) {
       const before = await questionIdsForJob(jobId);
@@ -3307,8 +3318,13 @@ export async function generateBatchForJob(
         const v = j === levels.length - 1 ? Math.max(0, left) : Math.round((c / total) * n);
         left -= v; return [lvl, v];
       }));
-      t.num_image_qs = Math.round((t.num_image_qs / Math.max(1, t.num_questions)) * n);
+      // config.image_only: every question carries an image (a top-up of image items for a bank whose
+      // topic-sized jobs generated none).
+      t.num_image_qs = jobConfig.image_only ? n : Math.round((t.num_image_qs / Math.max(1, t.num_questions)) * n);
       t.num_questions = n;
+      // config.focus_areas spreads a targeted set over named areas (or image modalities): 85 Step 3
+      // image items left to choose drew six flow-volume loops and three sigmoid volvulus films.
+      if (Array.isArray(jobConfig.focus_areas) && jobConfig.focus_areas.length) t.focus_areas = (jobConfig.focus_areas as unknown[]).map(String);
     }
     if (!tasks.length) throw new Error('subject_question_counts matched no subject in the course structure');
   }

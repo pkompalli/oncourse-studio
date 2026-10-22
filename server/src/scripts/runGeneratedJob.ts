@@ -15,7 +15,7 @@
  *   LLM_ADAPTIVE=1 LLM_STEPS=20,30 npx tsx src/scripts/runGeneratedJob.ts --course <id> \
  *     --plan <plan.json> --manifest <manifest.json> [--pool 4]
  *
- * plan.json is [{ "subject": …, "topic": …, "count": N }]; each entry becomes one job scoped to that
+ * plan.json is [{ "subject": …, "topic": …, "count": N, "images"?: true, "focus"?: [areas] }]; each entry becomes one job scoped to that
  * topic. The jobs created are written to --manifest, and a rerun with the same manifest resumes them
  * instead of creating new ones. --pool N drives N jobs at once in this process, so one limiter
  * (llm/limiter.ts) caps the calls in flight across all of them. Each finished job's answer letters
@@ -155,7 +155,7 @@ if (PLAN) {
   const course = arg('course')!;
   const MANIFEST = arg('manifest');
   if (!course || !MANIFEST) throw new Error('--plan needs --course and --manifest');
-  const plan = JSON.parse(readFileSync(PLAN, 'utf8')) as Array<{ subject: string; topic: string; count: number }>;
+  const plan = JSON.parse(readFileSync(PLAN, 'utf8')) as Array<{ subject: string; topic: string; count: number; images?: boolean; focus?: string[] }>;
   const { data: c } = await supabase.from('qb_courses').select('structure').eq('id', course).single();
   const subjects = ((c?.structure as Record<string, any>)?.subjects || []) as Array<Record<string, any>>;
   const bad = plan.filter((p) => !subjects.find((s) => s.name === p.subject)?.topics?.some((t: Record<string, any>) => t.name === p.topic));
@@ -163,7 +163,7 @@ if (PLAN) {
   const manifest: { jobs: Array<{ job: string; subject: string; topic: string; count: number }> } = existsSync(MANIFEST) ? JSON.parse(readFileSync(MANIFEST, 'utf8')) : { jobs: [] };
   for (const p of plan) {
     if (manifest.jobs.some((m) => m.subject === p.subject && m.topic === p.topic)) continue;
-    const job = await createJob(course, { [p.subject]: [p.topic] }, { [p.subject]: p.count }, { plan_topic: `${p.subject} → ${p.topic}` });
+    const job = await createJob(course, { [p.subject]: [p.topic] }, { [p.subject]: p.count }, { plan_topic: `${p.subject} → ${p.topic}`, dedup_course: true, ...(p.images ? { image_only: true } : {}), ...(p.focus?.length ? { focus_areas: p.focus } : {}) });
     manifest.jobs.push({ job, ...p });
     writeFileSync(MANIFEST, JSON.stringify(manifest, null, 2));
     console.log(`created job ${job} — ${p.subject} → ${p.topic} (${p.count})`);

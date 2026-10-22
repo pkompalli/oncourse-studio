@@ -36,6 +36,17 @@ export async function flagDuplicateConcepts(jobId: string, log: (s: string) => v
     .select('id, question_number, question, options, correct_option, content, status, audit_trail')
     .eq('job_id', jobId).is('replaced_by_id', null).in('status', ['approved', 'flagged']).order('question_number').range(from, to));
   const kept: Row[] = [];
+  // config.dedup_course: also compare against the course's approved items from other jobs. Per-topic
+  // plan jobs generate in parallel and cannot see each other; 85 Step 3 image items carried twelve
+  // cross-topic repeats (sigmoid volvulus three times, fixed airway obstruction four). Off by default
+  // until measured on other exams.
+  const { data: job } = await supabase.from('qb_jobs').select('course_id, config').eq('id', jobId).single();
+  if (job?.config?.dedup_course) {
+    const others = await fetchAllRows<Row>((from, to) => supabase.from('qb_questions')
+      .select('id, job_id, question_number, question, options, correct_option, content')
+      .eq('course_id', job.course_id).neq('job_id', jobId).eq('status', 'approved').is('replaced_by_id', null).range(from, to));
+    kept.push(...others.map((o) => ({ ...o, _other: true })));
+  }
   let flagged = 0;
   for (const q of rows) {
     const thing = keyedThing(q);
@@ -47,10 +58,10 @@ export async function flagDuplicateConcepts(jobId: string, log: (s: string) => v
     if (!dupOf) { kept.push(q); continue; }
     flagged++;
     const trail = [...(Array.isArray(q.audit_trail) ? q.audit_trail : []), {
-      phase: 'set_check', reason: `DUPLICATE CONCEPT — tests the same thing as Q${dupOf.question_number} ("${thing.slice(0, 80)}")`, timestamp: new Date().toISOString(),
+      phase: 'set_check', reason: `DUPLICATE CONCEPT — tests the same thing as ${dupOf._other ? `an approved item in another job (${String(dupOf.id).slice(0, 8)})` : `Q${dupOf.question_number}`} ("${thing.slice(0, 80)}")`, timestamp: new Date().toISOString(),
     }];
     await supabase.from('qb_questions').update({ status: 'flagged', audit_trail: trail }).eq('id', q.id);
-    log(`  [SetCheck] Q${q.question_number} duplicates Q${dupOf.question_number}: ${thing.slice(0, 60)}`);
+    log(`  [SetCheck] Q${q.question_number} duplicates ${dupOf._other ? `${String(dupOf.id).slice(0, 8)} (other job)` : `Q${dupOf.question_number}`}: ${thing.slice(0, 60)}`);
   }
   return flagged;
 }

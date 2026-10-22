@@ -271,7 +271,14 @@ export function gradabilityIssues(q: Record<string, unknown>): string[] {
     if (!hasStimulus) out.push('Grouped question is missing its shared stimulus (passage / narrative / exhibits)');
     return out;
   }
-  return [...standaloneIssues(ft, c, q), ...referencedStimulusMissing(c, q)];
+  return [...standaloneIssues(ft, c, q), ...referencedStimulusMissing(c, q), ...imageCheckIssues(q)];
+}
+
+/** A clinical image whose blind read failed (images/imageCheck.ts) is not approvable while it is the current image. */
+function imageCheckIssues(q: Record<string, unknown>): string[] {
+  const ic = (q.tags as Record<string, any> | undefined)?.image_check;
+  if (!q.is_image_question || !q.image_url || !ic || ic.pass !== false || (ic.url && ic.url !== q.image_url)) return [];
+  return [`Image does not show what the answer depends on — regenerate the image so it clearly shows: ${(ic.missing || []).join('; ') || 'the decisive finding'} (a blind read saw: ${String(ic.read || '').replace(/\s+/g, ' ').slice(0, 200)})`];
 }
 
 // Normalize difficulty to the labels the reviewer expects. Stored as int 1/2/3
@@ -540,9 +547,15 @@ function formatOneQuestion(q: Record<string, unknown>, i: number, blind = false)
   const specBlock = imageSpec
     ? `\nIMAGE WAS SPECIFIED AS: ${imageSpec.slice(0, 1200)}\n→ Compare the image against this specification. Flag it ONLY where the image fails to show something the question's answer depends on — a value, a relationship, a trend, a label, a position. Do NOT flag drawing style, aesthetics, or detail the question never asks about.`
     : '';
+  // What an independent reader saw with no question attached, so a reviewer reads the picture rather
+  // than confirming the specification (both pilot ECGs were approved as "supporting the key").
+  const ic = (q.tags as Record<string, any> | undefined)?.image_check;
+  const blindBlock = ic && (!ic.url || ic.url === q.image_url)
+    ? `\nINDEPENDENT BLIND READ (an expert shown only this image): ${String(ic.read || '').replace(/\s+/g, ' ').slice(0, 900)}\n→ Read the image yourself. If it, or this read, does not show the finding the keyed answer depends on, flag the image.`
+    : '';
   const imageStatus = q.is_image_question
     ? (q.image_url
-        ? `IMAGE: Present (${q.image_type || 'clinical image'}) — shown below, evaluate for clinical accuracy, relevance to the question stem, and appropriate modality.${specBlock}`
+        ? `IMAGE: Present (${q.image_type || 'clinical image'}) — shown below, evaluate for clinical accuracy, relevance to the question stem, and appropriate modality.${specBlock}${blindBlock}`
         : `IMAGE: ⚠️ MISSING — this is an image-based question but no image was generated. Score ≤ 4.`)
     : '';
 

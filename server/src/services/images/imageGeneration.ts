@@ -12,6 +12,10 @@ import OpenAI from 'openai';
 import { supabase } from '../../db/supabase.js';
 import { fetchAllRows } from '../../db/pagination.js';
 import crypto from 'crypto';
+import { checkImage, imageCheckFix, type ImageCheck } from './imageCheck.js';
+
+// Attempts at a clinical image that fails its blind check (the first draw plus redraws).
+const IMAGE_CHECK_ATTEMPTS = Number(process.env.IMAGE_CHECK_ATTEMPTS) || 3;
 
 const AI_PROXY_KEY = process.env.AI_PROXY_KEY || '';
 const OPENAI_IMAGE_MODEL = process.env.OPENAI_IMAGE_MODEL || 'gpt-image-2.5-flare';
@@ -47,7 +51,49 @@ async function ensureBucket() {
 // Diagram-type images (flowcharts, graphs, tables, pathways…) are useless
 // without labels; clinical/photographic images (x-ray, histology, rash) render
 // garbled text and should stay label-free. Decide per image.
+/**
+ * A clinical study or photograph the candidate must read. Drawn as a labeled figure, it gave the
+ * answer away: a Step 3 ECG came back with every P wave and QRS marked with its time, and a chest film
+ * captioned "right-sided pneumonia with pleural fluid" with callouts on each finding. An ECG
+ * description names its axes, which used to route it to the fully-labeled diagram path.
+ */
+export function isClinicalStudy(imageType: string, description: string): boolean {
+  return /radiograph|x-?ray|\bcxr\b|\bct\b|computed tomograph|\bmri\b|magnetic resonance|ultraso|sonogra|echocardiogra|\becg\b|\bekg\b|electrocardiogra|rhythm strip|telemetry|fundus|fundoscop|ophthalmoscop|dermatolog|skin (lesion|photo)|rash|wound|photograph|histolog|patholog|biopsy|smear|endoscop|colonoscop|otoscop|angiogra|mammogra|\bpet\b|scan\b/i
+    .test(imageType) || (!imageType && /radiograph|\bct\b|\bmri\b|\becg\b|photograph|histolog/i.test(description));
+}
+
+/**
+ * How to draw the studies the image model gets wrong. Left to itself it drew a convincing 12-lead with
+ * the wrong morphology: a WPW item with narrow QRS and no delta waves, a STEMI item with no ST
+ * elevation, an echo whose chambers did not join up. The decisive feature has to be named lead by lead
+ * (or view by view) and drawn at textbook clarity.
+ */
+function modalityGuidance(imageType: string, description: string): string {
+  const t = `${imageType} ${description}`;
+  if (/\becg\b|\bekg\b|electrocardiogra|rhythm strip|telemetry/i.test(t)) {
+    return `
+- ECG CONVENTIONS: standard 12-lead layout (four columns of I/II/III, aVR/aVL/aVF, V1–V3, V4–V6, each about 2.5 s) with a full-width lead II rhythm strip below, unless the description asks for a single rhythm strip. White or pale-pink paper with a clearly visible grid (1 mm fine squares, 5 mm bold squares), 25 mm/s and 10 mm/mV, a 1 mV calibration pulse at the start of each row, and a crisp, thin, black trace with no glow, shading or colour cast.
+- Draw every waveform exactly as the description specifies it, lead by lead: P-wave presence and relation to QRS, PR length, QRS width and shape (for example slurred delta upstrokes, RSR' patterns), ST elevation or depression in the named leads with reciprocal changes, T waves and QT. The decisive abnormality must be unmistakable to a cardiologist — textbook-clear, not subtle — and leads that should be normal must look normal.
+- Keep the rate consistent with the description (count the boxes between R waves) and the complexes aligned vertically across simultaneous leads.`;
+  }
+  if (/echo|ultraso|sonogra|doppler/i.test(t)) {
+    return `
+- ULTRASOUND CONVENTIONS: a grayscale fan-shaped sector on a black background, with realistic speckle, in the standard view(s) the description names (parasternal long axis, parasternal short axis, apical four-chamber, subcostal, or the relevant abdominal/obstetric view). Anatomy must be correct and continuous: in an apical four-chamber view the four chambers, two atrioventricular valves and the septa meet at the crux; in a short-axis view the left ventricle is round.
+- Show the decisive finding clearly and where the description puts it (a defect, effusion, thrombus, vegetation, dilated chamber, wall-motion abnormality). A color-Doppler jet must arise exactly at the lesion and flow in the stated direction, inside a sector box, with a velocity color bar. A small ECG trace along the bottom is allowed; no other text.`;
+  }
+  if (/\bct\b|computed tomograph|\bmri\b|magnetic resonance/i.test(t)) {
+    return `
+- Cross-sectional conventions: axial slices unless another plane is named, the patient's right on the image's left, realistic windowing for the tissue, correct anatomy at each level, and the finding on the side and at the level the description gives.`;
+  }
+  if (/radiograph|x-?ray|\bcxr\b|mammogra/i.test(t)) {
+    return `
+- Radiograph conventions: the projection the description names (PA, AP, lateral, decubitus), the patient's right on the image's left, realistic exposure and anatomy, and the finding on the side and in the zone the description gives.`;
+  }
+  return '';
+}
+
 function imageNeedsLabels(imageType: string, description: string): boolean {
+  if (isClinicalStudy(imageType, description)) return false;
   return /flow[\s_-]?chart|diagram|graph|chart|algorithm|pathway|cycle|process|schematic|table|timeline|tree\b|flow|circuit|network|hierarchy|matrix|plot|axis|ladder|map\b/i
     .test(`${imageType} ${description}`);
 }
@@ -168,7 +214,12 @@ IMAGE NEEDED: ${subject}${imageType && imageType !== subject ? `\nIMAGE TYPE: ${
 
   prompt += `\n\nStyle: clean, professional, textbook-quality. Generate ONLY the precise image needed — no decorative borders, no surrounding infographic elements.`;
 
-  if (needsLabels) {
+  if (isClinicalStudy(imageType, subject)) {
+    prompt += `
+- Render it as the study itself appears in a real exam, for the candidate to interpret: NO title, caption, arrows, callouts, circles, measurement marks or any text naming a finding, diagnosis or value — even where the description above names a finding or gives a figure title. Draw the findings; do not write them.
+- Only the text a real study carries: a side marker (R/L) on imaging; lead names, the standard grid and a calibration pulse on an ECG; nothing on a photograph or slide.
+- Do not depict identifiable real people.${modalityGuidance(imageType, subject)}`;
+  } else if (needsLabels) {
     prompt += `
 - This is a ${imageType || 'diagram'}: EVERY node, box, arrow, axis, column, and step MUST carry concise, correct, legible text taken from the question context above. Empty or unlabeled shapes are unacceptable.
 - Spell all labels correctly in clear English; keep each label short (a few words). The reader must be able to follow the logic from the labels alone.`;
@@ -208,7 +259,9 @@ async function generateImageWithOpenAI(
         prompt,
         n: 1,
         size: '1024x1024',
-        ...({ output_format: 'png' } as Record<string, unknown>),
+        // Opaque: left to choose, the model returned a USMLE ROC chart 88% transparent and an ECG
+        // with partial alpha everywhere, which a dark-mode app shows as near-black.
+        ...({ output_format: 'png', background: 'opaque' } as Record<string, unknown>),
       },
       { timeout: IMAGE_CALL_TIMEOUT_MS, maxRetries: 1 }
     );
@@ -383,7 +436,25 @@ async function generateAndStoreImage(
   const qId = question.id as string;
   const qNum = question.question_number as number;
 
-  const result = await generateImageWithOpenAI(question, fixInstructions);
+  let result = await generateImageWithOpenAI(question, fixInstructions);
+  // Blind check (imageCheck.ts) before the image is kept; a failed check redraws with the read and the
+  // missing findings as corrections. The last attempt is kept either way, with its verdict on the row,
+  // and gradabilityIssues holds a failed one back from approval. Charts and diagrams are drawn from
+  // their stated data and checked by review; the blind read is for clinical studies and photographs.
+  let check: ImageCheck | null = null;
+  if (result && !('safetyRefused' in result) && isClinicalStudy(String(question.image_type || ''), String(question.image_description || ''))) {
+    for (let attempt = 1; attempt <= IMAGE_CHECK_ATTEMPTS; attempt++) {
+      try { check = await checkImage(question, result.imageBytes, result.mimeType); } catch (e) {
+        console.warn(`    [img-check] Q${qNum}: check failed to run — ${e instanceof Error ? e.message.slice(0, 120) : e}`);
+        check = null; break;
+      }
+      console.log(`    [img-check] Q${qNum} attempt ${attempt}: ${check.pass ? 'pass' : `fail — ${check.missing.join('; ').slice(0, 160)}`}`);
+      if (check.pass || attempt === IMAGE_CHECK_ATTEMPTS) break;
+      const next = await generateImageWithOpenAI(question, [fixInstructions, imageCheckFix(check)].filter(Boolean).join('\n\n'));
+      if (!next || 'safetyRefused' in next) break;
+      result = next;
+    }
+  }
   if (result && 'safetyRefused' in result) {
     // A REPLACEMENT was refused, and the question still has the image it had. Keep it: the
     // fallback below is for a question whose image never existed, and run here it removed a real
@@ -415,6 +486,10 @@ async function generateAndStoreImage(
     image_url: publicUrl,
     image_source: imageSource,
   };
+  if (check) {
+    const { data: cur } = await supabase.from('qb_questions').select('tags').eq('id', qId).single();
+    updateData.tags = { ...((cur?.tags as Record<string, unknown>) || {}), image_check: { ...check, url: publicUrl } };
+  }
 
   // Update media array — set url and source on the first media entry, or create one
   const existingMedia = (question.media as Array<Record<string, unknown>>) || [];
