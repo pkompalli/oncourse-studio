@@ -20,14 +20,16 @@
  */
 import { supabase } from '../../db/supabase.js';
 import { fetchAllRows } from '../../db/pagination.js';
-import { orCall, MODELS } from '../llm/openrouter.js';
+import { orCall, MODELS, type ContentPart } from '../llm/openrouter.js';
 import { fixQuestion, sameAnswer, optionIdentity, OPTION_IDENTITY_MIN } from './fixer.js';
 import { optionTexts, keyLengthCue, cueIssues, reviewModeOf, bowTieStemCue, isSingleBest, subQuestionCueIssues, subLengthCues } from './reviewMode.js';
 import { preferOriginal } from './conceptGuard.js';
+import { routeChanges } from './changeRouting.js';
+import { regenerateQuestionImage } from '../images/imageGeneration.js';
 import { profileForJob, type ExamProfile } from './examProfile.js';
 import { auditBatchForJob } from '../audit/auditPipeline.js';
 import { changedFields } from '../audit/fixHistory.js';
-import { formatQuestionsForReview } from './shared.js';
+import { formatQuestionsForReview, fetchImageAsDataUrl } from './shared.js';
 import { parseChecks, checkChanges } from './reviewChecklist.js';
 import { probeCues, probeIssues } from './cueProbe.js';
 
@@ -39,7 +41,7 @@ type Row = Record<string, any>;
  * the legacy columns left audit judging the unrepaired text. In the sixth pilot all ten items whose
  * post-audit fix "did not take" were this — the fixer had made the change in both places.
  */
-function savedFields(x: Row): Row {
+export function savedFields(x: Row): Row {
   return {
     question: x.question, options: x.options, correct_option: x.correct_option, explanation: x.explanation,
     ...(x.content && typeof x.content === 'object' ? { content: x.content } : {}),
@@ -66,7 +68,34 @@ function blindDisagreements(q: Row): string[] {
     .filter((c) => /^ANSWER KEY — key [A-J], attempt [A-J]|^BLIND BLOCKER/.test(String(c)));
 }
 
-interface Verdict { correct_answer: string; verdict: string; rationale: string; basis: string[]; edits: string[] }
+interface Verdict { correct_answer: string; verdict: string; rationale: string; basis: string[]; edits: string[]; image_decides?: boolean }
+
+/** A request is about the image disagreeing with the text. */
+export const isImageConflict = (c: string) => /^IMAGE CONFLICT:|^\[IMAGE_CONSISTENT\]/.test(c);
+
+/**
+ * The fallback when no replacement image fits the question: the SMALLEST change to the question that
+ * makes it agree with the image it has. The image stays part of the question — its finding is not
+ * written into the text. Returns whether the item was changed.
+ */
+export async function alignWithImage(jobId: string, id: string, conflicts: string[], courseName: string, log: (s: string) => void = console.log): Promise<boolean> {
+  const { data: q } = await supabase.from('qb_questions').select('*').eq('id', id).single();
+  if (!q?.image_url || !conflicts.length) return false;
+  const ask = `IMAGE ALIGN: No replacement image that fits this question could be produced, so the question must be made to fit the attached image instead. Look at the image and make the SMALLEST change to the stem, options, key and explanation that makes every statement agree with what it actually shows. Keep testing the same concept wherever the image allows; change the keyed answer only if what the image shows makes another answer correct. Do NOT write into the stem the finding the image is there to show — the candidate must still read the image. The reviewer found: ${conflicts.map((c) => c.replace(/^IMAGE CONFLICT:\s*/, '')).join(' ')}`;
+  const fix = await fixQuestion(q as Row, [ask], courseName, { updateAnswer: true });
+  const trail = Array.isArray(q.audit_trail) ? [...q.audit_trail] : [];
+  const snap = (x: Row) => ({ question: x.question, options: x.options, correct_option: x.correct_option, explanation: x.explanation });
+  if (!fix.fixed || !fix.question) {
+    trail.push({ phase: 'image_align_failed', changes_requested: [ask], error: fix.error || 'no usable question', timestamp: new Date().toISOString() });
+    await supabase.from('qb_questions').update({ audit_trail: trail }).eq('id', id);
+    log(`  [ImageAlign] Q${q.question_number}: could not fit the question to its image (${fix.error ?? 'no question'})`);
+    return false;
+  }
+  trail.push({ phase: 'image_align', changes_requested: [ask], changes_applied: fix.changesApplied || [], before: snap(q as Row), after: snap(fix.question), changed_fields: changedFields(snap(q as Row), snap(fix.question)), timestamp: new Date().toISOString() });
+  await supabase.from('qb_questions').update({ ...savedFields(fix.question), audit_trail: trail }).eq('id', id);
+  log(`  [ImageAlign] Q${q.question_number}: no replacement image fitted — question changed minimally to fit its image`);
+  return true;
+}
 
 const LETTERS = 'ABCDEFGHIJ';
 
@@ -98,14 +127,24 @@ Decide:
 4. List the specific edits (to stem, options or explanation) that leave exactly one defensible answer and an explanation that states the reason, naming its basis (the guideline, standard, rule or source). Keep ${n} options; the keyed option must not be the longest. Empty list if the item is already sound.
 
 Return ONLY a JSON object:
-{"correct_answer": "<exact option text, or new option text>", "verdict": "current_key_correct" | "change_key", "rationale": "<2-4 sentences: why this is the best answer and why the main alternative is not>", "basis": ["<guideline, standard, rule or source: the specific provision>"], "edits": ["<specific edit>"]}`;
+{"correct_answer": "<exact option text, or new option text>", "verdict": "current_key_correct" | "change_key", "image_decides": <true only if the item has an image and your verdict differs from the current key because of what that image shows>, "rationale": "<2-4 sentences: why this is the best answer and why the main alternative is not>", "basis": ["<guideline, standard, rule or source: the specific provision>"], "edits": ["<specific edit>"]}`;
+}
+
+/**
+ * The judge's prompt with the item's image attached. Without it, asked to settle the key of an image item,
+ * the judge answered "cannot be determined without the radiograph" and the item stayed flagged.
+ */
+async function withImage(q: Row, text: string): Promise<string | ContentPart[]> {
+  const url = q.image_url as string | null | undefined;
+  const data = url ? await fetchImageAsDataUrl(url) : null;
+  return data ? [{ type: 'text', text: `${text}\n\nThe item's image is attached: read it yourself, and judge the answer by what it actually shows.` }, { type: 'image_url', image_url: { url: data } }] : text;
 }
 
 async function judge(q: Row, original: Row | null, blind: string[], courseName: string, restructure: boolean): Promise<Verdict | null> {
   const profile = q.job_id ? await profileForJob(String(q.job_id)) : null;
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
-      const r = await orCall(MODELS.AUDITOR, '', judgePrompt(q, original, blind, courseName, profile, restructure), { maxTokens: 4000, temperature: attempt === 1 ? 0.1 : 0 });
+      const r = await orCall(MODELS.AUDITOR, '', await withImage(q, judgePrompt(q, original, blind, courseName, profile, restructure)), { maxTokens: 4000, temperature: attempt === 1 ? 0.1 : 0 });
       const m = r.content.match(/\{[\s\S]*\}/);
       if (!m) continue;
       const v = JSON.parse(m[0]);
@@ -116,6 +155,7 @@ async function judge(q: Row, original: Row | null, blind: string[], courseName: 
         rationale: String(v.rationale ?? ''),
         basis: Array.isArray(v.basis) ? v.basis.map(String) : [],
         edits: Array.isArray(v.edits) ? v.edits.map(String) : [],
+        image_decides: v.image_decides === true,
       };
     } catch (e) {
       console.warn(`  [Adjudicate] judge attempt ${attempt} failed: ${e instanceof Error ? e.message : e}`);
@@ -146,7 +186,7 @@ async function adjudicateOtherFormat(q: Row, courseName: string, mode: ReturnTyp
   let v: Verdict | null = null;
   for (let attempt = 1; attempt <= 2 && !v; attempt++) {
     try {
-      const r = await orCall(MODELS.AUDITOR, '', judgeAnyPrompt(q, courseName, profile), { maxTokens: 4000, temperature: attempt === 1 ? 0.1 : 0 });
+      const r = await orCall(MODELS.AUDITOR, '', await withImage(q, judgeAnyPrompt(q, courseName, profile)), { maxTokens: 4000, temperature: attempt === 1 ? 0.1 : 0 });
       const j = JSON.parse(r.content.match(/\{[\s\S]*\}/)?.[0] ?? 'null');
       if (j?.correct_answer) v = { correct_answer: String(j.correct_answer), verdict: String(j.verdict ?? ''), rationale: String(j.rationale ?? ''), basis: Array.isArray(j.basis) ? j.basis.map(String) : [], edits: Array.isArray(j.edits) ? j.edits.map(String) : [] };
     } catch (e) { console.warn(`  [Adjudicate] judge attempt ${attempt} failed: ${e instanceof Error ? e.message : e}`); }
@@ -199,31 +239,49 @@ export async function adjudicateJobKeys(jobId: string, courseName: string, log: 
   const { data: jobRow } = await supabase.from('qb_jobs').select('config').eq('id', jobId).single();
   const mode = reviewModeOf(jobRow?.config as Row);
 
-  for (const q of rows) {
-    if ((q.tags as Row | null)?.belongs_to_exam) continue;
+  // In parallel under LLM_CONCURRENCY, as repairAfterAudit is: one at a time, each item's judge, fix and
+  // answer checks kept one call in flight, and a NEET PG pilot adjudicated 6 items an hour with lanes idle.
+  const work = async (q: Row): Promise<void> => {
+    if ((q.tags as Row | null)?.belongs_to_exam) return;
     const cur = keyOf(q);
     // Any other answer format — select-all, ordered response, grid, cloze, or a set of sub-questions —
     // is adjudicated the same way when asked for by id (a failed key or one-best-answer check after audit).
-    if (!cur) { if (only) await adjudicateOtherFormat(q, courseName, mode, report, log); continue; }
+    if (!cur) { if (only) await adjudicateOtherFormat(q, courseName, mode, report, log); return; }
     const original = originalOf(q);
     const origKey = original ? keyOf(original) : null;
     const blind = blindDisagreements(q);
     const changed = Boolean(origKey) && !(await same(String(q.question ?? ''), origKey!, cur));
-    if (!only && !changed && !blind.length) continue;
+    if (!only && !changed && !blind.length) return;
     report.candidates++;
 
     const v = await judge(q, original, blind, courseName, mode.restructure);
-    if (!v) { report.failed++; log(`  [Adjudicate] Q${q.question_number}: no verdict`); continue; }
+    if (!v) { report.failed++; log(`  [Adjudicate] Q${q.question_number}: no verdict`); return; }
     report.adjudicated++;
     const keyStays = await same(String(q.question ?? ''), cur, v.correct_answer);
+
+    // The image disagrees with the key: replace the image first, with one that shows what the current key
+    // needs. Only when no replacement passes its blind check does the answer change to fit the image.
+    if (!keyStays && v.image_decides && q.image_url) {
+      const redrawn = await regenerateQuestionImage(String(q.id), jobId, [`The image must clearly show the findings that make "${cur}" the correct answer, as the question asks. Read without the question, the current image was taken to support "${v.correct_answer}" instead: ${v.rationale}`]).catch(() => false);
+      if (redrawn) {
+        const { data: fresh } = await supabase.from('qb_questions').select('audit_trail').eq('id', q.id).single();
+        const t = Array.isArray(fresh?.audit_trail) ? [...fresh.audit_trail] : [];
+        t.push({ phase: 'key_adjudication', verdict: 'image_replaced', kept_key: cur, judged_from_old_image: v.correct_answer, rationale: v.rationale, timestamp: new Date().toISOString() });
+        await supabase.from('qb_questions').update({ audit_trail: t }).eq('id', q.id);
+        report.adjudicated++; report.edited++;
+        log(`  [Adjudicate] Q${q.question_number}: image replaced to fit the key "${cur.slice(0, 60)}" (the old image pointed to "${v.correct_answer.slice(0, 40)}")`);
+        return;
+      }
+    }
 
     let after: Row = q;
     let error: string | undefined;
     if (!keyStays || v.edits.length) {
       const ask = `ANSWER KEY ADJUDICATION: The correct answer is "${v.correct_answer}"${keyStays ? ' (the current key)' : ' — make it the keyed option'}. ${v.rationale} Basis: ${v.basis.join('; ')}. Make these edits so it is the only defensible answer, and state the reason and basis in the explanation: ${v.edits.join(' ') || 'none beyond the key.'}`;
+      const askFull = !keyStays && v.image_decides ? `${ask} No replacement image fitted the current key, so make the SMALLEST change that fits the image, and do NOT write into the stem the finding the image shows — the candidate must still read the image.` : ask;
       // A key ruled wrong or outdated changes the answer by design: the concept guard then holds only the
       // clinical problem and the kind of task (conceptGuard.ts 'update').
-      const fix = await fixQuestion(q, [ask], courseName, { existingBank: mode.existingBank, restructure: mode.restructure, updateAnswer: !keyStays });
+      const fix = await fixQuestion(q, [askFull], courseName, { existingBank: mode.existingBank, restructure: mode.restructure, updateAnswer: !keyStays });
       if (fix.fixed && fix.question && keyOf(fix.question) && (await same(String(fix.question.question ?? ''), keyOf(fix.question)!, v.correct_answer))) {
         after = { ...q, ...fix.question, image_url: fix.imageRemoved ? null : q.image_url, is_image_question: fix.imageRemoved ? false : q.is_image_question };
       } else {
@@ -245,13 +303,16 @@ export async function adjudicateJobKeys(jobId: string, courseName: string, log: 
       ...(after !== q ? { ...savedFields(after), image_url: after.image_url ?? null, is_image_question: Boolean(after.is_image_question) } : {}),
       audit_trail: trail,
     }).eq('id', q.id);
-    if (upErr) { report.failed++; log(`  [Adjudicate] Q${q.question_number}: write failed ${upErr.message}`); continue; }
+    if (upErr) { report.failed++; log(`  [Adjudicate] Q${q.question_number}: write failed ${upErr.message}`); return; }
 
     if (error) report.failed++;
     if (after !== q) report.edited++;
     if (!keyStays && !error) report.keyChanged++;
     log(`  [Adjudicate] Q${q.question_number}: ${error ? 'FAILED' : keyStays ? 'key upheld' : 'key changed'} → "${v.correct_answer.slice(0, 70)}"${v.edits.length ? ` (${v.edits.length} edits)` : ''}${error ? ` — ${error}` : ''}`);
-  }
+  };
+  const queue = [...rows];
+  const lanes = Math.max(1, Number(process.env.LLM_CONCURRENCY) || 8);
+  await Promise.all(Array.from({ length: lanes }, async () => { for (let q = queue.shift(); q; q = queue.shift()) await work(q); }));
   return report;
 }
 
@@ -334,6 +395,34 @@ export async function repairAfterAudit(jobId: string, courseName: string, log: (
       ...(bowTieStemCue(q) ? [bowTieStemCue(q)!] : []),
     ];
     if (only) asks = asks.map((a) => a.replace(/^IMAGE CONFLICT: /, 'IMAGE REMOVE: '));
+    // A request about the picture itself goes to image generation, as in review (reviewPipeline.ts): the
+    // text fixer cannot redraw an image. The new image is kept only if its blind read supports the key
+    // (imageGeneration.ts); either way the item goes back to audit with the image it now has.
+    const routed = routeChanges(asks, [], false, Boolean(q.image_url));
+    if (routed.image.length && !only) {
+      const redrawn = await regenerateQuestionImage(String(q.id), jobId, routed.image).catch(() => false);
+      log(`  [AuditFix] Q${q.question_number}: image ${redrawn ? 'replaced' : 'kept (no replacement passed its blind check)'}`);
+      if (redrawn) {
+        const { data: fresh } = await supabase.from('qb_questions').select('*').eq('id', q.id).single();
+        if (fresh) Object.assign(q, fresh);
+        trail.splice(0, trail.length, ...((q.audit_trail as Row[]) || []));
+        trail.push({ phase: 'audit_image_fix', feedback: routed.image, after_image: q.image_url, timestamp: new Date().toISOString() });
+      }
+      asks = [...routed.fix, ...routed.heldForImage];
+      // No replacement fitted: fall back to the smallest change that fits the image the item has.
+      const conflicts = routed.image.filter(isImageConflict);
+      if (!redrawn && conflicts.length && await alignWithImage(jobId, String(q.id), conflicts, courseName, log)) {
+        const { data: fresh } = await supabase.from('qb_questions').select('*').eq('id', q.id).single();
+        if (fresh) Object.assign(q, fresh);
+        trail.splice(0, trail.length, ...((q.audit_trail as Row[]) || []));
+        if (!asks.length) { await supabase.from('qb_questions').update({ status: 'reviewed' }).eq('id', q.id); out.repaired++; return; }
+      }
+      if (!asks.length) {
+        if (redrawn) { await supabase.from('qb_questions').update({ status: 'reviewed', audit_trail: trail }).eq('id', q.id); out.repaired++; }
+        else out.failed++;
+        return;
+      }
+    }
     if (!asks.length) {
       // Adjudication after this audit settled everything that failed: the item goes back to audit as
       // it now stands rather than staying flagged on a verdict about its earlier text.

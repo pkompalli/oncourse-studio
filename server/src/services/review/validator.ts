@@ -10,6 +10,7 @@ import { schemaErrorsFor } from '../generation/schemaValidate.js';
 import { coherenceIssues } from '../generation/coherence.js';
 import { consistencyIssues, isBlockingConsistency } from '../generation/consistency.js';
 import { EXISTING_ITEM_RULES } from './changeRouting.js';
+import { checkExistingImage, blindImageIssue } from '../images/imageCheck.js';
 import { RESTRUCTURE_RULES, cueIssues, imageIssues, bowTieStemCue, isSingleBest, subQuestionCueIssues } from './reviewMode.js';
 import { probeCues, probeIssues } from './cueProbe.js';
 import { CHECKLIST_PROMPT, parseChecks, checkChanges } from './reviewChecklist.js';
@@ -455,7 +456,8 @@ export async function runValidatorBatch(
   //   - what a model is unreliable at counting: option count, the key longest, the key the odd one
   //     out in form, all/none-of-the-above (reviewMode.cueIssues);
   //   - the options-only probe: the key picked out by form, distractors ruled out on sight (cueProbe.ts);
-  //   - an image that is missing or does not load (reviewMode.imageIssues) — restructure only.
+  //   - an image that is missing or does not load (reviewMode.imageIssues), or whose blind read does not
+  //     show what the key needs (imageCheck.checkExistingImage).
   // Every job but a locked imported bank reviews against the checklist (reviewMode.checklist). Restructure
   // items are held to five options; a generated single-best-answer item to the exam's own count
   // (examProfile.optionCount), with the probe worded for its exam.
@@ -466,8 +468,12 @@ export async function runValidatorBatch(
     const probeable = questions.filter((_, i) => single[i]);
     const [probed, loads] = await Promise.all([
       probeable.length ? probeCues(probeable, restructure ? undefined : domain) : Promise.resolve([]),
-      Promise.all(questions.map((q) => (restructure && q.image_url ? imageLoads(q.image_url as string) : Promise.resolve(null)))),
+      Promise.all(questions.map((q) => (q.image_url ? imageLoads(q.image_url as string) : Promise.resolve(null)))),
     ]);
+    // Every attached image is also read BLIND and compared with what the key needs (imageCheck.ts). A
+    // reviewer shown the image beside the stem and key confirms the text: in a NEET PG pilot a calcaneus
+    // giant-cell-tumour item was approved with a live image of renal interstitial inflammation.
+    const blind = await Promise.all(questions.map((q, i) => (q.image_url && loads[i] !== false ? checkExistingImage(q).catch(() => null) : Promise.resolve(null))));
     let pi = 0;
     const probes = questions.map((_, i) => (single[i] ? probed[pi++] ?? null : null));
     for (let i = 0; i < questions.length; i++) {
@@ -486,12 +492,14 @@ export async function runValidatorBatch(
       }
       const bt = bowTieStemCue(questions[i]);
       const cues = [
-        ...(restructure ? imageIssues(questions[i], loads[i]) : []),
+        ...imageIssues(questions[i], loads[i]),
+        ...(blind[i] && !blind[i]!.pass ? [blindImageIssue(blind[i]!)] : []),
         ...(single[i] ? [...cueIssues(questions[i], restructure ? 5 : profile.optionCount), ...probeIssues(questions[i], probes[i])] : []),
         // The single-best-answer questions inside a set (CFA, LSAT, MCAT, Bar, NCLEX cases) get the same checks.
         ...(!restructure ? subQuestionCueIssues(questions[i], profile.optionCount) : []),
         ...(bt ? [bt] : []),
       ];
+      if (blind[i]) r.image_check = { ...blind[i], url: questions[i].image_url };
       const have = new Set((r.changes_required as string[]) || []);
       r.changes_required = [...have, ...cues.filter((c) => !have.has(c))];
       if ((r.changes_required as string[]).length) {

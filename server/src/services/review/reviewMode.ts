@@ -18,11 +18,16 @@
  */
 export interface ReviewMode { existingBank: boolean; restructure: boolean; checklist: boolean }
 
-export function reviewModeOf(config: Record<string, unknown> | null | undefined): ReviewMode {
-  const c = config || {};
-  const existingBank = c.source === 'import' || c.existing_bank === true;
-  const restructure = existingBank && c.restructure === true;
-  return { existingBank, restructure, checklist: restructure || !existingBank };
+/**
+ * Every job is reviewed as a generated job. Imported items used to get a locked mode (options frozen,
+ * keys never moved) or a USMLE-shaped restructure mode; a NEET PG pilot in locked mode left 50 of 200
+ * flagged with the defects found but every repair blocked. An imported item is now validated,
+ * repaired and audited exactly as a freshly generated one, to its own course's rules; traceability to
+ * the live bank is kept by the ids on each row (tags.source_question_id / source_option_ids), not by
+ * freezing the item. The existingBank and restructure branches elsewhere are no longer reached.
+ */
+export function reviewModeOf(_config: Record<string, unknown> | null | undefined): ReviewMode {
+  return { existingBank: false, restructure: false, checklist: true };
 }
 
 /**
@@ -233,11 +238,13 @@ export const STEM_REFS_IMAGE = /shown\s+(below|above|here)|in\s+the\s+(image|fig
 export function imageIssues(q: Record<string, unknown>, loads: boolean | null): string[] {
   const stem = String(q.question ?? '');
   const url = q.image_url as string | null | undefined;
+  // Replaced, not removed: an image item is fixed by giving it the image it needs (imageGeneration.ts
+  // draws it from a specification written from the question, and keeps it only if a blind read agrees).
   if (url && loads === false) {
-    return ['IMAGE NOT LOADING: The attached image could not be downloaded, so candidates would see a broken picture. Remove the image and make the item self-contained: state in words the findings the decision needs, without naming the answer, and remove every reference to an image.'];
+    return ['IMAGE NOT LOADING: The attached image could not be downloaded, so candidates would see a broken picture. Replace the image with one that shows the findings the question is read from.'];
   }
   if (!url && (q.is_image_question || STEM_REFS_IMAGE.test(stem))) {
-    return ['IMAGE MISSING: The stem refers to an image but none is attached. Make the item self-contained: state in words the findings the decision needs, without naming the answer, and remove every reference to an image.'];
+    return ['IMAGE MISSING: The stem refers to an image but none is attached. Replace the image: generate one that shows the findings the question is read from.'];
   }
   return [];
 }

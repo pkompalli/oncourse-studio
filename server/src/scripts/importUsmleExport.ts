@@ -2,9 +2,8 @@
  * Load questions exported from the live USMLE bank into qbank-studio, one job per Step course, so
  * the app's own review and audit can run on them.
  *
- * Each job is marked `config.source = 'import'`, which puts review into existing-bank mode
- * (changeRouting.ts): these items have been answered by candidates, so their option count and
- * order are frozen and a key moves only when it is wrong.
+ * Each job is marked `config.source = 'import'`; its items are reviewed exactly as generated items
+ * are, to the course's own rules (reviewMode.ts), and may be repaired freely.
  *
  * Every row keeps the ids it came from — `tags.source_question_id`, and `tags.source_option_ids`
  * mapping each letter to the live option id — so a later write-back edits the same rows and never
@@ -16,7 +15,8 @@
  *   npx tsx src/scripts/importUsmleExport.ts --limit 20 --offset 75   # dry run of a pilot: 20 per Step
  *   npx tsx src/scripts/importUsmleExport.ts --limit 20 --offset 75 --apply
  *   npx tsx src/scripts/importUsmleExport.ts --apply                  # everything
- *   … --restructure   content quality first: five options, cues removed, full vignettes (reviewMode.ts)
+ *   … --course <id>   any other export (e.g. exportLiveNeetPg.ts): every question into that one course,
+ *                     no Step routing; the job records the export file's own filter
  */
 import 'dotenv/config';
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -48,10 +48,12 @@ const ONLY_IDS = argStr('ids')
   : null;
 const AS_STEP = argStr('as') as Step | '';
 const MANIFEST = argStr('manifest');
+// --course <id>: one course for the whole file instead of routing by USMLE Step.
+const ONE_COURSE = argStr('course');
 const created: Array<{ job: string; step: string; count: number }> = [];
 
-type Step = 'step1' | 'step2' | 'step3';
-const COURSES: Record<Step, string> = {
+type Step = 'step1' | 'step2' | 'step3' | 'course';
+const COURSES: Partial<Record<Step, string>> = ONE_COURSE ? { course: ONE_COURSE } : {
   step1: 'f9d20070-4b7d-4248-b545-f6e774cd006f',
   step2: '2b2ab63c-5aa7-4c99-b2d5-e55642f9faac',
   step3: '90b430d9-d9c8-4758-b0d1-1f04ec0b06e7',
@@ -86,7 +88,7 @@ function stepOf(q: Exported): { step: Step; from: 'metadata' | 'subject' } {
 }
 
 // The bank mostly uses 1–3; a few rows carry words, one a 4.
-const DIFFICULTY: Record<string, number> = { '1': 1, '2': 2, '3': 3, '4': 3, easy: 1, medium: 2, hard: 3 };
+const DIFFICULTY: Record<string, number> = { '1': 1, '2': 2, '3': 3, '4': 3, '5': 3, easy: 1, medium: 2, hard: 3 };
 
 function toRow(q: Exported, step: Step, from: string, jobId: string, courseName: string, n: number) {
   const opts = q.options || [];
@@ -101,7 +103,7 @@ function toRow(q: Exported, step: Step, from: string, jobId: string, courseName:
   const blooms = /^[1-6]$/.test(String(q.blooms_level)) ? String(q.blooms_level) : '3';
   return {
     job_id: jobId,
-    course_id: COURSES[step],
+    course_id: COURSES[step]!,
     question_number: n,
     question: q.question_text,
     options,
@@ -130,7 +132,7 @@ function toRow(q: Exported, step: Step, from: string, jobId: string, courseName:
     tags: {
       subject: q.subject, topic: q.topic, blooms, difficulty,
       format_type: 'mcq_single', question_type: q.question_type || 'text',
-      step, step_from: from,
+      ...(step === 'course' ? {} : { step, step_from: from }),
       source_question_id: q.id,
       source_option_ids: sourceOptionIds,
       source_validation_status: q.validation_status,
@@ -141,11 +143,12 @@ function toRow(q: Exported, step: Step, from: string, jobId: string, courseName:
   };
 }
 
-const all = (JSON.parse(readFileSync(IN, 'utf8')) as { questions: Exported[] }).questions;
-const byStep: Record<Step, Array<{ q: Exported; from: string }>> = { step1: [], step2: [], step3: [] };
+const exported = JSON.parse(readFileSync(IN, 'utf8')) as { questions: Exported[]; filter?: string };
+const all = exported.questions;
+const byStep = Object.fromEntries(Object.keys(COURSES).map((k) => [k, []])) as unknown as Record<Step, Array<{ q: Exported; from: string }>>;
 for (const q of all) {
   if (EXCLUDE.has(q.id) || (ONLY_IDS && !ONLY_IDS.has(q.id))) continue;
-  const s = stepOf(q);
+  const s = ONE_COURSE ? { step: 'course' as Step, from: 'course' } : stepOf(q);
   byStep[AS_STEP || s.step].push({ q, from: AS_STEP ? 'metadata' : s.from });
 }
 if (EXCLUDE.size) console.log(`excluded ${all.length - Object.values(byStep).reduce((n, x) => n + x.length, 0)} already-processed questions`);
@@ -157,10 +160,11 @@ const pick = <T>(xs: T[]) => {
   return xs.filter((_, i) => i % stride === OFFSET % stride).slice(0, LIMIT);
 };
 
-const { data: courses, error: cErr } = await supabase.from('qb_courses').select('id, name, generation_guidelines').in('id', Object.values(COURSES));
+const { data: courses, error: cErr } = await supabase.from('qb_courses').select('id, name, generation_guidelines').in('id', Object.values(COURSES) as string[]);
 if (cErr) throw new Error(cErr.message);
 for (const step of Object.keys(COURSES) as Step[]) {
   const course = courses!.find((c) => c.id === COURSES[step])!;
+  if (!course) throw new Error(`course ${COURSES[step]} not found`);
   if (!course.generation_guidelines) throw new Error(`${course.name} has no generation_guidelines — run setUsmleGuidelines.ts --apply first`);
 }
 
@@ -183,7 +187,7 @@ for (const step of Object.keys(COURSES) as Step[]) {
     job = { id: INTO_JOB };
   } else {
   const { data: newJob, error: jErr } = await supabase.from('qb_jobs').insert({
-    course_id: COURSES[step],
+    course_id: COURSES[step]!,
     type: 'mock_exam',
     // Parked, not 'reviewing': the server resumes every job at reviewing on startup
     // (resumeStrandedJobs), so starting the app would launch the whole review unasked.
@@ -192,15 +196,12 @@ for (const step of Object.keys(COURSES) as Step[]) {
     progress: {},
     config: {
       source: 'import',
-      existing_bank: true,
       source_project: 'ylbwdadhbcjolwylidja',
       source_file: IN.split('/').pop(),
-      source_filter: "course 'US Medical PG', created_at > 2025-01-31",
-      step,
+      source_filter: ONE_COURSE ? exported.filter ?? null : "course 'US Medical PG', created_at > 2025-01-31",
+      ...(ONE_COURSE ? {} : { step }),
       pilot: Boolean(LIMIT),
       ...(CHUNK > 0 ? { full_run: true, chunk: c0 / size + 1 } : {}),
-      // Quality first: options may be added, replaced or reordered (reviewMode.ts).
-      ...(process.argv.includes('--restructure') ? { restructure: true } : {}),
       imported_at: new Date().toISOString(),
     },
   }).select('id').single();

@@ -28,6 +28,9 @@ const IMAGE_WORD_RE = /\b(image|images|picture|photo|photograph|figure|tracing|m
 const IMAGE_NOUN_RE = /\b(image|images|ecg|ekg|x-?ray|radiograph|ct\b|mri|scan|photo|photograph|figure|picture|illustration|tracing|micrograph|smear|histolog)/i;
 const IMAGE_WRONG_RE = /\b(replace|regenerate|swap|redo|provide|correct the|does not|doesn't|do not|fails? to|inconsistent|contradict|mismatch|inconsistent_data|not (clearly )?(show|depict|demonstrat|match))\b/i;
 const IMAGE_REPLACE_RE = /\b(replace|regenerate|swap|redo)\b/i;
+// "Replace the image with one that shows …", "regenerate the radiograph so …", "redraw the ECG …".
+const DROP_PICTURE_RE = /\b(remove|delete|drop|omit)\b[^.;]{0,40}\b(image|picture|photo(graph)?|figure|radiograph|table|attachment|composite|graphic|screenshot)\b|\btext-only\b|is_image_question\b[^.;]{0,10}\bfalse\b/i;
+const REPLACE_PICTURE_RE = /\b(replace|regenerate|redraw|re-?generate|generate|swap|redo|provide a (new|different))\b[^.;]{0,50}\b(image|picture|photo(graph)?|figure|radiograph|x-?ray|ecg|ekg|tracing|strip|smear|slide|scan|ct|mri|ultrasound|diagram|illustration|micrograph|fundus)\b/i;
 
 // A request about the item's own stem or wording — converting a recall stem to a vignette is how
 // a question comes to read like the real exam — goes to the fixer even when the reviewer
@@ -74,9 +77,23 @@ export function isImageChange(c: string): boolean {
 /** Route one request. `existingBank` keeps batch-relative requests off the fixer. */
 export function routeChange(c: string, existingBank: boolean): ChangeRoute {
   if (/^CONCEPT OVERLAP:/i.test(c)) return existingBank ? 'batch' : 'fix';
-  // Restructure-mode image repairs are text repairs: align the stem with the image, or remove it.
-  if (/^IMAGE (CONFLICT|NOT LOADING|MISSING):/.test(c)) return 'fix';
-  if (isImageChange(c)) return 'image';
+  // A missing or broken image is fixed by generating one (imageGeneration.ts draws it from a
+  // specification and keeps it only if a blind read supports the key).
+  if (/^IMAGE (NOT LOADING|MISSING):/.test(c)) return 'image';
+  // The image checks decide by what the fix asks for: replacing the picture goes to image generation,
+  // anything else — aligning the text with the image, removing a stem's giveaway — to the fixer. The
+  // fixer cannot draw: sent "the image must show Wenckebach", it could only mark the request ❌.
+  const body = c.replace(/^IMAGE CONFLICT:\s*/, '');
+  // An image that disagrees with the text is fixed IMAGE FIRST: a new image drawn for the question as it
+  // stands. Only when no replacement passes its blind check is the question changed, minimally, to fit
+  // the image it has (keyAdjudication.alignWithImage). A stem that gives the image away is a text fix.
+  if (/^IMAGE CONFLICT:/.test(c)) return 'image';
+  // "Remove the image / make it text-only" goes to the image step too: it drops the image only when the
+  // question is judged answerable without one, and otherwise draws one (imageGeneration.ts).
+  if (/^\[IMAGE_(CONSISTENT|INTEGRAL)\]/.test(body)) return REPLACE_PICTURE_RE.test(body) || DROP_PICTURE_RE.test(body) ? 'image' : 'fix';
+  // A request labelled with any other checklist item is about the text, whatever modality it mentions
+  // ("[DISTRACTORS_PLAUSIBLE] Replace "CT scan" with…", "[EXPLANATION_COMPLETE] …the ECG tracing…").
+  if (isImageChange(c) && !/^\[(?!IMAGE_)[A-Z_]+\]/.test(c)) return 'image';
   if (METADATA_RE.test(c)) return 'label';
   // "…the lead-in applies anatomy, so change bloom_level from 5_evaluate to 3_apply" is a relabel
   // that merely cites the stem; "convert the stem into a vignette consistent with Bloom's 3_apply"

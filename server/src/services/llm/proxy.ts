@@ -100,6 +100,11 @@ function describeError(e: unknown): string {
 
 // ── Prompt building ──
 
+// Images are read at full detail. Left unset, the API's default may downscale a picture before the model
+// sees it, and the blind image check misread fine detail: a field of spherocytes with no central pallor
+// as megaloblastic anaemia, a snowman cardiac silhouette as plain cardiomegaly.
+const HIGH_DETAIL = { openai: { imageDetail: 'high' as const } };
+
 /** Our OpenAI-style content parts → AI SDK user content (text parts, and file parts for images). */
 function toUserContent(parts: ContentPart[]) {
   return parts.map((p) => {
@@ -113,9 +118,9 @@ function toUserContent(parts: ContentPart[]) {
       if (u.startsWith('data:')) {
         const mediaType = u.slice(5, u.indexOf(';'));
         const b64 = u.slice(u.indexOf(',') + 1);
-        return { type: 'file' as const, data: Buffer.from(b64, 'base64'), mediaType: mediaType || 'image' };
+        return { type: 'file' as const, data: Buffer.from(b64, 'base64'), mediaType: mediaType || 'image', providerOptions: HIGH_DETAIL };
       }
-      return { type: 'file' as const, data: new URL(u), mediaType: 'image' };
+      return { type: 'file' as const, data: new URL(u), mediaType: 'image', providerOptions: HIGH_DETAIL };
     }
     return { type: 'text' as const, text: '' };
   });

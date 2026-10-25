@@ -108,6 +108,11 @@ export function optionIdentity(before: string, after: string): number {
   const A = words(before), B = words(after);
   if (!A.size || !B.size) return norm(before) === norm(after) ? 1 : 0;
   const shared = [...A].filter((w) => B.has(w)).length;
+  // Short options that share only a head word are different answers: "Gynecoid pelvis" vs "Champagne
+  // glass pelvis" scored 0.5 on "pelvis", and a key ruled wrong on a NEET PG item was logged as upheld.
+  // When each side has a word the other lacks and one side is two words or fewer, the overlap is taken
+  // over the union, so the caller asks the model (sameAnswer) instead.
+  if (Math.min(A.size, B.size) <= 2 && shared < A.size && shared < B.size) return shared / new Set([...A, ...B]).size;
   return Math.max(shared / A.size, shared / B.size);
 }
 
@@ -405,11 +410,20 @@ async function fixOnce(
   // Restructure mode reconciles an item with its image rather than holding it (changeRouting.ts).
   // The fixer is SHOWN the image: asked to repair a contradiction it could not see, it could only
   // guess what the picture held.
-  const imageUrl = opts?.restructure ? ((question.image_url as string | null | undefined) || null) : null;
+  // Every job: the fixer sees the image of an image item, so a text repair stays true to the picture.
+  // Without it a fix on a NEET PG image item rewrote the stem around findings the image did not show.
+  const imageUrl = (question.image_url as string | null | undefined) || null;
+  // The question does not need its image (imageSpec judged it answerable without one): the image is
+  // dropped and the item becomes text-only, in every mode.
+  const imageDrop = changesRequired.some((c) => /^IMAGE DROP:/.test(c));
   const imageAsked = Boolean(opts?.restructure) && changesRequired.some((c) => IMAGE_ASK.test(c));
   const imageGone = Boolean(opts?.restructure) && changesRequired.some((c) => IMAGE_GONE.test(c));
-  const dataUrl = imageUrl && !imageGone ? await fetchImageAsDataUrl(imageUrl) : null;
-  const imageRules = !opts?.restructure || !(imageAsked || dataUrl) ? '' : imageGone
+  const dataUrl = imageUrl && !imageGone && !imageDrop ? await fetchImageAsDataUrl(imageUrl) : null;
+  const imageRules = imageDrop ? `
+IMAGE — DROP: this question can be answered without its image, so the image is removed and it becomes a text-only question. Remove every reference to an image ("shown", "the image", "the figure", "given", "marked"). Keep the same question, options and answer, and add no findings: it did not depend on the image. Set "image_decision" to "remove".`
+    : !opts?.restructure ? (dataUrl ? `
+IMAGE — the item's attached image is shown after this prompt. It is not yours to change (a different image is generated separately when one is needed). Keep every statement in the stem, options and explanation consistent with what the image actually shows, never describe in the stem what the image is there to test, and set "image_decision" to "keep".` : '')
+    : !(imageAsked || dataUrl) ? '' : imageGone
     ? `
 IMAGE — REMOVE: the item's image is missing or broken and cannot be replaced. Make the item self-contained in text: state in words the findings the decision needs (as a radiology or pathology report would — "Noncontrast CT of the head shows no hemorrhage"), without naming the diagnosis or answer the item tests, and remove every reference to an image ("shown", "the image", "the figure"). Set "image_decision" to "remove".`
     : `
@@ -522,6 +536,15 @@ Return ONLY valid JSON. No preamble, no markdown fences.`;
       // The image fields are decided here, not copied from the model's JSON: only a "remove" (or an
       // image that is already gone) clears them, and anything else keeps the original picture.
       let imageRemoved = false;
+      if (imageDrop) {
+        imageRemoved = true; fixed.image_url = null; fixed.is_image_question = false;
+        if (STEM_REFS_IMAGE.test(String(fixed.question ?? ''))) {
+          lastErr = 'image dropped but the stem still refers to it';
+          console.warn(`  [Fixer] attempt ${attempt}/2: ${lastErr}`);
+          if (attempt === 1) continue;
+          return { fixed: false, error: lastErr };
+        }
+      } else if (!opts?.restructure && imageUrl) fixed.image_url = imageUrl;
       if (opts?.restructure && (imageUrl || imageGone)) {
         const decision = String(wrapper.image_decision ?? '').toLowerCase();
         imageRemoved = imageGone || (imageAsked && decision === 'remove');

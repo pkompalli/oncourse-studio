@@ -12,7 +12,7 @@
  *   npx tsx src/scripts/exportReviewed.ts <jobId> [<jobId> …] --out backups/usmle_export/reviewed
  */
 import 'dotenv/config';
-import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
 import { supabase } from '../db/supabase.js';
 import { fetchAllRows } from '../db/pagination.js';
 import { optionIdentity, OPTION_IDENTITY_MIN } from '../services/review/fixer.js';
@@ -24,12 +24,18 @@ const OUT = oi >= 0 ? process.argv[oi + 1] : 'backups/usmle_export/reviewed';
 // disk (post-2025, pre-2025 and the pre-2025 sample), so a run's part files find their originals whichever
 // export the jobs came from — runImportedJobs passes no --source.
 const si = process.argv.indexOf('--source');
-const SOURCES = si >= 0 ? [process.argv[si + 1]] : [
+if (!jobIds.length) { console.log('usage: exportReviewed.ts <jobId> [<jobId> …] --out <path-without-extension>'); process.exit(1); }
+// Plus the file each job records it was imported from (config.source_file), wherever under backups/ it
+// sits: a NEET PG export lives in backups/neetpg_export, not beside the USMLE ones.
+const { data: jobCfgs } = await supabase.from('qb_jobs').select('config').in('id', jobIds);
+const jobSources = [...new Set((jobCfgs || []).map((j) => String((j.config as Row | null)?.source_file ?? '')).filter(Boolean))]
+  .flatMap((name) => readdirSync('backups', { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => `backups/${d.name}/${name}`));
+const SOURCES = si >= 0 ? [process.argv[si + 1]] : [...new Set([
   'backups/usmle_export/usmle_questions_post_2025-01-31.json',
   'backups/usmle_export/usmle_questions_pre_2025-01-31.json',
   'backups/usmle_export/usmle_pre2025_sample100.json',
-].filter((f) => existsSync(f));
-if (!jobIds.length) { console.log('usage: exportReviewed.ts <jobId> [<jobId> …] --out <path-without-extension>'); process.exit(1); }
+  ...jobSources,
+])].filter((f) => existsSync(f));
 
 type Row = Record<string, any>;
 const src = new Map(SOURCES.flatMap((f) => JSON.parse(readFileSync(f, 'utf8')).questions as Row[]).map((q) => [q.id, q]));

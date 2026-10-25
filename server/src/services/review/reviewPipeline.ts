@@ -21,6 +21,7 @@ import { runAdversarialBatch } from './adversarial.js';
 import { fixQuestion } from './fixer.js';
 import { saveJobSnapshots } from '../snapshots.js';
 import { regenerateQuestionImage, isImageGenerationAvailable } from '../images/imageGeneration.js';
+import { alignWithImage, isImageConflict, savedFields } from './keyAdjudication.js';
 import { startTracking, getStepTokens } from '../llm/tokenTracker.js';
 import { distributionForJob } from '../generation/distribution.js';
 import { changedFields } from '../audit/fixHistory.js';
@@ -188,6 +189,29 @@ function tagOtherExam(q: Record<string, unknown>, other: { exam: string; reason:
 }
 
 /**
+ * Text repairs held while an item's image was wrong (changeRouting.ts), applied once the image step is
+ * done — whether it redrew the image, fitted the question to it, or failed. Before, they were dropped:
+ * a 400-question run left a dental radiograph item flagged with ten held repairs never attempted.
+ */
+async function applyHeldFixes(id: string, held: string[], courseName: string): Promise<boolean> {
+  const { data: q } = await supabase.from('qb_questions').select('*').eq('id', id).single();
+  if (!q) return false;
+  const asks = held.filter((c) => !isImageConflict(c));
+  if (!asks.length) return false;
+  const fix = await fixQuestion(q, asks, courseName);
+  const trail = Array.isArray(q.audit_trail) ? [...(q.audit_trail as unknown[])] : [];
+  const snap = (x: Record<string, unknown>) => ({ question: x.question, options: x.options, correct_option: x.correct_option, explanation: x.explanation, content: x.content });
+  if (!fix.fixed || !fix.question) {
+    trail.push({ phase: 'held_fix_failed', changes_requested: asks, error: fix.error || 'no usable question', timestamp: new Date().toISOString() });
+    await supabase.from('qb_questions').update({ audit_trail: trail }).eq('id', id);
+    return false;
+  }
+  trail.push({ phase: 'held_fix', changes_requested: asks, changes_applied: fix.changesApplied || [], before: snap(q), after: snap(fix.question), changed_fields: changedFields(snap(q), snap(fix.question)), timestamp: new Date().toISOString() });
+  await supabase.from('qb_questions').update({ ...savedFields(fix.question), ...(fix.imageRemoved ? { image_url: null, is_image_question: false } : {}), audit_trail: trail }).eq('id', id);
+  return true;
+}
+
+/**
  * Split a reviewer's requests (changeRouting.ts) and record the ones that do not go to the fixer,
  * so the trail shows every request and where it went.
  */
@@ -268,7 +292,7 @@ async function runValidatorPhase(
     setStep(jobId, `[Validator] Batch ${batchNum}/${batchesTotal}: processing scores for Q${qStart}–Q${qEnd}`);
 
     const toFix: Array<{ dbId: string; question: Record<string, unknown>; changesRequired: string[] }> = [];
-    const imageRegenQueue: Array<{ dbId: string; feedback: string[] }> = [];
+    const imageRegenQueue: Array<{ dbId: string; feedback: string[]; held?: string[] }> = [];
 
     for (let i = 0; i < batch.length; i++) {
       const q = batch[i];
@@ -315,9 +339,15 @@ async function runValidatorPhase(
         timestamp: new Date().toISOString(),
       });
 
+      // The blind verdict on the image the item has now (validator.ts): a failed one blocks approval while
+      // that image stays (shared.gradabilityIssues), so a real image no replacement could improve on is
+      // flagged rather than passed.
+      const blindCheck = result.image_check as Record<string, unknown> | undefined;
+      const tags = otherExam ? tagOtherExam(q, otherExam) : blindCheck ? { ...((q.tags as Record<string, unknown>) || {}) } : null;
+      if (tags && blindCheck) tags.image_check = blindCheck;
       await supabase.from('qb_questions').update({
         validator_score: score, audit_trail: trail,
-        ...(otherExam ? { tags: tagOtherExam(q, otherExam) } : {}),
+        ...(tags ? { tags } : {}),
       }).eq('id', q.id);
       totalReviewed++;
 
@@ -329,8 +359,8 @@ async function runValidatorPhase(
       }
 
       // Queue image regeneration if reviewer flagged image issues (from dedicated fields OR changes_required)
-      if (q.is_image_question && routed.image.length > 0) {
-        imageRegenQueue.push({ dbId: q.id as string, feedback: routed.image });
+      if (routed.image.length > 0 && (q.is_image_question || routed.image.some((c) => /^IMAGE (MISSING|NOT LOADING):/.test(c)))) {
+        imageRegenQueue.push({ dbId: q.id as string, feedback: routed.image, held: routed.heldForImage });
       }
     }
 
@@ -433,7 +463,7 @@ async function runValidatorPhase(
             .select('image_url, audit_trail').eq('id', item.dbId).single();
           const oldUrl = before?.image_url || null;
 
-          const success = await regenerateQuestionImage(item.dbId, jobId, item.feedback, { duringReview: true });
+          const success = await regenerateQuestionImage(item.dbId, jobId, item.feedback, { duringReview: true }).catch((e) => { console.warn(`  [Image] ${item.dbId}: image step failed — ${e instanceof Error ? e.message.slice(0, 120) : e}`); return false; });
 
           // Record before/after in audit trail
           const { data: after } = await supabase.from('qb_questions')
@@ -448,6 +478,11 @@ async function runValidatorPhase(
             timestamp: new Date().toISOString(),
           });
           await supabase.from('qb_questions').update({ audit_trail: trail }).eq('id', item.dbId);
+          // Image first; when no replacement passed its blind check, the smallest change that fits the image.
+          const conflicts = item.feedback.filter(isImageConflict);
+          if (!success && conflicts.length) await alignWithImage(jobId, item.dbId, conflicts, courseName).catch(() => false);
+          // The text repairs held while the picture was wrong, applied to the item as it now stands.
+          if (item.held?.length) await applyHeldFixes(item.dbId, item.held, courseName).catch(() => false);
         })
       );
     }
@@ -549,7 +584,7 @@ async function runAdversarialPhase(
     setStep(jobId, `[Adversarial] Batch ${batchNum}/${batchesTotal}: processing scores for Q${qStart}–Q${qEnd}`);
 
     const toFix: Array<{ dbId: string; question: Record<string, unknown>; changesRequired: string[] }> = [];
-    const imageRegenQueue: Array<{ dbId: string; feedback: string[] }> = [];
+    const imageRegenQueue: Array<{ dbId: string; feedback: string[]; held?: string[] }> = [];
 
     for (let i = 0; i < batch.length; i++) {
       const q = batch[i];
@@ -599,8 +634,8 @@ async function runAdversarialPhase(
       }
 
       // Queue image regeneration if reviewer flagged image issues (from dedicated fields OR changes_required)
-      if (q.is_image_question && routed.image.length > 0) {
-        imageRegenQueue.push({ dbId: q.id as string, feedback: routed.image });
+      if (routed.image.length > 0 && (q.is_image_question || routed.image.some((c) => /^IMAGE (MISSING|NOT LOADING):/.test(c)))) {
+        imageRegenQueue.push({ dbId: q.id as string, feedback: routed.image, held: routed.heldForImage });
       }
     }
 
@@ -698,7 +733,7 @@ async function runAdversarialPhase(
             .select('image_url, audit_trail').eq('id', item.dbId).single();
           const oldUrl = before?.image_url || null;
 
-          const success = await regenerateQuestionImage(item.dbId, jobId, item.feedback, { duringReview: true });
+          const success = await regenerateQuestionImage(item.dbId, jobId, item.feedback, { duringReview: true }).catch((e) => { console.warn(`  [Image] ${item.dbId}: image step failed — ${e instanceof Error ? e.message.slice(0, 120) : e}`); return false; });
 
           const { data: after } = await supabase.from('qb_questions')
             .select('image_url, audit_trail').eq('id', item.dbId).single();
@@ -712,6 +747,11 @@ async function runAdversarialPhase(
             timestamp: new Date().toISOString(),
           });
           await supabase.from('qb_questions').update({ audit_trail: trail }).eq('id', item.dbId);
+          // Image first; when no replacement passed its blind check, the smallest change that fits the image.
+          const conflicts = item.feedback.filter(isImageConflict);
+          if (!success && conflicts.length) await alignWithImage(jobId, item.dbId, conflicts, courseName).catch(() => false);
+          // The text repairs held while the picture was wrong, applied to the item as it now stands.
+          if (item.held?.length) await applyHeldFixes(item.dbId, item.held, courseName).catch(() => false);
         })
       );
     }

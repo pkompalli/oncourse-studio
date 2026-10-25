@@ -12,7 +12,9 @@ import OpenAI from 'openai';
 import { supabase } from '../../db/supabase.js';
 import { fetchAllRows } from '../../db/pagination.js';
 import crypto from 'crypto';
-import { checkImage, imageCheckFix, type ImageCheck } from './imageCheck.js';
+import { checkImageVoted, imageCheckFix, type ImageCheck } from './imageCheck.js';
+import { isEcgImage, specifyEcg, renderEcgPng, type EcgSpec } from './ecgRender.js';
+import { specifyImage, applySpec } from './imageSpec.js';
 
 // Attempts at a clinical image that fails its blind check (the first draw plus redraws).
 const IMAGE_CHECK_ATTEMPTS = Number(process.env.IMAGE_CHECK_ATTEMPTS) || 3;
@@ -214,11 +216,29 @@ IMAGE NEEDED: ${subject}${imageType && imageType !== subject ? `\nIMAGE TYPE: ${
 
   prompt += `\n\nStyle: clean, professional, textbook-quality. Generate ONLY the precise image needed — no decorative borders, no surrounding infographic elements.`;
 
-  if (isClinicalStudy(imageType, subject)) {
+  // A marked figure (an "identify the structure marked X" item, a quarter of NEET PG image items): the
+  // markers are the only text. Routed to the fully-labelled diagram path, an anatomy drawing came back
+  // with every structure named — the answer written on the picture.
+  const markers = (Array.isArray(questionData.image_markers) ? questionData.image_markers : []) as Array<{ label: string; target: string }>;
+  if (markers.length) {
+    prompt += `
+- This figure is MARKED for the candidate: ${markers.map((m) => (m.label === 'arrow' ? 'one plain arrow with no text' : `the letter "${m.label}" with a short thin arrow or leader line`)).join('; ')} — each arrow's tip touching exactly its target structure (listed above). Place any letter in empty space beside the figure so it covers nothing.
+- ${markers.some((m) => m.label !== 'arrow') ? 'The marker letters are the ONLY text in the image' : 'There is NO text in the image at all'}: no words, structure names, captions, titles or legends — never write the word "arrow" or describe a marker in words. The candidate must identify what each marker points to.
+- Draw the region accurately, as in a standard anatomy or pathology atlas, so that each target can be told apart from its neighbours.
+- Do not depict identifiable real people.${isClinicalStudy(imageType, subject) ? modalityGuidance(imageType, subject) : ''}`;
+  } else if (isClinicalStudy(imageType, subject)) {
     prompt += `
 - Render it as the study itself appears in a real exam, for the candidate to interpret: NO title, caption, arrows, callouts, circles, measurement marks or any text naming a finding, diagnosis or value — even where the description above names a finding or gives a figure title. Draw the findings; do not write them.
 - Only the text a real study carries: a side marker (R/L) on imaging; lead names, the standard grid and a calibration pulse on an ECG; nothing on a photograph or slide.
 - Do not depict identifiable real people.${modalityGuidance(imageType, subject)}`;
+  } else if (needsLabels && /MUST NOT APPEAR/.test(subject)) {
+    // A specification (imageSpec.ts) lists text that would give the answer away. The fully-labelled
+    // path below overrode it: a Seldinger-technique item came back with every step captioned
+    // ("Guidewire", "Access needle"), naming the procedure the question asks for.
+    prompt += `
+- Label ONLY what a reader must read to answer — axis titles, units, plotted values, a legend for data series. Never label or caption the thing the question asks the candidate to identify, and never write any of the text listed under MUST NOT APPEAR.
+- Spell any label correctly in clear English and keep it short.
+- Do not depict identifiable real people.`;
   } else if (needsLabels) {
     prompt += `
 - This is a ${imageType || 'diagram'}: EVERY node, box, arrow, axis, column, and step MUST carry concise, correct, legible text taken from the question context above. Empty or unlabeled shapes are unacceptable.
@@ -425,6 +445,88 @@ Return ONLY the rewritten text, with no preamble, no quotes and no explanation.`
   }
 }
 
+/**
+ * Draw an image and check it blind (imageCheck.ts), redrawing with the read and the missing findings as
+ * corrections up to IMAGE_CHECK_ATTEMPTS times. The last attempt is returned either way, with its
+ * verdict. Every image is checked, not only clinical studies: a labelled anatomy drawing whose arrow
+ * touches the wrong structure, or whose labels name the answer, fails the item as surely as a wrong ECG.
+ */
+export async function drawCheckedImage(
+  question: Record<string, unknown>, fixInstructions?: string, qNum: unknown = question.question_number,
+): Promise<{ result: Awaited<ReturnType<typeof generateImageWithOpenAI>>; check: ImageCheck | null; attempts: number; history: ImageCheck[]; source?: string; ecgSpec?: EcgSpec }> {
+  // An ECG is drawn from numbers when its finding fits the renderer (ecgRender.ts); the image model
+  // only when it does not (a paced rhythm, an axis question).
+  if (isEcgImage(question)) {
+    const ecg = await drawCheckedEcg(question, fixInstructions, qNum);
+    if (ecg) return ecg;
+  }
+  // A failed call (timeout, 5xx, a stream the proxy cut — "terminated") is retried; a content-policy
+  // refusal is not, since it is the same answer every time.
+  // A refusal gets one reframed attempt as a schematic textbook illustration: a photo-real infant with a
+  // drug-induced limb malformation was refused, and the subject is ordinary in a teratology atlas.
+  const REFRAME = 'RENDERING: draw this as a non-photographic medical textbook line illustration (clean schematic drawing, flat colours, as in a teratology or clinical atlas) — not a photograph, and no realistic or identifiable person. Keep every finding listed above.';
+  const draw = async (fix?: string) => {
+    for (let t = 1; ; t++) {
+      const r = await generateImageWithOpenAI(question, fix);
+      if (r && 'safetyRefused' in r) {
+        console.warn(`    [openai-img] Q${qNum}: refused — one attempt as a schematic textbook illustration`);
+        return (await generateImageWithOpenAI(question, [fix, REFRAME].filter(Boolean).join('\n\n'))) ?? r;
+      }
+      if (r || t === 3) return r;
+      await new Promise((res) => setTimeout(res, 30_000 * t));
+    }
+  };
+  let result = await draw(fixInstructions);
+  let check: ImageCheck | null = null;
+  const history: ImageCheck[] = [];
+  let attempts = 1;
+  if (result && !('safetyRefused' in result)) {
+    for (; attempts <= IMAGE_CHECK_ATTEMPTS; attempts++) {
+      // A check the proxy dropped is not a verdict: one more try after a pause before giving up.
+      check = null;
+      for (let t = 1; t <= 2 && !check; t++) {
+        try { check = await checkImageVoted(question, result.imageBytes, result.mimeType); } catch (e) {
+          console.warn(`    [img-check] Q${qNum}: check failed to run (try ${t}/2) — ${e instanceof Error ? e.message.slice(0, 120) : e}`);
+          if (t < 2) await new Promise((r) => setTimeout(r, 60_000));
+        }
+      }
+      if (!check) break;
+      history.push(check);
+      console.log(`    [img-check] Q${qNum} attempt ${attempts}: ${check.pass ? 'pass' : `fail — ${check.missing.join('; ').slice(0, 160)}`}`);
+      if (check.pass || attempts === IMAGE_CHECK_ATTEMPTS) break;
+      const next = await draw([fixInstructions, imageCheckFix(check)].filter(Boolean).join('\n\n'));
+      if (!next || 'safetyRefused' in next) break;
+      result = next;
+    }
+  }
+  return { result, check, attempts, history };
+}
+
+/** An ECG rendered from a specification and checked blind; the specification is rewritten from the read on a fail. */
+async function drawCheckedEcg(question: Record<string, unknown>, fixInstructions: string | undefined, qNum: unknown) {
+  let spec = await specifyEcg(question, fixInstructions);
+  if (!spec) { console.log(`    [ecg] Q${qNum}: finding not drawable from a specification — image model`); return null; }
+  const history: ImageCheck[] = [];
+  let check: ImageCheck | null = null, png: Buffer = renderEcgPng(spec), attempts = 1;
+  for (; attempts <= IMAGE_CHECK_ATTEMPTS; attempts++) {
+    check = null;
+    for (let t = 1; t <= 2 && !check; t++) {
+      try { check = await checkImageVoted(question, png); } catch (e) {
+        console.warn(`    [img-check] Q${qNum}: check failed to run (try ${t}/2) — ${e instanceof Error ? e.message.slice(0, 120) : e}`);
+        if (t < 2) await new Promise((r) => setTimeout(r, 60_000));
+      }
+    }
+    if (!check) break;
+    history.push(check);
+    console.log(`    [img-check] Q${qNum} ECG attempt ${attempts} (${spec.rhythm}${spec.layout === '12_lead' ? ', 12-lead' : ''}): ${check.pass ? 'pass' : `fail — ${check.missing.join('; ').slice(0, 140)}`}`);
+    if (check.pass || attempts === IMAGE_CHECK_ATTEMPTS) break;
+    const next = await specifyEcg(question, imageCheckFix(check));
+    if (!next) break;
+    spec = next; png = renderEcgPng(spec);
+  }
+  return { result: { imageBytes: png, mimeType: 'image/png' }, check, attempts, history, source: 'Rendered from an ECG specification (ecgRender.ts)', ecgSpec: spec };
+}
+
 // ── Generate and store image for a single question ──
 
 async function generateAndStoreImage(
@@ -436,25 +538,9 @@ async function generateAndStoreImage(
   const qId = question.id as string;
   const qNum = question.question_number as number;
 
-  let result = await generateImageWithOpenAI(question, fixInstructions);
-  // Blind check (imageCheck.ts) before the image is kept; a failed check redraws with the read and the
-  // missing findings as corrections. The last attempt is kept either way, with its verdict on the row,
-  // and gradabilityIssues holds a failed one back from approval. Charts and diagrams are drawn from
-  // their stated data and checked by review; the blind read is for clinical studies and photographs.
-  let check: ImageCheck | null = null;
-  if (result && !('safetyRefused' in result) && isClinicalStudy(String(question.image_type || ''), String(question.image_description || ''))) {
-    for (let attempt = 1; attempt <= IMAGE_CHECK_ATTEMPTS; attempt++) {
-      try { check = await checkImage(question, result.imageBytes, result.mimeType); } catch (e) {
-        console.warn(`    [img-check] Q${qNum}: check failed to run — ${e instanceof Error ? e.message.slice(0, 120) : e}`);
-        check = null; break;
-      }
-      console.log(`    [img-check] Q${qNum} attempt ${attempt}: ${check.pass ? 'pass' : `fail — ${check.missing.join('; ').slice(0, 160)}`}`);
-      if (check.pass || attempt === IMAGE_CHECK_ATTEMPTS) break;
-      const next = await generateImageWithOpenAI(question, [fixInstructions, imageCheckFix(check)].filter(Boolean).join('\n\n'));
-      if (!next || 'safetyRefused' in next) break;
-      result = next;
-    }
-  }
+  const drawn = await drawCheckedImage(question, fixInstructions, qNum);
+  const result = drawn.result;
+  const check = drawn.check;
   if (result && 'safetyRefused' in result) {
     // A REPLACEMENT was refused, and the question still has the image it had. Keep it: the
     // fallback below is for a question whose image never existed, and run here it removed a real
@@ -474,6 +560,16 @@ async function generateAndStoreImage(
     console.warn(`    ✗ Image generation failed for Q${qNum}`);
     return false;
   }
+  // A REPLACEMENT that failed every blind check is worse than the image it would replace, for the same
+  // reason as a refused one above. In a NEET PG pilot a real champagne-glass pelvis radiograph was
+  // swapped for a drawing whose blind read named a different pelvis, three times. Keep the existing
+  // image and record the failed attempt; review's finding about the original stands for audit.
+  if (question.image_url && (!check || !check.pass)) {
+    console.warn(`    ✗ Replacement image for Q${qNum} ${check ? `failed the blind check ${IMAGE_CHECK_ATTEMPTS} times` : 'could not be checked'} — keeping the existing image`);
+    const { data: cur } = await supabase.from('qb_questions').select('tags').eq('id', qId).single();
+    await supabase.from('qb_questions').update({ tags: { ...((cur?.tags as Record<string, unknown>) || {}), image_replacement_rejected: { ...check, at: new Date().toISOString() } } }).eq('id', qId);
+    return false;
+  }
 
   const publicUrl = await uploadImageToStorage(result.imageBytes, result.mimeType, jobId, qId);
   if (!publicUrl) {
@@ -481,14 +577,18 @@ async function generateAndStoreImage(
   }
 
   // Update image URL, media array, and clear stale structural-failure scores if present
-  const imageSource = `AI Generated (${OPENAI_IMAGE_MODEL})`;
+  const imageSource = drawn.source ?? `AI Generated (${OPENAI_IMAGE_MODEL})`;
   const updateData: Record<string, unknown> = {
     image_url: publicUrl,
     image_source: imageSource,
+    // The specification it was drawn from (imageSpec.ts), so a later check or redraw reads the same one.
+    ...(question.image_type ? { image_type: question.image_type } : {}),
+    ...(question.image_description ? { image_description: question.image_description } : {}),
+    is_image_question: true,
   };
   if (check) {
     const { data: cur } = await supabase.from('qb_questions').select('tags').eq('id', qId).single();
-    updateData.tags = { ...((cur?.tags as Record<string, unknown>) || {}), image_check: { ...check, url: publicUrl } };
+    updateData.tags = { ...((cur?.tags as Record<string, unknown>) || {}), image_check: { ...check, url: publicUrl }, ...(drawn.ecgSpec ? { ecg_spec: drawn.ecgSpec } : {}) };
   }
 
   // Update media array — set url and source on the first media entry, or create one
@@ -644,13 +744,14 @@ export async function regenerateQuestionImage(
 ): Promise<boolean> {
   if (!openaiClient) return false;
 
-  const { data: question, error } = await supabase
+  const { data: row, error } = await supabase
     .from('qb_questions')
     .select('*')
     .eq('id', questionId)
     .single();
 
-  if (error || !question) return false;
+  if (error || !row) return false;
+  let question = row as Record<string, unknown>;
 
   // Never hand a PLOTTED figure back to the image model.
   //
@@ -668,12 +769,45 @@ export async function regenerateQuestionImage(
     console.log(`    ↩︎ Q${question.question_number}: image was plotted from its specification, not regenerating — re-run its renderer instead`);
     return false;
   }
+  // Every image is drawn from a specification written from the question, its key and explanation, and
+  // the review findings (imageSpec.ts). An imported item has no image type or description of its own,
+  // and drawn from the stem alone a NEET PG pilot's redraws contradicted 13 of 20 keys — a rib-notching
+  // film became arrows on hilar markings, a hyperkalaemia ECG a broad-complex tachycardia.
+  const spec = await specifyImage(question, { course: String(question.course || ''), feedback: reviewFeedback });
+  // A question answerable without its image is made text-only rather than redrawn: no picture can be part
+  // of it. In the 400-question run, recall items whose live "image" was a screenshot of the stem got a new
+  // drawing three times over and were flagged every time for an image the answer did not depend on.
+  if (spec && !spec.image_needed && question.image_url) return dropImage(question, spec.needed_reason);
+  if (spec) question = applySpec(question, spec) as typeof question;
 
   // Build fix instructions from review feedback
   const fixInstructions = reviewFeedback.join('\n');
 
   console.log(`    🔄 Re-generating image for Q${question.question_number} with review feedback`);
   return generateAndStoreImage(question, jobId, fixInstructions, opts);
+}
+
+/** Make an image item text-only (the image was not needed). Returns whether it was done. */
+async function dropImage(question: Record<string, unknown>, reason: string): Promise<boolean> {
+  const { fixQuestion } = await import('../review/fixer.js');
+  const fix = await fixQuestion(question, [`IMAGE DROP: ${reason || 'The question can be answered without its image.'}`], String(question.course || ''));
+  const trail = Array.isArray(question.audit_trail) ? [...(question.audit_trail as unknown[])] : [];
+  if (!fix.fixed || !fix.question) {
+    trail.push({ phase: 'image_drop_failed', reason, error: fix.error || 'no usable question', timestamp: new Date().toISOString() });
+    await supabase.from('qb_questions').update({ audit_trail: trail }).eq('id', question.id);
+    console.warn(`    ✗ Q${question.question_number}: image not needed, but the text-only rewrite failed — ${fix.error ?? ''}`);
+    return false;
+  }
+  const f = fix.question;
+  trail.push({ phase: 'image_dropped', reason, removed_image: question.image_url, before: { question: question.question }, after: { question: f.question }, timestamp: new Date().toISOString() });
+  await supabase.from('qb_questions').update({
+    question: f.question, options: f.options, correct_option: f.correct_option, explanation: f.explanation,
+    ...(f.content && typeof f.content === 'object' ? { content: { ...(f.content as object), question_type: 'text' } } : {}),
+    image_url: null, is_image_question: false, image_source: 'Removed — the question does not need an image',
+    audit_trail: trail,
+  }).eq('id', question.id);
+  console.log(`    ↩︎ Q${question.question_number}: image not needed — made text-only (${reason.slice(0, 100)})`);
+  return true;
 }
 
 export function isImageGenerationAvailable(): boolean {
