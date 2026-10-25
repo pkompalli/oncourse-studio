@@ -15,6 +15,7 @@
  *   npx tsx src/scripts/importUsmleExport.ts --limit 20 --offset 75   # dry run of a pilot: 20 per Step
  *   npx tsx src/scripts/importUsmleExport.ts --limit 20 --offset 75 --apply
  *   npx tsx src/scripts/importUsmleExport.ts --apply                  # everything
+ *   … --tags "A,B"    live-bank tags for every exported question of these jobs (exportSimple.ts)
  *   … --course <id>   any other export (e.g. exportLiveNeetPg.ts): every question into that one course,
  *                     no Step routing; the job records the export file's own filter
  */
@@ -50,6 +51,8 @@ const AS_STEP = argStr('as') as Step | '';
 const MANIFEST = argStr('manifest');
 // --course <id>: one course for the whole file instead of routing by USMLE Step.
 const ONE_COURSE = argStr('course');
+// --tags "NEET-PG,CLEAN OCT": the live-bank tags every exported question of these jobs carries (exportSimple.ts).
+const EXPORT_TAGS = argStr('tags') ? argStr('tags').split(',').map((t) => t.trim()).filter(Boolean) : null;
 const created: Array<{ job: string; step: string; count: number }> = [];
 
 type Step = 'step1' | 'step2' | 'step3' | 'course';
@@ -200,6 +203,7 @@ for (const step of Object.keys(COURSES) as Step[]) {
       source_file: IN.split('/').pop(),
       source_filter: ONE_COURSE ? exported.filter ?? null : "course 'US Medical PG', created_at > 2025-01-31",
       ...(ONE_COURSE ? {} : { step }),
+      ...(EXPORT_TAGS ? { export_tags: EXPORT_TAGS } : {}),
       pilot: Boolean(LIMIT),
       ...(CHUNK > 0 ? { full_run: true, chunk: c0 / size + 1 } : {}),
       imported_at: new Date().toISOString(),

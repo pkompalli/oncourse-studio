@@ -27,9 +27,10 @@ const si = process.argv.indexOf('--source');
 if (!jobIds.length) { console.log('usage: exportReviewed.ts <jobId> [<jobId> …] --out <path-without-extension>'); process.exit(1); }
 // Plus the file each job records it was imported from (config.source_file), wherever under backups/ it
 // sits: a NEET PG export lives in backups/neetpg_export, not beside the USMLE ones.
-const { data: jobCfgs } = await supabase.from('qb_jobs').select('config').in('id', jobIds);
+const { data: jobCfgs } = await supabase.from('qb_jobs').select('id, config').in('id', jobIds);
 const jobSources = [...new Set((jobCfgs || []).map((j) => String((j.config as Row | null)?.source_file ?? '')).filter(Boolean))]
   .flatMap((name) => readdirSync('backups', { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => `backups/${d.name}/${name}`));
+const jobExportTags = new Map((jobCfgs || []).map((j) => [String((j as Row).id ?? ''), ((j.config as Row | null)?.export_tags as string[] | undefined) ?? null]));
 const SOURCES = si >= 0 ? [process.argv[si + 1]] : [...new Set([
   'backups/usmle_export/usmle_questions_post_2025-01-31.json',
   'backups/usmle_export/usmle_questions_pre_2025-01-31.json',
@@ -126,6 +127,7 @@ const out = rows.filter((q) => !ONLY || ONLY.has(q.id)).map((q) => {
     subject: q.subject, topic: q.topic,
     status: q.status,
     exam_tags: tags.exam_tags ?? [],
+    export_tags: jobExportTags.get(q.job_id) ?? null,
     belongs_to_exam: tags.belongs_to_exam ?? null,
     out_of_scope_reason: tags.out_of_scope_reason ?? null,
     scores: { validator: q.validator_score, adversarial: q.adversarial_score, audit: q.quality_score },

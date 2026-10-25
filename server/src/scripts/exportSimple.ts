@@ -40,6 +40,9 @@ const chosen = rows.filter((q) => (ALL || q.status === 'approved') && (!ONLY || 
 const courseIds = [...new Set(rows.map((q) => q.course_id).filter(Boolean))];
 const { data: courseRows } = courseIds.length ? await supabase.from('qb_courses').select('id, name').in('id', courseIds) : { data: [] };
 const courseName = new Map((courseRows || []).map((c: Row) => [c.id, String(c.name)]));
+// Live-bank tags set at import (importUsmleExport --tags), e.g. ["NEET-PG", "CLEAN OCT"]: used as given.
+const { data: jobRows } = await supabase.from('qb_jobs').select('id, config').in('id', jobIds);
+const jobTags = new Map((jobRows || []).map((j: Row) => [j.id, Array.isArray(j.config?.export_tags) ? (j.config.export_tags as string[]) : null]));
 
 const out: Row[] = [];
 let missingImages = 0;
@@ -67,7 +70,8 @@ for (const q of chosen) {
     original_question_id: tags.source_question_id ?? null,
     difficulty: q.difficulty ?? tags.difficulty ?? null,
     blooms_level: q.blooms_level ?? tags.blooms ?? null,
-    tags: step ? ['USMLE', STEP_TAG[step] ?? 'USMLE'] : [courseName.get(q.course_id) ?? 'Unknown', ...(bowTie ? ['Bow-Tie'] : [])],
+    tags: jobTags.get(q.job_id) ? [...jobTags.get(q.job_id)!, ...(bowTie ? ['Bow-Tie'] : [])]
+      : step ? ['USMLE', STEP_TAG[step] ?? 'USMLE'] : [courseName.get(q.course_id) ?? 'Unknown', ...(bowTie ? ['Bow-Tie'] : [])],
   });
 }
 
