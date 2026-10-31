@@ -214,16 +214,16 @@ for (const step of Object.keys(COURSES) as Step[]) {
   }
 
   const rows = part.map(({ q, from }, i) => toRow(q, step, from, job.id, course.name, i + 1));
-  for (let i = 0; i < rows.length; i += 500) {
-    const { error } = await supabase.from('qb_questions').insert(rows.slice(i, i + 500));
-    if (error) throw new Error(`insert ${step} rows ${i}–${i + 499}: ${error.message}`);
+  // 100 rows a statement: 500 rows carrying inline images ran past the statement timeout.
+  for (let i = 0; i < rows.length; i += 100) {
+    const { error } = await supabase.from('qb_questions').insert(rows.slice(i, i + 100));
+    if (error) throw new Error(`insert ${step} rows ${i}–${i + 99} into job ${job.id}: ${error.message}`);
   }
   console.log(`  ${INTO_JOB ? "filled" : "created"} job ${job.id} with ${rows.length} questions`);
   created.push({ job: job.id, step, count: rows.length });
+  // Written after every job, so a failure part-way still leaves the jobs already made on record.
+  if (MANIFEST) writeFileSync(MANIFEST, JSON.stringify({ created_at: new Date().toISOString(), jobs: created }, null, 2));
   }
 }
-if (MANIFEST && created.length) {
-  writeFileSync(MANIFEST, JSON.stringify({ created_at: new Date().toISOString(), jobs: created }, null, 2));
-  console.log(`manifest: ${created.length} jobs → ${MANIFEST}`);
-}
+if (MANIFEST && created.length) console.log(`manifest: ${created.length} jobs → ${MANIFEST}`);
 if (!APPLY) console.log('dry run — rerun with --apply to create the jobs');

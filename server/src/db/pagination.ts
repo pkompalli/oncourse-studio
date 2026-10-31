@@ -15,7 +15,9 @@
  *       .range(from, to)
  *   );
  */
-const PAGE_SIZE = 1000;
+// 200, not PostgREST's 1000: a 500-question job read with select('*') carries every inline image, and
+// several of those at once ran past the statement timeout. A timed-out page is retried before giving up.
+const PAGE_SIZE = 200;
 
 export async function fetchAllRows<T>(
   buildQuery: (from: number, to: number) => PromiseLike<{ data: T[] | null; error: { message: string } | null }>
@@ -23,7 +25,11 @@ export async function fetchAllRows<T>(
   const all: T[] = [];
   let from = 0;
   for (;;) {
-    const { data, error } = await buildQuery(from, from + PAGE_SIZE - 1);
+    let { data, error } = await buildQuery(from, from + PAGE_SIZE - 1);
+    for (let attempt = 1; error && /statement timeout|terminated|fetch failed/i.test(error.message) && attempt <= 3; attempt++) {
+      await new Promise((r) => setTimeout(r, attempt * 5000));
+      ({ data, error } = await buildQuery(from, from + PAGE_SIZE - 1));
+    }
     if (error) throw new Error(error.message);
     const rows = data || [];
     all.push(...rows);

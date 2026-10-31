@@ -12,6 +12,8 @@
  *   npx tsx src/scripts/exportLiveNeetPg.ts --bitmap backups/neetpg_export/selection_bitmap.json \
  *     --out backups/neetpg_export/neetpg_10k_sample.json
  *
+ * Any other selection over the same universe works the same way; --filter records how it was built.
+ *
  * Reads only: every statement runs in a READ ONLY transaction.
  */
 import 'dotenv/config';
@@ -76,7 +78,8 @@ const pct = (x: number) => `${((100 * x) / tot.n).toFixed(1)}%`;
 console.log(`total ${tot.n}: image ${tot.image} (${pct(tot.image)}), easy/medium/hard ${pct(tot.easy)} / ${pct(tot.medium)} / ${pct(tot.hard)}`);
 console.table(Object.fromEntries(Object.entries(report).sort((a, b) => b[1].n - a[1].n)));
 
-const filter = `course 'Indian PG' (967d23a4-...), validated, tagged NEET-PG, not tagged PYQ; sampled by neetPgSample.sql to the 2019–2025 NEET PG papers' subject/topic/difficulty/image mix`;
+// --filter: how the bitmap was built, recorded in the file (default: the 10K sample of neetPgSample.sql).
+const filter = arg('filter') ?? `course 'Indian PG' (967d23a4-...), validated, tagged NEET-PG, not tagged PYQ; sampled by neetPgSample.sql to the 2019–2025 NEET PG papers' subject/topic/difficulty/image mix`;
 writeFileSync(out, JSON.stringify({ exported_at: new Date().toISOString().slice(0, 10), source_project: 'ylbwdadhbcjolwylidja', filter, selection_md5: bm.pick_md5, count: questions.length, distribution: { total: tot, by_subject: report }, questions }, null, 1));
 console.log(`wrote ${questions.length} to ${out}`);
 process.exit(0);

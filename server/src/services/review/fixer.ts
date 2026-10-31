@@ -278,7 +278,9 @@ export async function fixQuestion(
   // revision tested instead. Without it the item simply stayed flagged: on the 1,073 items the pre-2025
   // run left flagged, 82% had a repair written and refused, and nothing tried again.
   const mode = opts?.updateAnswer ? 'update' : 'strict';
-  if (conceptMayHaveMoved(question, first.question)) {
+  // CONCEPT_GUARD=off: a rework of items left flagged after every round, where a fix that changes what
+  // the item tests is accepted (the NEET PG PYQ rework); the final audit still has to pass it.
+  if (process.env.CONCEPT_GUARD !== 'off' && conceptMayHaveMoved(question, first.question)) {
     let v = await sameConcept(question, first.question, mode);
     if (!v.same) {
       console.warn(`  [Fixer] fix changed what the item tests ("${v.original}" -> "${v.revised}") — retrying with that constraint`);
