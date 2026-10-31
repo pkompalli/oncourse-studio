@@ -70,7 +70,9 @@ for (const q of chosen) {
     original_question_id: tags.source_question_id ?? null,
     difficulty: q.difficulty ?? tags.difficulty ?? null,
     blooms_level: q.blooms_level ?? tags.blooms ?? null,
-    tags: jobTags.get(q.job_id) ? [...jobTags.get(q.job_id)!, ...(bowTie ? ['Bow-Tie'] : [])]
+    // The run's tags first, then every tag the question has in the live bank (year tags, other exams),
+    // so writing it back loses none of them.
+    tags: jobTags.get(q.job_id) ? [...new Set([...jobTags.get(q.job_id)!, ...(Array.isArray(tags.live_tags) ? (tags.live_tags as string[]) : []), ...(bowTie ? ['Bow-Tie'] : [])])]
       : step ? ['USMLE', STEP_TAG[step] ?? 'USMLE'] : [courseName.get(q.course_id) ?? 'Unknown', ...(bowTie ? ['Bow-Tie'] : [])],
   });
 }

@@ -72,6 +72,8 @@ interface Exported {
   metadata: Record<string, unknown> | null;
   options: Array<{ id: string; text: string; is_correct: boolean }> | null;
   assets: Array<{ asset_id?: string; url?: string; description?: string | null }> | null;
+  /** The live bank's tag names (exportLive*.ts); carried back out by exportSimple. */
+  tags?: string[] | null;
 }
 
 const STEP1_SUBJECTS = new Set(['Anatomy', 'Physiology', 'Biochemistry', 'Microbiology', 'Pathology', 'Pharmacology', 'Immunology', 'Behavioral Science']);
@@ -141,6 +143,7 @@ function toRow(q: Exported, step: Step, from: string, jobId: string, courseName:
       source_validation_status: q.validation_status,
       source_created_at: q.created_at,
       ...(asset?.asset_id ? { source_asset_id: asset.asset_id } : {}),
+      ...(Array.isArray(q.tags) && q.tags.length ? { live_tags: q.tags } : {}),
     },
     media: [],
   };

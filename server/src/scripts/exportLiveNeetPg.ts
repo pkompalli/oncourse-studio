@@ -37,6 +37,12 @@ const client = new pg.Client({ connectionString: url, ssl: { rejectUnauthorized:
 await client.connect();
 await client.query('set session characteristics as transaction read only');
 
+// The live bank's tags (NEET-PG-2013, AIIMS-2017, PYQ …) ride along to the import and back out in the
+// final export (exportSimple.ts), so a write-back keeps every year filter. The export role needs
+// SELECT on tags and question_tags; without it this stops rather than silently dropping them.
+const { rows: [priv] } = await client.query(`select has_table_privilege('tags', 'select') and has_table_privilege('question_tags', 'select') as ok`);
+if (!priv.ok) throw new Error(`the export role cannot read tags/question_tags — grant it: grant select on public.tags, public.question_tags to qbank_export_ro;`);
+
 const { rows: [u] } = await client.query(`
   select count(*)::int as n, md5(string_agg(q.id::text, ',' order by q.id)) as md5, array_agg(q.id::text order by q.id) as ids
   from questions q join topics t on t.id = q.topic_id join subjects s on s.id = t.subject_id
@@ -57,7 +63,9 @@ for (let i = 0; i < ids.length; i += PAGE) {
            coalesce((select json_agg(json_build_object('id', o.id, 'text', o.option_text, 'is_correct', o.is_correct) order by o.id)
                      from options o where o.question_id = q.id), '[]'::json) as options,
            coalesce((select json_agg(json_build_object('asset_id', a.id, 'url', a.public_url, 'description', a.description) order by qa.created_at)
-                     from question_assets qa join assets a on a.id = qa.asset_id where qa.question_id = q.id), '[]'::json) as assets
+                     from question_assets qa join assets a on a.id = qa.asset_id where qa.question_id = q.id), '[]'::json) as assets,
+           coalesce((select json_agg(tg.name order by tg.name) from question_tags qt join tags tg on tg.id = qt.tag_id
+                     where qt.question_id = q.id), '[]'::json) as tags
     from questions q join topics t on t.id = q.topic_id join subjects s on s.id = t.subject_id
     where q.id = any($1::uuid[]) order by s.name, t.name, q.id`, [ids.slice(i, i + PAGE)]);
   questions.push(...rows);
